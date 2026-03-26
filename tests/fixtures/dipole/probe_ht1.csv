@@ -1,4 +1,4 @@
-% time-domain magnetic field probe by openEMS v0.0.36-145-g8ee535b @Thu Mar 26 14:14:12 2026
+% time-domain magnetic field probe by openEMS v0.0.36-145-g8ee535b @Thu Mar 26 19:34:38 2026
 % start-coordinates: (-0.0149896,1.04592e-16,1.04592e-16) m -> [35,40,40]
 % stop-coordinates: (-0.0149896,1.04592e-16,1.04592e-16) m -> [35,40,40]
 % t/s	Hx/(A/m)	Hy/(A/m)	Hz/(A/m)

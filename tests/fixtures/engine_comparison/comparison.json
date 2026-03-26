@@ -1,0 +1,24 @@
+{
+  "engines": [
+    "basic",
+    "sse",
+    "sse-compressed"
+  ],
+  "diffs": {
+    "basic_vs_sse": {
+      "max_abs_diff": 0.0,
+      "max_rel_diff": 0.0,
+      "samples_compared": 251
+    },
+    "basic_vs_sse-compressed": {
+      "max_abs_diff": 0.0,
+      "max_rel_diff": 0.0,
+      "samples_compared": 251
+    },
+    "sse_vs_sse-compressed": {
+      "max_abs_diff": 0.0,
+      "max_rel_diff": 0.0,
+      "samples_compared": 251
+    }
+  }
+}

@@ -434,6 +434,147 @@ def generate_constants():
 
 
 # --------------------------------------------------------------------------
+# Multi-engine comparison fixtures
+# --------------------------------------------------------------------------
+def generate_engine_comparison():
+    """Run the cavity simulation with all engines and save per-engine probe data
+    along with a comparison.json documenting the max diffs between engines."""
+    print("=== Engine comparison ===")
+
+    engines = ["basic", "sse", "sse-compressed"]
+    out_dir = os.path.join(FIXTURES, "engine_comparison")
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Use the same cavity XML as generate_cavity but with fewer timesteps
+    # for a quick but meaningful comparison
+    a = 5e-2
+    b = 2e-2
+    d = 6e-2
+    STEPS = 500
+
+    mesh_x = linspace(0, a, 16)
+    mesh_y = linspace(0, b, 8)
+    mesh_z = linspace(0, d, 18)
+
+    ex_i = 10
+    ey_i = 5
+    ez_i = 12
+
+    f_stop = 10e9
+    f0 = (f_stop + 1e9) / 2
+    fc = (f_stop - 1e9) / 2
+
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<openEMS>
+  <FDTD NumberOfTimesteps="{STEPS}" endCriteria="1e-20" f_max="{f_stop}">
+    <Excitation Type="0" f0="{f0}" fc="{fc}"/>
+    <BoundaryCond xmin="0" xmax="0" ymin="0" ymax="0" zmin="0" zmax="0"/>
+  </FDTD>
+  <ContinuousStructure CoordSystem="0">
+    <RectilinearGrid DeltaUnit="1" CoordSystem="0">
+      <XLines>{mesh_to_csv(mesh_x)}</XLines>
+      <YLines>{mesh_to_csv(mesh_y)}</YLines>
+      <ZLines>{mesh_to_csv(mesh_z)}</ZLines>
+    </RectilinearGrid>
+    <Properties>
+      <Excitation ID="0" Name="exc" Number="0" Type="0" Excite="1,1,1">
+        <Primitives>
+          <Curve Priority="0">
+            <Vertex X="{mesh_x[ex_i]}" Y="{mesh_y[ey_i]}" Z="{mesh_z[ez_i]}"/>
+            <Vertex X="{mesh_x[ex_i+1]}" Y="{mesh_y[ey_i+1]}" Z="{mesh_z[ez_i+1]}"/>
+          </Curve>
+        </Primitives>
+      </Excitation>
+      <ProbeBox ID="1" Name="vp" Number="0" Type="0" Weight="1" NormDir="-1">
+        <Primitives>
+          <Box Priority="0">
+            <P1 X="{mesh_x[5]}" Y="{mesh_y[3]}" Z="{mesh_z[4]}"/>
+            <P2 X="{mesh_x[5]}" Y="{mesh_y[3]}" Z="{mesh_z[5]}"/>
+          </Box>
+        </Primitives>
+      </ProbeBox>
+    </Properties>
+  </ContinuousStructure>
+</openEMS>"""
+
+    engine_data = {}
+
+    for engine in engines:
+        print(f"  Running engine: {engine}")
+        sim_path = os.path.join(out_dir, f"sim_{engine}")
+        os.makedirs(sim_path, exist_ok=True)
+
+        xml_path = os.path.join(sim_path, "cavity.xml")
+        with open(xml_path, "w") as f:
+            f.write(xml)
+
+        try:
+            run_openems(sim_path, xml_path, engine=engine)
+        except RuntimeError as e:
+            print(f"  WARNING: {engine} failed: {e}")
+            shutil.rmtree(sim_path, ignore_errors=True)
+            continue
+
+        probe_file = os.path.join(sim_path, "vp")
+        if os.path.exists(probe_file):
+            t, v = read_probe_csv(probe_file)
+            engine_data[engine] = {"time_s": t, "voltage": v}
+            # Also save the raw probe CSV
+            shutil.copy(
+                probe_file,
+                os.path.join(out_dir, f"probe_vp_{engine}.csv"),
+            )
+            print(f"  {engine}: {len(t)} samples")
+        else:
+            print(f"  WARNING: probe not found for {engine}")
+            print(f"  Files: {os.listdir(sim_path)}")
+
+        shutil.rmtree(sim_path, ignore_errors=True)
+
+    # Compute pairwise diffs
+    comparison = {"engines": list(engine_data.keys()), "diffs": {}}
+
+    engine_names = list(engine_data.keys())
+    for i in range(len(engine_names)):
+        for j in range(i + 1, len(engine_names)):
+            e1 = engine_names[i]
+            e2 = engine_names[j]
+            v1 = engine_data[e1]["voltage"]
+            v2 = engine_data[e2]["voltage"]
+            min_len = min(len(v1), len(v2))
+
+            max_abs = 0.0
+            max_rel = 0.0
+            for k in range(min_len):
+                abs_diff = abs(v1[k] - v2[k])
+                if abs_diff > max_abs:
+                    max_abs = abs_diff
+                denom = max(abs(v1[k]), abs(v2[k]))
+                if denom > 1e-30:
+                    rel_diff = abs_diff / denom
+                    if rel_diff > max_rel:
+                        max_rel = rel_diff
+
+            pair_key = f"{e1}_vs_{e2}"
+            comparison["diffs"][pair_key] = {
+                "max_abs_diff": max_abs,
+                "max_rel_diff": max_rel,
+                "samples_compared": min_len,
+            }
+            print(f"  {pair_key}: max_abs={max_abs:.3e}, max_rel={max_rel:.3e}")
+
+    # Save per-engine probe data
+    reference = {"engine_probes": engine_data}
+    with open(os.path.join(out_dir, "reference.json"), "w") as f:
+        json.dump(reference, f, indent=2)
+
+    with open(os.path.join(out_dir, "comparison.json"), "w") as f:
+        json.dump(comparison, f, indent=2)
+
+    print("  Engine comparison saved")
+
+
+# --------------------------------------------------------------------------
 if __name__ == "__main__":
     if not os.path.exists(OPENEMS):
         print(f"ERROR: Native openEMS not found at {OPENEMS}")
@@ -444,4 +585,5 @@ if __name__ == "__main__":
     generate_cavity()
     generate_coax()
     generate_dipole()
+    generate_engine_comparison()
     print("\n=== All fixtures generated ===")

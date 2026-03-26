@@ -42,6 +42,11 @@ export class CPUFDTDEngine {
         this.rlcElements = [];      // Lumped RLC elements
         this.murConfig = null;      // Mur ABC boundary
         this.steadyStateConfig = null; // Steady-state detection
+
+        // Fusion state
+        this._fusionConfig = null;  // PML+ADE fusion config
+        this._rlcRingIdx = 0;       // RLC ring buffer index (0, 1, or 2)
+        this._useRingBuffer = false; // Whether to use ring buffer for RLC
     }
 
     /**
@@ -449,6 +454,218 @@ export class CPUFDTDEngine {
     }
 
     // -----------------------------------------------------------------------
+    // PML + ADE Fusion
+    // -----------------------------------------------------------------------
+
+    /**
+     * Configure PML+ADE fusion. Detects overlapping cells between PML regions
+     * and ADE dispersive material cells, and builds a fused cell list.
+     *
+     * When fusion is active, step() will skip individual postVoltageUpdatePML
+     * and updateVoltADE calls for fused cells and run the fused path instead,
+     * reducing global memory bandwidth by 2x for cells in dispersive PML regions.
+     *
+     * For GPU (WebGPU), fusion is not applied — separate dispatches are kept
+     * since GPU memory bandwidth is less constrained.
+     *
+     * @param {Object} [config] - { enabled: boolean }
+     */
+    configureFusion(config = {}) {
+        const enabled = config.enabled !== false;
+        if (!enabled || this.pmlRegions.length === 0 || this.lorentzOrders.length === 0) {
+            this._fusionConfig = null;
+            return;
+        }
+
+        // Build a set of global field indices that are inside PML regions
+        // We track which PML region and local index each global index maps to
+        const pmlCellMap = new Map(); // globalIdx -> { regionIdx, localIdx_p, component_n }
+
+        for (let ri = 0; ri < this.pmlRegions.length; ri++) {
+            const region = this.pmlRegions[ri];
+            const [sx, sy, sz] = region.startPos;
+            const [nx, ny, nz] = region.numLines;
+
+            for (let lx = 0; lx < nx; lx++) {
+                const gx = lx + sx;
+                for (let ly = 0; ly < ny; ly++) {
+                    const gy = ly + sy;
+                    for (let lz = 0; lz < nz; lz++) {
+                        const gz = lz + sz;
+                        for (let n = 0; n < 3; n++) {
+                            const g = this.idx(n, gx, gy, gz);
+                            const p = n * nx * ny * nz + lx * ny * nz + ly * nz + lz;
+                            pmlCellMap.set(g, { regionIdx: ri, p, n });
+                        }
+                    }
+                }
+            }
+        }
+
+        // For each ADE order+direction, find cells that overlap with PML
+        const fusedCells = []; // array of { globalIdx, pmlInfo, adeEntries[] }
+        const fusedADEIndices = new Set(); // set of "orderIdx:dirIdx:cellI" strings for skipping
+
+        for (let oi = 0; oi < this.lorentzOrders.length; oi++) {
+            const order = this.lorentzOrders[oi];
+            for (let di = 0; di < order.directions.length; di++) {
+                const d = order.directions[di];
+                const componentStride = this.totalCells;
+
+                for (let i = 0; i < order.numCells; i++) {
+                    const fieldIdx = d.dir * componentStride + d.pos_idx[i];
+                    if (pmlCellMap.has(fieldIdx)) {
+                        const pmlInfo = pmlCellMap.get(fieldIdx);
+                        // Check if we already have a fused entry for this global idx
+                        let entry = fusedCells.find(e => e.globalIdx === fieldIdx);
+                        if (!entry) {
+                            entry = { globalIdx: fieldIdx, pmlInfo, adeEntries: [] };
+                            fusedCells.push(entry);
+                        }
+                        entry.adeEntries.push({ orderIdx: oi, dirIdx: di, cellIdx: i });
+                        fusedADEIndices.add(`${oi}:${di}:${i}`);
+                    }
+                }
+            }
+        }
+
+        if (fusedCells.length === 0) {
+            this._fusionConfig = null;
+            return;
+        }
+
+        // Build set of PML local indices to skip in normal PML post-voltage
+        const fusedPMLIndices = new Map(); // regionIdx -> Set of local p indices
+        for (const cell of fusedCells) {
+            const ri = cell.pmlInfo.regionIdx;
+            if (!fusedPMLIndices.has(ri)) {
+                fusedPMLIndices.set(ri, new Set());
+            }
+            fusedPMLIndices.get(ri).add(cell.pmlInfo.p);
+        }
+
+        this._fusionConfig = {
+            fusedCells,
+            fusedADEIndices,
+            fusedPMLIndices,
+        };
+    }
+
+    /**
+     * Fused PML post-voltage + ADE voltage update for overlapping cells.
+     * Reads voltage once, applies PML correction, updates all ADE orders, writes once.
+     */
+    _fusedPostVoltageAndADE() {
+        if (!this._fusionConfig) return;
+
+        for (const cell of this._fusionConfig.fusedCells) {
+            const g = cell.globalIdx;
+            const pml = cell.pmlInfo;
+            const region = this.pmlRegions[pml.regionIdx];
+            const { vvfn, volt_flux } = region;
+            const p = pml.p;
+
+            // PML post-voltage: read voltage once and apply PML correction
+            const f_help = volt_flux[p];
+            volt_flux[p] = this.volt[g];
+            this.volt[g] = f_help + vvfn[p] * volt_flux[p];
+
+            // Now read the PML-corrected voltage for ADE updates
+            const V = this.volt[g];
+
+            // ADE voltage update for all overlapping orders
+            for (const ade of cell.adeEntries) {
+                const order = this.lorentzOrders[ade.orderIdx];
+                const d = order.directions[ade.dirIdx];
+                const i = ade.cellIdx;
+
+                if (order.hasLorentz) {
+                    d.volt_Lor_ADE[i] += d.v_Lor_ADE[i] * d.volt_ADE[i];
+                    d.volt_ADE[i] = d.v_int_ADE[i] * d.volt_ADE[i]
+                                   + d.v_ext_ADE[i] * (V - d.volt_Lor_ADE[i]);
+                } else {
+                    d.volt_ADE[i] = d.v_int_ADE[i] * d.volt_ADE[i]
+                                   + d.v_ext_ADE[i] * V;
+                }
+            }
+        }
+    }
+
+    /**
+     * Post-voltage PML update, skipping fused cells when fusion is active.
+     */
+    _postVoltageUpdatePMLWithFusion() {
+        if (!this._fusionConfig) {
+            this.postVoltageUpdatePML();
+            return;
+        }
+
+        for (let ri = 0; ri < this.pmlRegions.length; ri++) {
+            const region = this.pmlRegions[ri];
+            const [sx, sy, sz] = region.startPos;
+            const [nx, ny, nz] = region.numLines;
+            const { vvfn, volt_flux } = region;
+            const skipSet = this._fusionConfig.fusedPMLIndices.get(ri);
+
+            for (let lx = 0; lx < nx; lx++) {
+                const gx = lx + sx;
+                for (let ly = 0; ly < ny; ly++) {
+                    const gy = ly + sy;
+                    for (let lz = 0; lz < nz; lz++) {
+                        const gz = lz + sz;
+                        for (let n = 0; n < 3; n++) {
+                            const p = n * nx * ny * nz + lx * ny * nz + ly * nz + lz;
+                            if (skipSet && skipSet.has(p)) continue; // handled by fused path
+                            const g = this.idx(n, gx, gy, gz);
+                            const f_help = volt_flux[p];
+                            volt_flux[p] = this.volt[g];
+                            this.volt[g] = f_help + vvfn[p] * volt_flux[p];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Voltage ADE update, skipping fused cells when fusion is active.
+     */
+    _updateVoltADEWithFusion() {
+        if (!this._fusionConfig) {
+            this.updateVoltADE();
+            return;
+        }
+
+        const fusedIndices = this._fusionConfig.fusedADEIndices;
+
+        for (let oi = 0; oi < this.lorentzOrders.length; oi++) {
+            const order = this.lorentzOrders[oi];
+            for (let di = 0; di < order.directions.length; di++) {
+                const d = order.directions[di];
+                const { pos_idx, v_int_ADE, v_ext_ADE, v_Lor_ADE,
+                        volt_ADE, volt_Lor_ADE } = d;
+                const componentStride = this.totalCells;
+
+                for (let i = 0; i < order.numCells; i++) {
+                    if (fusedIndices.has(`${oi}:${di}:${i}`)) continue; // handled by fused path
+
+                    const fieldIdx = d.dir * componentStride + pos_idx[i];
+                    const V = this.volt[fieldIdx];
+
+                    if (order.hasLorentz) {
+                        volt_Lor_ADE[i] += v_Lor_ADE[i] * volt_ADE[i];
+                        volt_ADE[i] = v_int_ADE[i] * volt_ADE[i]
+                                     + v_ext_ADE[i] * (V - volt_Lor_ADE[i]);
+                    } else {
+                        volt_ADE[i] = v_int_ADE[i] * volt_ADE[i]
+                                     + v_ext_ADE[i] * V;
+                    }
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // TFSF (Total-Field/Scattered-Field)
     // -----------------------------------------------------------------------
 
@@ -536,6 +753,19 @@ export class CPUFDTDEngine {
         this.rlcVdn = new Float32Array(n * 3);   // 3-deep history
         this.rlcJn = new Float32Array(n * 3);     // 3-deep history
         this.rlcVIl = new Float32Array(n);        // inductor current accumulator
+        this._rlcRingIdx = 0;                     // ring buffer write position
+    }
+
+    /**
+     * Enable or disable ring buffer mode for RLC history.
+     * Ring buffer avoids physically shifting array values (Vdn[2]=Vdn[1]; Vdn[1]=Vdn[0])
+     * by cycling a write index 0->1->2->0. History is accessed via (ringIdx + offset) % 3.
+     *
+     * @param {boolean} enabled
+     */
+    enableRLCRingBuffer(enabled = true) {
+        this._useRingBuffer = enabled;
+        this._rlcRingIdx = 0;
     }
 
     /**
@@ -544,6 +774,11 @@ export class CPUFDTDEngine {
      */
     preVoltageRLC() {
         if (!this.rlcElements || this.rlcElements.length === 0) return;
+
+        if (this._useRingBuffer) {
+            this._preVoltageRLCRing();
+            return;
+        }
 
         const { rlcVdn: Vdn, rlcVIl: v_Il } = this;
 
@@ -563,11 +798,39 @@ export class CPUFDTDEngine {
     }
 
     /**
+     * RLC pre-voltage using ring buffer indexing.
+     * Instead of shifting Vdn[2]=Vdn[1]; Vdn[1]=Vdn[0], we advance the ring index.
+     * ringIdx points to the "current" (newest) slot.
+     * History: current = ringIdx, prev = (ringIdx+2)%3, prev-prev = (ringIdx+1)%3
+     */
+    _preVoltageRLCRing() {
+        const { rlcVdn: Vdn, rlcVIl: v_Il } = this;
+        // Advance ring: the old "current" becomes "prev", old "prev" becomes "prev-prev"
+        // New ringIdx will be where old "prev-prev" was (it's being overwritten)
+        this._rlcRingIdx = (this._rlcRingIdx + 2) % 3;
+        const r0 = this._rlcRingIdx; // new current slot (will be written in applyRLC)
+        const r1 = (r0 + 1) % 3;     // prev (was current before advance)
+
+        for (let n = 0; n < this.rlcElements.length; n++) {
+            const base = n * 3;
+            const elem = this.rlcElements[n];
+            if (elem.type_flag === 0) {
+                v_Il[n] += elem.i2v * elem.ilv * Vdn[base + r1];
+            }
+        }
+    }
+
+    /**
      * RLC apply-to-voltages: read voltage, shift Jn, series update, writeback.
      * Matches C++ Apply2Voltages in engine_ext_lumpedRLC.cpp:100-142.
      */
     applyRLC() {
         if (!this.rlcElements || this.rlcElements.length === 0) return;
+
+        if (this._useRingBuffer) {
+            this._applyRLCRing();
+            return;
+        }
 
         const { rlcVdn: Vdn, rlcJn: Jn, rlcVIl: v_Il } = this;
 
@@ -595,6 +858,48 @@ export class CPUFDTDEngine {
                         - elem.b2 * elem.ib0 * Jn[h2];
 
                 this.volt[g] = Vdn[h0];
+            }
+        }
+    }
+
+    /**
+     * RLC apply using ring buffer indexing.
+     * Ring buffer slots: current = _rlcRingIdx, prev = (ringIdx+1)%3, prev-prev = (ringIdx+2)%3
+     * For Jn, we also use a ring: advance Jn ring (same index) before writing.
+     */
+    _applyRLCRing() {
+        const { rlcVdn: Vdn, rlcJn: Jn, rlcVIl: v_Il } = this;
+        const r0 = this._rlcRingIdx;
+        const r1 = (r0 + 1) % 3; // prev
+        const r2 = (r0 + 2) % 3; // prev-prev
+
+        // Jn ring also advances: new Jn current goes to r0, prev is at r1, prev-prev at r2
+        // (Jn ring is advanced implicitly — we use the same ring index)
+
+        for (let n = 0; n < this.rlcElements.length; n++) {
+            const elem = this.rlcElements[n];
+            const g = elem.direction * this.totalCells + elem.field_idx;
+            const base = n * 3;
+
+            Vdn[base + r0] = this.volt[g];
+
+            // Jn: no physical shift needed, but we need prev/prev-prev
+            // The old Jn[h0] from last step is now at r1, old Jn[h1] is at r2
+            const Jn_prev = Jn[base + r1];
+            const Jn_prevprev = Jn[base + r2];
+
+            if (elem.type_flag === 1) {
+                const Il = v_Il[n];
+                Vdn[base + r0] = elem.vvd * (Vdn[base + r0] - Il
+                         + elem.vv2 * Vdn[base + r2]
+                         + elem.vj1 * Jn_prev
+                         + elem.vj2 * Jn_prevprev);
+
+                Jn[base + r0] = elem.ib0 * (Vdn[base + r0] - Vdn[base + r2])
+                        - elem.b1 * elem.ib0 * Jn_prev
+                        - elem.b2 * elem.ib0 * Jn_prevprev;
+
+                this.volt[g] = Vdn[base + r0];
             }
         }
     }
@@ -833,7 +1138,14 @@ export class CPUFDTDEngine {
         this.updateVoltages();
 
         // === POST-VOLTAGE ===
-        this.postVoltageUpdatePML();       // Priority +1M: PML post-voltage
+        if (this._fusionConfig) {
+            // Fused path: PML post-voltage + ADE in one pass for overlapping cells
+            this._fusedPostVoltageAndADE();
+            this._postVoltageUpdatePMLWithFusion();   // non-fused PML cells
+            this._updateVoltADEWithFusion();          // non-fused ADE cells
+        } else {
+            this.postVoltageUpdatePML();   // Priority +1M: PML post-voltage
+        }
         this.applyTFSFVoltage();           // Priority +50K: TFSF voltage (C++ DoPostVoltageUpdates)
         this.murPostVoltage();             // Priority 0: Mur post-voltage (C++ DoPostVoltageUpdates)
 

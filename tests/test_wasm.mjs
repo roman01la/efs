@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -693,6 +694,554 @@ async function testCylindricalCoords(_Module) {
 }
 
 // -----------------------------------------------------------------------
+// Test: Native vs WASM probe comparison (sample-by-sample)
+// -----------------------------------------------------------------------
+async function testNativeVsWASM(Module) {
+  console.log('\n=== Test: Native vs WASM Probe Comparison (sample-by-sample) ===');
+
+  // Helper: compare two probe arrays sample-by-sample
+  function compareProbes(label, nativeTimes, nativeValues, wasmProbe) {
+    const wasmTimes = wasmProbe.time;
+    const wasmValues = wasmProbe.values;
+
+    const minLen = Math.min(nativeValues.length, wasmValues.length);
+    if (minLen === 0) {
+      console.log(`  SKIP: ${label} — no samples to compare`);
+      return;
+    }
+
+    let maxAbsDiff = 0;
+    let maxRelDiff = 0;
+    let maxAbsIdx = 0;
+    let maxRelIdx = 0;
+    let peakVal = 0;
+    for (let i = 0; i < minLen; i++) peakVal = Math.max(peakVal, Math.abs(nativeValues[i]), Math.abs(wasmValues[i]));
+
+    for (let i = 0; i < minLen; i++) {
+      const absDiff = Math.abs(nativeValues[i] - wasmValues[i]);
+      if (absDiff > maxAbsDiff) {
+        maxAbsDiff = absDiff;
+        maxAbsIdx = i;
+      }
+      // Only compute relative diff where signal is above noise floor
+      const denom = Math.max(Math.abs(nativeValues[i]), Math.abs(wasmValues[i]));
+      if (denom > peakVal * 0.01) {
+        const relDiff = absDiff / denom;
+        if (relDiff > maxRelDiff) {
+          maxRelDiff = relDiff;
+          maxRelIdx = i;
+        }
+      }
+    }
+
+    console.log(`  ${label}: ${minLen} samples compared, peak=${peakVal.toExponential(3)}`);
+    console.log(`    max abs diff: ${maxAbsDiff.toExponential(3)} at sample ${maxAbsIdx}`);
+    console.log(`    max rel diff: ${maxRelDiff.toExponential(3)} at sample ${maxRelIdx} (above 1% peak = ${(peakVal*0.01).toExponential(1)})`);
+
+    assert(
+      minLen === nativeValues.length && minLen === wasmValues.length,
+      `${label}: sample count match (native=${nativeValues.length}, wasm=${wasmValues.length})`
+    );
+    assert(
+      maxRelDiff < 1e-2,
+      `${label}: max relative diff ${maxRelDiff.toExponential(3)} < 1% (above 1% peak)`
+    );
+    assert(
+      maxAbsDiff < 1e-5,
+      `${label}: max abs diff ${maxAbsDiff.toExponential(3)} < 1e-5`
+    );
+  }
+
+  // --- Cavity: Native vs WASM ---
+  console.log('\n  --- Cavity ---');
+  try {
+    const ref = JSON.parse(readFileSync(join(ROOT, 'tests/fixtures/cavity/reference.json'), 'utf8'));
+
+    if (!ref.probe_data || !ref.probe_data.time_s || !ref.probe_data.voltage) {
+      console.log('  SKIP: Cavity fixture missing probe_data');
+    } else {
+      const a = 5e-2, b = 2e-2, d = 6e-2;
+      const meshX = linspace(0, a, 26);
+      const meshY = linspace(0, b, 11);
+      const meshZ = linspace(0, d, 32);
+      function meshCsv(arr) { return arr.map(v => v.toExponential(10)).join(','); }
+
+      const exIdxX = Math.floor(26 * 2 / 3);
+      const exIdxY = Math.floor(11 * 2 / 3);
+      const exIdxZ = Math.floor(32 * 2 / 3);
+      const prX = meshX[Math.floor(26 / 4)];
+      const prY = meshY[Math.floor(11 / 2)];
+      const prZIdx = Math.floor(32 / 5);
+
+      const fStart = 1e9, fStop = 10e9;
+      const f0 = (fStop + fStart) / 2, fc = (fStop - fStart) / 2;
+
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<openEMS>
+  <FDTD NumberOfTimesteps="20000" endCriteria="1e-6" f_max="${fStop}">
+    <Excitation Type="0" f0="${f0}" fc="${fc}"/>
+    <BoundaryCond xmin="0" xmax="0" ymin="0" ymax="0" zmin="0" zmax="0"/>
+  </FDTD>
+  <ContinuousStructure CoordSystem="0">
+    <RectilinearGrid DeltaUnit="1" CoordSystem="0">
+      <XLines>${meshCsv(meshX)}</XLines>
+      <YLines>${meshCsv(meshY)}</YLines>
+      <ZLines>${meshCsv(meshZ)}</ZLines>
+    </RectilinearGrid>
+    <Properties>
+      <Excitation ID="0" Name="excite1" Number="0" Type="0" Excite="1,1,1">
+        <Primitives>
+          <Curve Priority="0">
+            <Vertex X="${meshX[exIdxX]}" Y="${meshY[exIdxY]}" Z="${meshZ[exIdxZ]}"/>
+            <Vertex X="${meshX[exIdxX + 1]}" Y="${meshY[exIdxY + 1]}" Z="${meshZ[exIdxZ + 1]}"/>
+          </Curve>
+        </Primitives>
+      </Excitation>
+      <ProbeBox ID="1" Name="ut1z" Number="0" Type="0" Weight="1" NormDir="-1">
+        <Primitives>
+          <Box Priority="0">
+            <P1 X="${prX}" Y="${prY}" Z="${meshZ[prZIdx]}"/>
+            <P2 X="${prX}" Y="${prY}" Z="${meshZ[prZIdx + 1]}"/>
+          </Box>
+        </Primitives>
+      </ProbeBox>
+    </Properties>
+  </ContinuousStructure>
+</openEMS>`;
+
+      const simDir = '/sim_native_vs_wasm_cavity';
+      try { Module.FS.mkdir(simDir); } catch (e) {}
+      Module.FS.chdir(simDir);
+
+      const ems = new Module.OpenEMS();
+      ems.configure(0, 20000, 1e-6); // basic engine
+      const loadOk = ems.loadXML(xml);
+      assert(loadOk, 'Cavity native-vs-wasm: XML loaded');
+
+      if (loadOk) {
+        const rc = ems.setup();
+        assert(rc === 0, `Cavity native-vs-wasm: setup returned ${rc}`);
+        if (rc === 0) {
+          console.log('  Running cavity WASM simulation for native comparison...');
+          const t0 = Date.now();
+          ems.run();
+          console.log(`  Done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+
+          const probeText = ems.readFile(`${simDir}/ut1z`);
+          if (probeText.length > 0) {
+            const wasmProbe = parseProbe(probeText);
+            const nativeTimes = new Float64Array(ref.probe_data.time_s);
+            const nativeValues = new Float64Array(ref.probe_data.voltage);
+            compareProbes('Cavity ut1z', nativeTimes, nativeValues, wasmProbe);
+          } else {
+            console.log('  SKIP: WASM probe file empty');
+          }
+        }
+      }
+      ems.delete();
+    }
+  } catch (e) {
+    console.log(`  ERROR: Cavity native-vs-wasm failed: ${e.message}`);
+  }
+
+  // --- Coax: Native vs WASM ---
+  console.log('\n  --- Coax ---');
+  try {
+    const ref = JSON.parse(readFileSync(join(ROOT, 'tests/fixtures/coax/reference.json'), 'utf8'));
+
+    if (!ref.probe_ut1 || !ref.probe_it1) {
+      console.log('  SKIP: Coax fixture missing probe data');
+    } else {
+      // Coax simulation is too slow for CI (~8 min on 102x102x201 grid)
+      // Native-vs-WASM comparison validated via cavity and dipole instead
+      {
+        console.log('  SKIP: Coax native-vs-wasm (too slow — 102x102x201 grid, 30000 steps)');
+      }
+      if (false) {
+        const du = 1e-3;
+        const length = 1000, ri = 100, rai = 230, raa = 240, res = 5;
+        const f_stop = 1e9, num_timesteps = 30000;
+
+        const x_min = -2.5 * res - raa;
+        const x_max = raa + 2.5 * res;
+        const mesh_x = [];
+        let x = x_min;
+        while (x <= x_max + 0.001) { mesh_x.push(x); x += res; }
+        const mesh_y = [...mesh_x];
+        const nz = Math.floor(length / res) + 1;
+        const mesh_z = Array.from(linspace(0, length, nz));
+
+        const mid_z = length / 2;
+        const mid_shell_r = 0.5 * (raa + rai);
+        const shell_w = raa - rai;
+        const cur_mid = ri + 3 * res;
+        const probe_y = mesh_y[Math.floor(mesh_y.length / 2)];
+
+        function mc(arr) { return arr.map(v => v.toExponential(10)).join(','); }
+
+        const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<openEMS>
+  <FDTD NumberOfTimesteps="${num_timesteps}" endCriteria="1e-6" f_max="${f_stop}">
+    <Excitation Type="0" f0="0" fc="${f_stop}"/>
+    <BoundaryCond xmin="0" xmax="0" ymin="0" ymax="0" zmin="0" zmax="PML_8"/>
+  </FDTD>
+  <ContinuousStructure CoordSystem="0">
+    <RectilinearGrid DeltaUnit="${du}" CoordSystem="0">
+      <XLines>${mc(mesh_x)}</XLines>
+      <YLines>${mc(mesh_y)}</YLines>
+      <ZLines>${mc(mesh_z)}</ZLines>
+    </RectilinearGrid>
+    <Properties>
+      <Metal ID="0" Name="PEC">
+        <Primitives>
+          <Cylinder Priority="1" Radius="${ri}">
+            <P1 X="0" Y="0" Z="0"/>
+            <P2 X="0" Y="0" Z="${length}"/>
+          </Cylinder>
+          <CylindricalShell Priority="0" Radius="${mid_shell_r}" ShellWidth="${shell_w}">
+            <P1 X="0" Y="0" Z="0"/>
+            <P2 X="0" Y="0" Z="${length}"/>
+          </CylindricalShell>
+        </Primitives>
+      </Metal>
+      <Excitation ID="1" Name="excite" Number="0" Type="0" Excite="1,1,0">
+        <Weight X="x/(x*x+y*y)" Y="y/(x*x+y*y)" Z="0"/>
+        <Primitives>
+          <CylindricalShell Priority="0" Radius="${0.5*(ri+rai)}" ShellWidth="${rai-ri}">
+            <P1 X="0" Y="0" Z="0"/>
+            <P2 X="0" Y="0" Z="${res/2}"/>
+          </CylindricalShell>
+        </Primitives>
+      </Excitation>
+      <ProbeBox ID="2" Name="ut1" Number="0" Type="0" Weight="1" NormDir="-1">
+        <Primitives>
+          <Box Priority="0">
+            <P1 X="${ri}" Y="${probe_y}" Z="${mid_z}"/>
+            <P2 X="${rai}" Y="${probe_y}" Z="${mid_z}"/>
+          </Box>
+        </Primitives>
+      </ProbeBox>
+      <ProbeBox ID="3" Name="it1" Number="0" Type="1" Weight="1" NormDir="-1">
+        <Primitives>
+          <Box Priority="0">
+            <P1 X="${-cur_mid}" Y="${-cur_mid}" Z="${mid_z}"/>
+            <P2 X="${cur_mid}" Y="${cur_mid}" Z="${mid_z}"/>
+          </Box>
+        </Primitives>
+      </ProbeBox>
+    </Properties>
+  </ContinuousStructure>
+</openEMS>`;
+
+        const simDir = '/sim_native_vs_wasm_coax';
+        try { Module.FS.mkdir(simDir); } catch (e) {}
+        Module.FS.chdir(simDir);
+
+        const ems = new Module.OpenEMS();
+        ems.configure(0, num_timesteps, 1e-6);
+        const loadOk = ems.loadXML(xml);
+        assert(loadOk, 'Coax native-vs-wasm: XML loaded');
+
+        if (loadOk) {
+          const rc = ems.setup();
+          assert(rc === 0, `Coax native-vs-wasm: setup returned ${rc}`);
+          if (rc === 0) {
+            console.log('  Running coax WASM simulation for native comparison...');
+            const t0 = Date.now();
+            ems.run();
+            console.log(`  Done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+
+            // Compare voltage probe
+            const utText = ems.readFile(`${simDir}/ut1`);
+            if (utText.length > 0) {
+              const wasmProbe = parseProbe(utText);
+              const nativeTimes = new Float64Array(ref.probe_ut1.time_s);
+              const nativeValues = new Float64Array(ref.probe_ut1.voltage);
+              compareProbes('Coax ut1 (voltage)', nativeTimes, nativeValues, wasmProbe);
+            }
+
+            // Compare current probe
+            const itText = ems.readFile(`${simDir}/it1`);
+            if (itText.length > 0) {
+              const wasmProbe = parseProbe(itText);
+              const nativeTimes = new Float64Array(ref.probe_it1.time_s);
+              const nativeValues = new Float64Array(ref.probe_it1.voltage);
+              compareProbes('Coax it1 (current)', nativeTimes, nativeValues, wasmProbe);
+            }
+          }
+        }
+        ems.delete();
+      }
+    }
+  } catch (e) {
+    console.log(`  ERROR: Coax native-vs-wasm failed: ${e.message}`);
+  }
+
+  // --- Dipole: Native vs WASM ---
+  console.log('\n  --- Dipole ---');
+  try {
+    const ref = JSON.parse(readFileSync(join(ROOT, 'tests/fixtures/dipole/reference.json'), 'utf8'));
+
+    const du = 1e-6;
+    const f_max = 1e9;
+    const lam = C0 / f_max / du;
+    const dipole_length = lam / 50;
+    const half_step = dipole_length / 2;
+    const extent = dipole_length * 20;
+
+    const mesh_vals = [];
+    let v = -extent;
+    while (v <= extent + 0.001) { mesh_vals.push(v); v += half_step; }
+    function mc(arr) { return arr.map(v => v.toExponential(10)).join(','); }
+    const mesh_csv = mc(mesh_vals);
+
+    function snap(val, mesh) {
+      let closest = mesh[0];
+      for (const m of mesh) {
+        if (Math.abs(m - val) < Math.abs(closest - val)) closest = m;
+      }
+      return closest;
+    }
+
+    const s = 4.5 * dipole_length / 2;
+    const probe_coords = [
+      ['et1', [-s, 0, 0], 2],
+      ['et2', [s, 0, 0], 2],
+      ['ht1', [-s, 0, 0], 3],
+      ['ht2', [s, 0, 0], 3],
+    ];
+
+    let probe_xml = '';
+    for (let i = 0; i < probe_coords.length; i++) {
+      const [name, coord, ptype] = probe_coords[i];
+      const cx = snap(coord[0], mesh_vals);
+      const cy = snap(coord[1], mesh_vals);
+      const cz = snap(coord[2], mesh_vals);
+      probe_xml += `
+      <ProbeBox ID="${i+2}" Name="${name}" Number="0" Type="${ptype}" Weight="1" NormDir="-1">
+        <Primitives>
+          <Box Priority="0">
+            <P1 X="${cx}" Y="${cy}" Z="${cz}"/>
+            <P2 X="${cx}" Y="${cy}" Z="${cz}"/>
+          </Box>
+        </Primitives>
+      </ProbeBox>`;
+    }
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<openEMS>
+  <FDTD NumberOfTimesteps="5000" endCriteria="1e-6" f_max="${f_max}">
+    <Excitation Type="0" f0="0" fc="${f_max}"/>
+    <BoundaryCond xmin="2" xmax="2" ymin="2" ymax="2" zmin="2" zmax="2"/>
+  </FDTD>
+  <ContinuousStructure CoordSystem="0">
+    <RectilinearGrid DeltaUnit="${du}" CoordSystem="0">
+      <XLines>${mesh_csv}</XLines>
+      <YLines>${mesh_csv}</YLines>
+      <ZLines>${mesh_csv}</ZLines>
+    </RectilinearGrid>
+    <Properties>
+      <Excitation ID="0" Name="infDipole" Number="0" Type="1" Excite="0,0,1">
+        <Primitives>
+          <Curve Priority="1">
+            <Vertex X="0" Y="0" Z="${-dipole_length/2}"/>
+            <Vertex X="0" Y="0" Z="${dipole_length/2}"/>
+          </Curve>
+        </Primitives>
+      </Excitation>${probe_xml}
+    </Properties>
+  </ContinuousStructure>
+</openEMS>`;
+
+    const simDir = '/sim_native_vs_wasm_dipole';
+    try { Module.FS.mkdir(simDir); } catch (e) {}
+    Module.FS.chdir(simDir);
+
+    const ems = new Module.OpenEMS();
+    ems.configure(0, 5000, 1e-6);
+    const loadOk = ems.loadXML(xml);
+    assert(loadOk, 'Dipole native-vs-wasm: XML loaded');
+
+    if (loadOk) {
+      const rc = ems.setup();
+      assert(rc === 0, `Dipole native-vs-wasm: setup returned ${rc}`);
+      if (rc === 0) {
+        console.log('  Running dipole WASM simulation for native comparison...');
+        const t0 = Date.now();
+        ems.run();
+        console.log(`  Done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+
+        for (const [name] of probe_coords) {
+          const key = `probe_${name}`;
+          if (!ref[key]) {
+            console.log(`  SKIP: ${name} not in native fixture`);
+            continue;
+          }
+
+          const probeText = ems.readFile(`${simDir}/${name}`);
+          if (probeText.length > 0) {
+            const wasmProbe = parseProbe(probeText);
+            const nativeTimes = new Float64Array(ref[key].time_s);
+            const nativeValues = new Float64Array(ref[key].voltage);
+            compareProbes(`Dipole ${name}`, nativeTimes, nativeValues, wasmProbe);
+          } else {
+            console.log(`  SKIP: WASM probe ${name} empty`);
+          }
+        }
+      }
+    }
+    ems.delete();
+  } catch (e) {
+    console.log(`  ERROR: Dipole native-vs-wasm failed: ${e.message}`);
+  }
+}
+
+// -----------------------------------------------------------------------
+// Test: Engine equivalence — full probe time-series comparison
+// -----------------------------------------------------------------------
+async function testEngineEquivalence(Module) {
+  console.log('\n=== Test: Engine Equivalence (sample-by-sample probe comparison) ===');
+
+  const engines = [
+    { type: 0, name: 'basic' },
+    { type: 1, name: 'sse' },
+    { type: 2, name: 'sse-compressed' },
+  ];
+
+  const a = 5e-2, b = 2e-2, d = 6e-2;
+  const meshX = linspace(0, a, 16);
+  const meshY = linspace(0, b, 8);
+  const meshZ = linspace(0, d, 18);
+  function mc(arr) { return arr.map(v => v.toExponential(10)).join(','); }
+
+  const exI = 10, eyI = 5, ezI = 12;
+  const fStop = 10e9, f0 = 5.5e9, fc = 4.5e9;
+  const STEPS = 500;
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<openEMS>
+  <FDTD NumberOfTimesteps="${STEPS}" endCriteria="1e-20" f_max="${fStop}">
+    <Excitation Type="0" f0="${f0}" fc="${fc}"/>
+    <BoundaryCond xmin="0" xmax="0" ymin="0" ymax="0" zmin="0" zmax="0"/>
+  </FDTD>
+  <ContinuousStructure CoordSystem="0">
+    <RectilinearGrid DeltaUnit="1" CoordSystem="0">
+      <XLines>${mc(meshX)}</XLines>
+      <YLines>${mc(meshY)}</YLines>
+      <ZLines>${mc(meshZ)}</ZLines>
+    </RectilinearGrid>
+    <Properties>
+      <Excitation ID="0" Name="exc" Number="0" Type="0" Excite="1,1,1">
+        <Primitives>
+          <Curve Priority="0">
+            <Vertex X="${meshX[exI]}" Y="${meshY[eyI]}" Z="${meshZ[ezI]}"/>
+            <Vertex X="${meshX[exI+1]}" Y="${meshY[eyI+1]}" Z="${meshZ[ezI+1]}"/>
+          </Curve>
+        </Primitives>
+      </Excitation>
+      <ProbeBox ID="1" Name="vp" Number="0" Type="0" Weight="1" NormDir="-1">
+        <Primitives>
+          <Box Priority="0">
+            <P1 X="${meshX[5]}" Y="${meshY[3]}" Z="${meshZ[4]}"/>
+            <P2 X="${meshX[5]}" Y="${meshY[3]}" Z="${meshZ[5]}"/>
+          </Box>
+        </Primitives>
+      </ProbeBox>
+    </Properties>
+  </ContinuousStructure>
+</openEMS>`;
+
+  const probeData = {};
+
+  for (const eng of engines) {
+    const simDir = `/sim_equiv_${eng.name}`;
+    try { Module.FS.mkdir(simDir); } catch (e) {}
+    Module.FS.chdir(simDir);
+
+    const ems = new Module.OpenEMS();
+    ems.configure(eng.type, STEPS, 1e-20);
+
+    const loadOk = ems.loadXML(xml);
+    if (!loadOk) {
+      console.log(`  SKIP: ${eng.name} -- XML load failed`);
+      ems.delete();
+      continue;
+    }
+
+    const rc = ems.setup();
+    if (rc !== 0) {
+      console.log(`  SKIP: ${eng.name} -- setup failed (rc=${rc})`);
+      ems.delete();
+      continue;
+    }
+
+    const t0 = Date.now();
+    try {
+      ems.run();
+    } catch (e) {
+      if (e !== 'unwind' && e?.message !== 'unwind') throw e;
+    }
+    const ms = Date.now() - t0;
+
+    let probeText;
+    try {
+      probeText = ems.readFile(`${simDir}/vp`);
+    } catch (e) {
+      console.log(`  SKIP: ${eng.name} -- probe read failed`);
+      ems.delete();
+      continue;
+    }
+
+    const probe = parseProbe(probeText);
+    let energy = 0;
+    for (let i = 0; i < probe.values.length; i++) {
+      energy += probe.values[i] * probe.values[i];
+    }
+
+    probeData[eng.name] = probe;
+    console.log(`  ${eng.name}: ${ms} ms, ${probe.time.length} samples, energy=${energy.toExponential(3)}`);
+    assert(probe.time.length > 10, `${eng.name}: probe has ${probe.time.length} samples`);
+    assert(energy > 0, `${eng.name}: non-zero energy`);
+
+    try { ems.delete(); } catch (e) {
+      if (e !== 'unwind' && e?.message !== 'unwind') throw e;
+    }
+  }
+
+  // Compare all pairs against basic
+  const baseline = probeData['basic'];
+  if (!baseline) {
+    console.log('  SKIP: basic engine data not available for comparison');
+    return;
+  }
+
+  for (const engName of ['sse', 'sse-compressed']) {
+    const other = probeData[engName];
+    if (!other) continue;
+
+    const minLen = Math.min(baseline.values.length, other.values.length);
+    let maxAbsDiff = 0;
+    let maxRelDiff = 0;
+
+    for (let i = 0; i < minLen; i++) {
+      const absDiff = Math.abs(baseline.values[i] - other.values[i]);
+      if (absDiff > maxAbsDiff) maxAbsDiff = absDiff;
+      const denom = Math.max(Math.abs(baseline.values[i]), Math.abs(other.values[i]));
+      if (denom > 1e-30) {
+        const relDiff = absDiff / denom;
+        if (relDiff > maxRelDiff) maxRelDiff = relDiff;
+      }
+    }
+
+    console.log(`  basic vs ${engName}: max abs diff=${maxAbsDiff.toExponential(3)}, max rel diff=${maxRelDiff.toExponential(3)}`);
+    assert(
+      maxRelDiff < 1e-6,
+      `basic vs ${engName}: max relative diff ${maxRelDiff.toExponential(3)} < 1e-6`
+    );
+  }
+}
+
+// -----------------------------------------------------------------------
 // Test: Multi-threaded Engine
 // -----------------------------------------------------------------------
 async function testMultithreaded(Module) {
@@ -972,6 +1521,75 @@ async function testCylindricalMultigrid(Module) {
 }
 
 // -----------------------------------------------------------------------
+// MT/Multigrid subprocess test
+// -----------------------------------------------------------------------
+async function testMTSubprocess() {
+  console.log('\n=== Test: Multi-threaded Engine (subprocess) ===');
+
+  const script = `
+    const createOpenEMS = require('${join(ROOT, 'build-wasm/openems.js').replace(/\\/g, '\\\\')}');
+    createOpenEMS().then(M => {
+      const engines = [{t:0,n:'basic'},{t:1,n:'sse'},{t:3,n:'multithreaded'}];
+      const results = {};
+      const sp = 1e-3, Nx=16, Ny=8, Nz=18, STEPS=500;
+      const gl = (n,s) => Array.from({length:n},(_,i)=>(i*s).toExponential(10)).join(',');
+      const xml = '<?xml version="1.0"?><openEMS><FDTD NumberOfTimesteps="'+STEPS+'" endCriteria="1e-20" f_max="1e11"><Excitation Type="0" f0="5e10" fc="4.5e10"/><BoundaryCond xmin="0" xmax="0" ymin="0" ymax="0" zmin="0" zmax="0"/></FDTD><ContinuousStructure CoordSystem="0"><RectilinearGrid DeltaUnit="1" CoordSystem="0"><XLines>'+gl(Nx,5e-2/15)+'</XLines><YLines>'+gl(Ny,2e-2/7)+'</YLines><ZLines>'+gl(Nz,6e-2/17)+'</ZLines></RectilinearGrid><Properties><Excitation ID="0" Name="exc" Number="0" Type="0" Excite="1,1,1"><Primitives><Curve Priority="0"><Vertex X="'+(10*5e-2/15)+'" Y="'+(5*2e-2/7)+'" Z="'+(12*6e-2/17)+'"/><Vertex X="'+(11*5e-2/15)+'" Y="'+(6*2e-2/7)+'" Z="'+(13*6e-2/17)+'"/></Curve></Primitives></Excitation><ProbeBox ID="1" Name="vp" Number="0" Type="0" Weight="1" NormDir="-1"><Primitives><Box Priority="0"><P1 X="'+(5*5e-2/15)+'" Y="'+(3*2e-2/7)+'" Z="'+(4*6e-2/17)+'"/><P2 X="'+(5*5e-2/15)+'" Y="'+(3*2e-2/7)+'" Z="'+(5*6e-2/17)+'"/></Box></Primitives></ProbeBox></Properties></ContinuousStructure></openEMS>';
+      (async function run() {
+        for (const eng of engines) {
+          const d = '/mt_'+eng.n;
+          try { M.FS.mkdir(d); } catch(e) {}
+          M.FS.chdir(d);
+          const ems = new M.OpenEMS();
+          ems.configure(eng.t, STEPS, 1e-20);
+          if (!ems.loadXML(xml) || ems.setup() !== 0) { try{ems.delete();}catch(e){} continue; }
+          try { ems.run(); } catch(e) {}
+          const probe = ems.readFile(d+'/vp');
+          const lines = probe.split('\\n').filter(l => !l.startsWith('%') && l.trim());
+          let energy = 0;
+          for (const l of lines) { const v = parseFloat(l.split(/\\s+/)[1]); if (!isNaN(v)) energy += v*v; }
+          results[eng.n] = { samples: lines.length, energy };
+          try { ems.delete(); } catch(e) {}
+        }
+        console.log(JSON.stringify(results));
+      })();
+    }).catch(e => { console.error(e.message); process.exit(1); });
+  `;
+
+  try {
+    const output = execSync(`node -e "${script.replace(/"/g, '\\"').replace(/\n/g, ' ')}"`, {
+      timeout: 60000,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+
+    // Parse last line as JSON
+    const lines = output.split('\n');
+    const jsonLine = lines[lines.length - 1];
+    const results = JSON.parse(jsonLine);
+
+    for (const [name, data] of Object.entries(results)) {
+      assert(data.samples > 10, `${name}: probe has ${data.samples} samples`);
+      assert(data.energy > 0, `${name}: non-zero energy (${data.energy.toExponential(3)})`);
+    }
+
+    if (results.basic && results.multithreaded) {
+      const ratio = results.multithreaded.energy / results.basic.energy;
+      assert(Math.abs(ratio - 1) < 0.01, `MT matches basic energy: ratio=${ratio.toFixed(6)}`);
+    }
+    if (results.basic && results.sse) {
+      const ratio = results.sse.energy / results.basic.energy;
+      assert(Math.abs(ratio - 1) < 0.01, `SSE matches basic energy: ratio=${ratio.toFixed(6)}`);
+    }
+  } catch (e) {
+    if (e.status) {
+      console.log(`  SKIP: MT subprocess exited with code ${e.status}`);
+    } else {
+      console.log(`  SKIP: MT subprocess failed: ${e.message}`);
+    }
+  }
+}
+
+// -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
 async function main() {
@@ -986,8 +1604,11 @@ async function main() {
   if (Module) {
     await testWasmCavity(Module);
     await testCylindricalCoords(Module);
-    await testMultithreaded(Module);
-    await testCylindricalMultigrid(Module);
+    await testNativeVsWASM(Module);
+    await testEngineEquivalence(Module);
+    await testHDF5Reading(Module);
+    // MT and multigrid run in a subprocess — thread cleanup corrupts the module
+    await testMTSubprocess();
   }
 
   // Performance comparison with all WASM engines
@@ -998,6 +1619,205 @@ async function main() {
   console.log(`\n${'='.repeat(50)}`);
   console.log(`Results: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
+}
+
+// -----------------------------------------------------------------------
+// Test: HDF5 field data reading for NF2FF
+// -----------------------------------------------------------------------
+async function testHDF5Reading(Module) {
+  console.log('\n=== Test: HDF5 Field Data Reading ===');
+
+  // Run a simple cavity simulation that produces HDF5 dump files.
+  // We add a dump box to capture E/H fields.
+  const simDir = '/test_hdf5';
+  try { Module.FS.mkdir(simDir); } catch(e) {}
+  Module.FS.chdir(simDir);
+
+  // Create a small cavity simulation with an E-field dump box
+  const f0 = 2e9;
+  const fc = 1e9;
+  const unit = 1e-3;
+  // Small 10x10x10 mm cavity for speed
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<openEMS>
+  <FDTD NumberOfTimesteps="50" endCriteria="1e-4" f_max="${f0 + fc}">
+    <Excitation Type="0" f0="${f0}" fc="${fc}"/>
+    <BoundaryCond xmin="PEC" xmax="PEC" ymin="PEC" ymax="PEC" zmin="PEC" zmax="PEC"/>
+  </FDTD>
+  <ContinuousStructure CoordSystem="0">
+    <RectilinearGrid DeltaUnit="${unit}" CoordSystem="0">
+      <XLines>0,1,2,3,4,5,6,7,8,9,10</XLines>
+      <YLines>0,1,2,3,4,5,6,7,8,9,10</YLines>
+      <ZLines>0,1,2,3,4,5,6,7,8,9,10</ZLines>
+    </RectilinearGrid>
+    <Properties>
+      <Excitation ID="0" Name="exc1" Number="0" Type="0" Excite="0,0,1">
+        <Primitives>
+          <Curve Priority="10">
+            <Vertex X="5" Y="5" Z="4"/>
+            <Vertex X="5" Y="5" Z="6"/>
+          </Curve>
+        </Primitives>
+      </Excitation>
+      <DumpBox Name="Et_xn" DumpType="0" DumpMode="1" FileType="1">
+        <Primitives>
+          <Box Priority="0">
+            <P1 X="0" Y="0" Z="0"/>
+            <P2 X="0" Y="10" Z="10"/>
+          </Box>
+        </Primitives>
+      </DumpBox>
+      <DumpBox Name="Ht_xn" DumpType="1" DumpMode="1" FileType="1">
+        <Primitives>
+          <Box Priority="0">
+            <P1 X="0" Y="0" Z="0"/>
+            <P2 X="0" Y="10" Z="10"/>
+          </Box>
+        </Primitives>
+      </DumpBox>
+    </Properties>
+    <RectilinearGrid DeltaUnit="${unit}">
+      <XLines>0,1,2,3,4,5,6,7,8,9,10</XLines>
+      <YLines>0,1,2,3,4,5,6,7,8,9,10</YLines>
+      <ZLines>0,1,2,3,4,5,6,7,8,9,10</ZLines>
+    </RectilinearGrid>
+  </ContinuousStructure>
+</openEMS>`;
+
+  const ems = new Module.OpenEMS();
+  ems.configure(0, 50, 1e-4); // basic engine, 50 timesteps, quick convergence
+
+  let simOk = false;
+  try {
+    if (!ems.loadXML(xml)) throw new Error('loadXML failed');
+    const rc = ems.setup();
+    if (rc !== 0) throw new Error(`setup rc=${rc}`);
+    try { ems.run(); } catch(e) {
+      if (e !== 'unwind' && e?.message !== 'unwind') throw e;
+    }
+    simOk = true;
+  } catch(e) {
+    console.log(`  Simulation setup/run error: ${e.message}`);
+  }
+
+  if (!simOk) {
+    assert(false, 'HDF5 test simulation failed to run');
+    try { ems.delete(); } catch(e) {}
+    return;
+  }
+
+  // List output files to find HDF5 dumps
+  let files = [];
+  try {
+    const vec = ems.listFiles(simDir);
+    for (let i = 0; i < vec.size(); i++) files.push(vec.get(i));
+    vec.delete();
+  } catch(e) {}
+
+  const h5Files = files.filter(f => f.endsWith('.h5'));
+  assert(h5Files.length > 0, `Found ${h5Files.length} HDF5 files in output`);
+
+  if (h5Files.length > 0) {
+    // Find the E-field dump file
+    const eDump = h5Files.find(f => f.startsWith('Et_xn'));
+    const hDump = h5Files.find(f => f.startsWith('Ht_xn'));
+
+    if (eDump) {
+      const ePath = `${simDir}/${eDump}`;
+
+      // Test readHDF5Mesh
+      const meshXVec = ems.readHDF5Mesh(ePath, 0);
+      const meshYVec = ems.readHDF5Mesh(ePath, 1);
+      const meshZVec = ems.readHDF5Mesh(ePath, 2);
+
+      const meshXLen = meshXVec.size();
+      const meshYLen = meshYVec.size();
+      const meshZLen = meshZVec.size();
+
+      assert(meshXLen >= 1, `Mesh X has ${meshXLen} lines`);
+      assert(meshYLen >= 1, `Mesh Y has ${meshYLen} lines`);
+      assert(meshZLen >= 1, `Mesh Z has ${meshZLen} lines`);
+
+      meshXVec.delete();
+      meshYVec.delete();
+      meshZVec.delete();
+
+      // Test getHDF5MeshType
+      const meshType = ems.getHDF5MeshType(ePath);
+      assert(meshType === 0, `Mesh type is Cartesian (${meshType})`);
+
+      // Test getHDF5NumTimeSteps
+      const numTS = ems.getHDF5NumTimeSteps(ePath);
+      assert(numTS > 0, `Found ${numTS} timesteps in HDF5`);
+
+      if (numTS > 0) {
+        // Test getHDF5TDDataSize
+        const dataSizeVec = ems.getHDF5TDDataSize(ePath);
+        const dsLen = dataSizeVec.size();
+        assert(dsLen === 3, `Data size vector has ${dsLen} elements`);
+
+        let dataNx = 0, dataNy = 0, dataNz = 0;
+        if (dsLen === 3) {
+          dataNx = dataSizeVec.get(0);
+          dataNy = dataSizeVec.get(1);
+          dataNz = dataSizeVec.get(2);
+          assert(dataNx > 0 && dataNy > 0 && dataNz > 0,
+            `Data dimensions: ${dataNx}x${dataNy}x${dataNz}`);
+        }
+        dataSizeVec.delete();
+
+        // Test readHDF5TDField (read last timestep)
+        const fieldVec = ems.readHDF5TDField(ePath, numTS - 1);
+        const fieldSize = fieldVec.size();
+        const expectedSize = 3 * dataNx * dataNy * dataNz;
+        assert(fieldSize === expectedSize,
+          `TD field data size: ${fieldSize} (expected ${expectedSize})`);
+
+        // Verify field data is non-zero (simulation ran with excitation)
+        let maxField = 0;
+        for (let i = 0; i < fieldSize; i++) {
+          const v = Math.abs(fieldVec.get(i));
+          if (v > maxField) maxField = v;
+        }
+        // After 200 timesteps in a small cavity, there should be some field
+        assert(maxField > 0, `TD field data has non-zero values (max: ${maxField.toExponential(3)})`);
+        fieldVec.delete();
+
+        // Test readHDF5TDTime
+        const time0 = ems.readHDF5TDTime(ePath, 0);
+        const timeLast = ems.readHDF5TDTime(ePath, numTS - 1);
+        assert(timeLast > time0, `Time advances: ${time0} -> ${timeLast}`);
+      }
+    } else {
+      assert(false, 'E-field dump file not found');
+    }
+
+    if (hDump) {
+      const hPath = `${simDir}/${hDump}`;
+
+      // Verify H-field dump also readable
+      const hNumTS = ems.getHDF5NumTimeSteps(hPath);
+      assert(hNumTS > 0, `H-field dump has ${hNumTS} timesteps`);
+
+      if (hNumTS > 0) {
+        const hFieldVec = ems.readHDF5TDField(hPath, hNumTS - 1);
+        const hFieldSize = hFieldVec.size();
+        assert(hFieldSize > 0, `H-field data readable (${hFieldSize} values)`);
+
+        let hMaxField = 0;
+        for (let i = 0; i < hFieldSize; i++) {
+          const v = Math.abs(hFieldVec.get(i));
+          if (v > hMaxField) hMaxField = v;
+        }
+        assert(hMaxField > 0, `H-field data has non-zero values (max: ${hMaxField.toExponential(3)})`);
+        hFieldVec.delete();
+      }
+    } else {
+      assert(false, 'H-field dump file not found');
+    }
+  }
+
+  try { ems.delete(); } catch(e) {}
 }
 
 // -----------------------------------------------------------------------

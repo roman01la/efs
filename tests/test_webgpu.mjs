@@ -2605,6 +2605,413 @@ section('WASM-GPU Bridge — configureFromWASM Full Pipeline');
 }
 
 // ---------------------------------------------------------------------------
+// Test: Fused PML+ADE produces same result as separate passes
+// ---------------------------------------------------------------------------
+
+section('Kernel Fusion — PML+ADE Fusion Correctness');
+
+{
+    const Nx = 10, Ny = 10, Nz = 10;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+
+    // Create two identical engines
+    const engineSeparate = new CPUFDTDEngine([Nx, Ny, Nz], {
+        vv: new Float32Array(coeffs.vv),
+        vi: new Float32Array(coeffs.vi),
+        ii: new Float32Array(coeffs.ii),
+        iv: new Float32Array(coeffs.iv),
+    });
+    const engineFused = new CPUFDTDEngine([Nx, Ny, Nz], {
+        vv: new Float32Array(coeffs.vv),
+        vi: new Float32Array(coeffs.vi),
+        ii: new Float32Array(coeffs.ii),
+        iv: new Float32Array(coeffs.iv),
+    });
+
+    // Configure PML region covering the first 3 cells in x
+    const pmlNx = 3, pmlNy = Ny, pmlNz = Nz;
+    const pmlTotal = 3 * pmlNx * pmlNy * pmlNz;
+    const pmlRegion = {
+        startPos: [0, 0, 0],
+        numLines: [pmlNx, pmlNy, pmlNz],
+        vv: new Float32Array(pmlTotal).fill(0.95),
+        vvfo: new Float32Array(pmlTotal).fill(0.1),
+        vvfn: new Float32Array(pmlTotal).fill(0.9),
+        ii: new Float32Array(pmlTotal).fill(0.95),
+        iifo: new Float32Array(pmlTotal).fill(0.1),
+        iifn: new Float32Array(pmlTotal).fill(0.9),
+    };
+    engineSeparate.configurePML([pmlRegion]);
+    // Deep copy for fused engine
+    engineFused.configurePML([{
+        startPos: [0, 0, 0],
+        numLines: [pmlNx, pmlNy, pmlNz],
+        vv: new Float32Array(pmlRegion.vv),
+        vvfo: new Float32Array(pmlRegion.vvfo),
+        vvfn: new Float32Array(pmlRegion.vvfn),
+        ii: new Float32Array(pmlRegion.ii),
+        iifo: new Float32Array(pmlRegion.iifo),
+        iifn: new Float32Array(pmlRegion.iifn),
+    }]);
+
+    // Configure ADE dispersive material in cells overlapping with PML
+    const adeCells = 5;
+    const adeConfig = {
+        orders: [{
+            numCells: adeCells,
+            hasLorentz: false,
+            directions: [{
+                dir: 0,
+                pos_idx: new Uint32Array([
+                    0 * Ny * Nz + 2 * Nz + 3, // inside PML (x=0)
+                    1 * Ny * Nz + 3 * Nz + 4, // inside PML (x=1)
+                    2 * Ny * Nz + 4 * Nz + 5, // inside PML (x=2)
+                    5 * Ny * Nz + 5 * Nz + 5, // outside PML (x=5)
+                    7 * Ny * Nz + 7 * Nz + 7, // outside PML (x=7)
+                ]),
+                v_int_ADE: new Float32Array([0.8, 0.85, 0.9, 0.8, 0.85]),
+                v_ext_ADE: new Float32Array([0.2, 0.15, 0.1, 0.2, 0.15]),
+                v_Lor_ADE: new Float32Array(adeCells),
+                i_int_ADE: new Float32Array([0.8, 0.85, 0.9, 0.8, 0.85]),
+                i_ext_ADE: new Float32Array([0.2, 0.15, 0.1, 0.2, 0.15]),
+                i_Lor_ADE: new Float32Array(adeCells),
+            }],
+        }],
+    };
+    engineSeparate.configureLorentz(adeConfig);
+    // Deep copy for fused
+    engineFused.configureLorentz({
+        orders: [{
+            numCells: adeCells,
+            hasLorentz: false,
+            directions: [{
+                dir: 0,
+                pos_idx: new Uint32Array(adeConfig.orders[0].directions[0].pos_idx),
+                v_int_ADE: new Float32Array(adeConfig.orders[0].directions[0].v_int_ADE),
+                v_ext_ADE: new Float32Array(adeConfig.orders[0].directions[0].v_ext_ADE),
+                v_Lor_ADE: new Float32Array(adeCells),
+                i_int_ADE: new Float32Array(adeConfig.orders[0].directions[0].i_int_ADE),
+                i_ext_ADE: new Float32Array(adeConfig.orders[0].directions[0].i_ext_ADE),
+                i_Lor_ADE: new Float32Array(adeCells),
+            }],
+        }],
+    });
+
+    // Enable fusion on fused engine
+    engineFused.configureFusion({ enabled: true });
+
+    // Inject identical initial pulse
+    const pulseIdx = engineSeparate.idx(0, 5, 5, 5);
+    engineSeparate.volt[pulseIdx] = 1.0;
+    engineFused.volt[pulseIdx] = 1.0;
+
+    // Run both engines for 20 steps
+    for (let t = 0; t < 20; t++) {
+        engineSeparate.step();
+        engineFused.step();
+    }
+
+    // Compare voltages
+    let maxDiff = 0;
+    for (let i = 0; i < engineSeparate.volt.length; i++) {
+        const diff = Math.abs(engineSeparate.volt[i] - engineFused.volt[i]);
+        if (diff > maxDiff) maxDiff = diff;
+    }
+    assert(maxDiff < 1e-6,
+        `Fused PML+ADE matches separate passes (max volt diff: ${maxDiff.toExponential(2)})`);
+
+    // Compare currents
+    let maxCurrDiff = 0;
+    for (let i = 0; i < engineSeparate.curr.length; i++) {
+        const diff = Math.abs(engineSeparate.curr[i] - engineFused.curr[i]);
+        if (diff > maxCurrDiff) maxCurrDiff = diff;
+    }
+    assert(maxCurrDiff < 1e-6,
+        `Fused PML+ADE matches separate passes (max curr diff: ${maxCurrDiff.toExponential(2)})`);
+
+    // Verify fusion was actually active (at least some cells were fused)
+    assert(engineFused._fusionConfig !== null, 'Fusion config was created');
+    assert(engineFused._fusionConfig.fusedCells.length > 0,
+        `Fusion found ${engineFused._fusionConfig.fusedCells.length} overlapping PML+ADE cells`);
+}
+
+// ---------------------------------------------------------------------------
+// Test: Fused PML+ADE with Lorentz poles
+// ---------------------------------------------------------------------------
+
+section('Kernel Fusion — PML+ADE Fusion with Lorentz');
+
+{
+    const Nx = 8, Ny = 8, Nz = 8;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+
+    const engineSeparate = new CPUFDTDEngine([Nx, Ny, Nz], {
+        vv: new Float32Array(coeffs.vv), vi: new Float32Array(coeffs.vi),
+        ii: new Float32Array(coeffs.ii), iv: new Float32Array(coeffs.iv),
+    });
+    const engineFused = new CPUFDTDEngine([Nx, Ny, Nz], {
+        vv: new Float32Array(coeffs.vv), vi: new Float32Array(coeffs.vi),
+        ii: new Float32Array(coeffs.ii), iv: new Float32Array(coeffs.iv),
+    });
+
+    const pmlNx = 3, pmlNy = Ny, pmlNz = Nz;
+    const pmlTotal = 3 * pmlNx * pmlNy * pmlNz;
+    const makePML = () => ({
+        startPos: [0, 0, 0],
+        numLines: [pmlNx, pmlNy, pmlNz],
+        vv: new Float32Array(pmlTotal).fill(0.92),
+        vvfo: new Float32Array(pmlTotal).fill(0.08),
+        vvfn: new Float32Array(pmlTotal).fill(0.88),
+        ii: new Float32Array(pmlTotal).fill(0.92),
+        iifo: new Float32Array(pmlTotal).fill(0.08),
+        iifn: new Float32Array(pmlTotal).fill(0.88),
+    });
+    engineSeparate.configurePML([makePML()]);
+    engineFused.configurePML([makePML()]);
+
+    // Lorentz ADE with overlapping PML cells
+    const nc = 3;
+    const makeADE = () => ({
+        orders: [{
+            numCells: nc,
+            hasLorentz: true,
+            directions: [{
+                dir: 1,
+                pos_idx: new Uint32Array([
+                    0 * Ny * Nz + 1 * Nz + 2,
+                    1 * Ny * Nz + 2 * Nz + 3,
+                    2 * Ny * Nz + 3 * Nz + 4,
+                ]),
+                v_int_ADE: new Float32Array([0.7, 0.75, 0.8]),
+                v_ext_ADE: new Float32Array([0.3, 0.25, 0.2]),
+                v_Lor_ADE: new Float32Array([0.1, 0.12, 0.15]),
+                i_int_ADE: new Float32Array([0.7, 0.75, 0.8]),
+                i_ext_ADE: new Float32Array([0.3, 0.25, 0.2]),
+                i_Lor_ADE: new Float32Array([0.1, 0.12, 0.15]),
+            }],
+        }],
+    });
+    engineSeparate.configureLorentz(makeADE());
+    engineFused.configureLorentz(makeADE());
+    engineFused.configureFusion({ enabled: true });
+
+    const pulseIdx = engineSeparate.idx(1, 4, 4, 4);
+    engineSeparate.volt[pulseIdx] = 1.0;
+    engineFused.volt[pulseIdx] = 1.0;
+
+    for (let t = 0; t < 15; t++) {
+        engineSeparate.step();
+        engineFused.step();
+    }
+
+    let maxDiff = 0;
+    for (let i = 0; i < engineSeparate.volt.length; i++) {
+        const diff = Math.abs(engineSeparate.volt[i] - engineFused.volt[i]);
+        if (diff > maxDiff) maxDiff = diff;
+    }
+    assert(maxDiff < 1e-6,
+        `Lorentz PML+ADE fusion matches separate (max volt diff: ${maxDiff.toExponential(2)})`);
+}
+
+// ---------------------------------------------------------------------------
+// Test: RLC ring buffer produces same result as array shifting
+// ---------------------------------------------------------------------------
+
+section('Kernel Fusion — RLC Ring Buffer Correctness');
+
+{
+    const Nx = 8, Ny = 8, Nz = 8;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+
+    const engineShift = new CPUFDTDEngine([Nx, Ny, Nz], {
+        vv: new Float32Array(coeffs.vv), vi: new Float32Array(coeffs.vi),
+        ii: new Float32Array(coeffs.ii), iv: new Float32Array(coeffs.iv),
+    });
+    const engineRing = new CPUFDTDEngine([Nx, Ny, Nz], {
+        vv: new Float32Array(coeffs.vv), vi: new Float32Array(coeffs.vi),
+        ii: new Float32Array(coeffs.ii), iv: new Float32Array(coeffs.iv),
+    });
+
+    // Configure identical RLC elements — parallel and series
+    const rlcConfig = {
+        elements: [
+            {
+                field_idx: 3 * Ny * Nz + 3 * Nz + 3,
+                direction: 0,
+                type_flag: 0,  // parallel
+                i2v: 0.5, ilv: 0.3,
+                vvd: 0.0, vv2: 0.0, vj1: 0.0, vj2: 0.0,
+                ib0: 0.0, b1: 0.0, b2: 0.0,
+            },
+            {
+                field_idx: 4 * Ny * Nz + 4 * Nz + 4,
+                direction: 1,
+                type_flag: 1,  // series
+                i2v: 0.0, ilv: 0.0,
+                vvd: 0.8, vv2: 0.3, vj1: 0.2, vj2: 0.1,
+                ib0: 0.5, b1: 0.4, b2: 0.2,
+            },
+            {
+                field_idx: 5 * Ny * Nz + 5 * Nz + 5,
+                direction: 2,
+                type_flag: 1,  // series
+                i2v: 0.0, ilv: 0.0,
+                vvd: 0.9, vv2: 0.2, vj1: 0.15, vj2: 0.08,
+                ib0: 0.4, b1: 0.3, b2: 0.15,
+            },
+        ],
+    };
+
+    engineShift.configureRLC(rlcConfig);
+    engineRing.configureRLC(rlcConfig);
+    engineRing.enableRLCRingBuffer(true);
+
+    // Inject same initial pulse
+    const pIdx = engineShift.idx(0, 4, 4, 4);
+    engineShift.volt[pIdx] = 1.0;
+    engineRing.volt[pIdx] = 1.0;
+
+    // Run 30 timesteps
+    for (let t = 0; t < 30; t++) {
+        engineShift.step();
+        engineRing.step();
+    }
+
+    // Compare voltages
+    let maxDiff = 0;
+    for (let i = 0; i < engineShift.volt.length; i++) {
+        const diff = Math.abs(engineShift.volt[i] - engineRing.volt[i]);
+        if (diff > maxDiff) maxDiff = diff;
+    }
+    assert(maxDiff < 1e-6,
+        `RLC ring buffer matches array shifting (max volt diff: ${maxDiff.toExponential(2)})`);
+
+    // Compare currents
+    let maxCurrDiff = 0;
+    for (let i = 0; i < engineShift.curr.length; i++) {
+        const diff = Math.abs(engineShift.curr[i] - engineRing.curr[i]);
+        if (diff > maxCurrDiff) maxCurrDiff = diff;
+    }
+    assert(maxCurrDiff < 1e-6,
+        `RLC ring buffer matches array shifting (max curr diff: ${maxCurrDiff.toExponential(2)})`);
+
+    // Verify ring buffer was actually used
+    assert(engineRing._useRingBuffer === true, 'Ring buffer mode was enabled');
+    assert(engineRing._rlcRingIdx !== undefined, 'Ring buffer index is tracked');
+}
+
+// ---------------------------------------------------------------------------
+// Test: RLC ring buffer with only parallel elements
+// ---------------------------------------------------------------------------
+
+section('Kernel Fusion — RLC Ring Buffer Parallel-Only');
+
+{
+    const Nx = 6, Ny = 6, Nz = 6;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+
+    const engineShift = new CPUFDTDEngine([Nx, Ny, Nz], {
+        vv: new Float32Array(coeffs.vv), vi: new Float32Array(coeffs.vi),
+        ii: new Float32Array(coeffs.ii), iv: new Float32Array(coeffs.iv),
+    });
+    const engineRing = new CPUFDTDEngine([Nx, Ny, Nz], {
+        vv: new Float32Array(coeffs.vv), vi: new Float32Array(coeffs.vi),
+        ii: new Float32Array(coeffs.ii), iv: new Float32Array(coeffs.iv),
+    });
+
+    const rlcConfig = {
+        elements: [
+            {
+                field_idx: 2 * Ny * Nz + 2 * Nz + 2,
+                direction: 0,
+                type_flag: 0,
+                i2v: 0.6, ilv: 0.25,
+                vvd: 0, vv2: 0, vj1: 0, vj2: 0, ib0: 0, b1: 0, b2: 0,
+            },
+            {
+                field_idx: 3 * Ny * Nz + 3 * Nz + 3,
+                direction: 2,
+                type_flag: 0,
+                i2v: 0.4, ilv: 0.35,
+                vvd: 0, vv2: 0, vj1: 0, vj2: 0, ib0: 0, b1: 0, b2: 0,
+            },
+        ],
+    };
+
+    engineShift.configureRLC(rlcConfig);
+    engineRing.configureRLC(rlcConfig);
+    engineRing.enableRLCRingBuffer(true);
+
+    const pIdx = engineShift.idx(0, 3, 3, 3);
+    engineShift.volt[pIdx] = 0.5;
+    engineRing.volt[pIdx] = 0.5;
+
+    for (let t = 0; t < 20; t++) {
+        engineShift.step();
+        engineRing.step();
+    }
+
+    let maxDiff = 0;
+    for (let i = 0; i < engineShift.volt.length; i++) {
+        const diff = Math.abs(engineShift.volt[i] - engineRing.volt[i]);
+        if (diff > maxDiff) maxDiff = diff;
+    }
+    assert(maxDiff < 1e-6,
+        `RLC ring buffer parallel-only matches (max diff: ${maxDiff.toExponential(2)})`);
+}
+
+// ---------------------------------------------------------------------------
+// Test: Fusion disabled when no overlap
+// ---------------------------------------------------------------------------
+
+section('Kernel Fusion — No Overlap');
+
+{
+    const Nx = 8, Ny = 8, Nz = 8;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    // PML at x=0..2
+    const pmlNx = 3, pmlNy = Ny, pmlNz = Nz;
+    const pmlTotal = 3 * pmlNx * pmlNy * pmlNz;
+    engine.configurePML([{
+        startPos: [0, 0, 0],
+        numLines: [pmlNx, pmlNy, pmlNz],
+        vv: new Float32Array(pmlTotal).fill(0.9),
+        vvfo: new Float32Array(pmlTotal).fill(0.1),
+        vvfn: new Float32Array(pmlTotal).fill(0.9),
+        ii: new Float32Array(pmlTotal).fill(0.9),
+        iifo: new Float32Array(pmlTotal).fill(0.1),
+        iifn: new Float32Array(pmlTotal).fill(0.9),
+    }]);
+
+    // ADE cells only outside PML (x=5,6,7)
+    engine.configureLorentz({
+        orders: [{
+            numCells: 2,
+            hasLorentz: false,
+            directions: [{
+                dir: 0,
+                pos_idx: new Uint32Array([
+                    5 * Ny * Nz + 3 * Nz + 3,
+                    6 * Ny * Nz + 4 * Nz + 4,
+                ]),
+                v_int_ADE: new Float32Array([0.8, 0.85]),
+                v_ext_ADE: new Float32Array([0.2, 0.15]),
+                v_Lor_ADE: new Float32Array(2),
+                i_int_ADE: new Float32Array([0.8, 0.85]),
+                i_ext_ADE: new Float32Array([0.2, 0.15]),
+                i_Lor_ADE: new Float32Array(2),
+            }],
+        }],
+    });
+
+    engine.configureFusion({ enabled: true });
+    assert(engine._fusionConfig === null,
+        'Fusion config is null when PML and ADE do not overlap');
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

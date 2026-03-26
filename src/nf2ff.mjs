@@ -586,23 +586,176 @@ export class NF2FFBox {
  * Read NF2FF surface field data from simulation output files.
  *
  * openEMS writes NF2FF surface dumps as HDF5 files (FileType=1).
- * Full HDF5 reading requires h5wasm integration which is not yet available.
- * This stub documents the expected file layout and throws a clear error.
+ * This implementation uses the WASM module's HDF5 reading functions
+ * (via HDF5_File_Reader compiled into WASM) to read the data directly
+ * from MEMFS.
  *
  * Expected files at: {simPath}/{boxName}_E_{xn,xp,yn,yp,zn,zp}.h5
  *                and: {simPath}/{boxName}_H_{xn,xp,yn,yp,zn,zp}.h5
  *
- * @param {Object} wasmEms - WASM openEMS module instance
+ * @param {Object} wasmEms - WASM openEMS wrapper instance (with readHDF5Mesh, readHDF5TDField, etc.)
  * @param {string} simPath - Simulation output directory path in MEMFS
  * @param {string} boxName - NF2FF box name used in createNF2FFBox
- * @throws {Error} Always throws — HDF5 reading not yet supported
+ * @param {Object} [opts]
+ * @param {number[]} [opts.frequency] - Frequencies for FD-domain reading (if null, reads TD data)
+ * @param {boolean[]} [opts.directions] - 6-element array enabling each face [xmin,xmax,ymin,ymax,zmin,zmax]
+ * @returns {{ faces: Array<Object> }} Surface data structure for calcNF2FF
  */
-export function readNF2FFSurfaceData(wasmEms, simPath, boxName) {
-  throw new Error(
-    `HDF5 field dump reading requires h5wasm. ` +
-    `The NF2FF surface dumps are at "${simPath}/${boxName}_E_*.h5" and "${simPath}/${boxName}_H_*.h5". ` +
-    `Pass surface data directly to calcNF2FF() instead.`
-  );
+export function readNF2FFSurfaceData(wasmEms, simPath, boxName, opts = {}) {
+  if (!wasmEms || typeof wasmEms.readHDF5Mesh !== 'function') {
+    throw new Error(
+      `readNF2FFSurfaceData requires a WASM module with HDF5 reading support (readHDF5Mesh). ` +
+      `Expected HDF5 files at ${simPath}/${boxName}_E_*.h5 and ${simPath}/${boxName}_H_*.h5. ` +
+      `Pass surface data directly to calcNF2FF() instead, or ensure the WASM module is initialized.`
+    );
+  }
+
+  const directions = opts.directions || [true, true, true, true, true, true];
+  const frequency = opts.frequency || null;
+
+  // Face suffixes and their normal directions
+  const faceSuffixes = ['xn', 'xp', 'yn', 'yp', 'zn', 'zp'];
+  const faceNormals = [
+    [-1, 0, 0], [1, 0, 0],
+    [0, -1, 0], [0, 1, 0],
+    [0, 0, -1], [0, 0, 1],
+  ];
+
+  const faces = [];
+
+  for (let fi = 0; fi < 6; fi++) {
+    if (!directions[fi]) continue;
+
+    const suffix = faceSuffixes[fi];
+    const eFile = `${simPath}/${boxName}_E_${suffix}.h5`;
+    const hFile = `${simPath}/${boxName}_H_${suffix}.h5`;
+
+    // Read mesh from E-field file (same mesh for H)
+    const meshX = _vectorToArray(wasmEms.readHDF5Mesh(eFile, 0));
+    const meshY = _vectorToArray(wasmEms.readHDF5Mesh(eFile, 1));
+    const meshZ = _vectorToArray(wasmEms.readHDF5Mesh(eFile, 2));
+
+    if (meshX.length === 0 && meshY.length === 0 && meshZ.length === 0) {
+      continue; // File not found or empty
+    }
+
+    const meshType = wasmEms.getHDF5MeshType(eFile);
+    const Nx = meshX.length, Ny = meshY.length, Nz = meshZ.length;
+    const cellCount = Nx * Ny * Nz;
+
+    const normal = faceNormals[fi];
+
+    if (frequency !== null) {
+      // Frequency-domain reading
+      const eFieldRaw = _vectorToArray(wasmEms.readHDF5FDField(eFile, 0));
+      const hFieldRaw = _vectorToArray(wasmEms.readHDF5FDField(hFile, 0));
+
+      if (eFieldRaw.length === 0 || hFieldRaw.length === 0) continue;
+
+      // eFieldRaw is interleaved re/im: [d][i][j][k] with 2 floats per element
+      // Total: 2 * 3 * Nx * Ny * Nz
+      // Split into per-component arrays with re/im interleaved
+      const E = [
+        new Float64Array(2 * cellCount),
+        new Float64Array(2 * cellCount),
+        new Float64Array(2 * cellCount),
+      ];
+      const H = [
+        new Float64Array(2 * cellCount),
+        new Float64Array(2 * cellCount),
+        new Float64Array(2 * cellCount),
+      ];
+
+      for (let d = 0; d < 3; d++) {
+        const offset = d * cellCount * 2;
+        for (let c = 0; c < cellCount; c++) {
+          E[d][2 * c] = eFieldRaw[offset + 2 * c];
+          E[d][2 * c + 1] = eFieldRaw[offset + 2 * c + 1];
+          H[d][2 * c] = hFieldRaw[offset + 2 * c];
+          H[d][2 * c + 1] = hFieldRaw[offset + 2 * c + 1];
+        }
+      }
+
+      faces.push({
+        E, H,
+        mesh: {
+          x: new Float64Array(meshX),
+          y: new Float64Array(meshY),
+          z: new Float64Array(meshZ),
+        },
+        normal,
+        meshType: meshType >= 0 ? meshType : 0,
+      });
+    } else {
+      // Time-domain reading: read all timesteps and return the last one
+      // (For NF2FF, the caller typically DFTs externally)
+      const numTS = wasmEms.getHDF5NumTimeSteps(eFile);
+      if (numTS === 0) continue;
+
+      // Read the last timestep
+      const tsIdx = numTS - 1;
+      const eFieldRaw = _vectorToArray(wasmEms.readHDF5TDField(eFile, tsIdx));
+      const hFieldRaw = _vectorToArray(wasmEms.readHDF5TDField(hFile, tsIdx));
+
+      if (eFieldRaw.length === 0 || hFieldRaw.length === 0) continue;
+
+      // TD data is real-valued: [d][i][j][k], total = 3 * Nx * Ny * Nz
+      // Convert to complex (re/im interleaved) with zero imaginary part
+      const E = [
+        new Float64Array(2 * cellCount),
+        new Float64Array(2 * cellCount),
+        new Float64Array(2 * cellCount),
+      ];
+      const H = [
+        new Float64Array(2 * cellCount),
+        new Float64Array(2 * cellCount),
+        new Float64Array(2 * cellCount),
+      ];
+
+      for (let d = 0; d < 3; d++) {
+        const offset = d * cellCount;
+        for (let c = 0; c < cellCount; c++) {
+          E[d][2 * c] = eFieldRaw[offset + c];
+          E[d][2 * c + 1] = 0;
+          H[d][2 * c] = hFieldRaw[offset + c];
+          H[d][2 * c + 1] = 0;
+        }
+      }
+
+      faces.push({
+        E, H,
+        mesh: {
+          x: new Float64Array(meshX),
+          y: new Float64Array(meshY),
+          z: new Float64Array(meshZ),
+        },
+        normal,
+        meshType: meshType >= 0 ? meshType : 0,
+      });
+    }
+  }
+
+  return { faces };
+}
+
+/**
+ * Helper: convert Emscripten vector to JS array.
+ * Handles both std::vector wrappers and plain arrays.
+ */
+function _vectorToArray(vec) {
+  if (!vec) return [];
+  if (Array.isArray(vec) || vec instanceof Float32Array || vec instanceof Float64Array) {
+    return vec;
+  }
+  // Emscripten vector wrapper
+  if (typeof vec.size === 'function') {
+    const n = vec.size();
+    const arr = new Float32Array(n);
+    for (let i = 0; i < n; i++) arr[i] = vec.get(i);
+    vec.delete(); // Free C++ memory
+    return arr;
+  }
+  return [];
 }
 
 /**

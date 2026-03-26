@@ -6,6 +6,7 @@
 #include <vector>
 #include "openems.h"
 #include "FDTD/operator.h"
+#include "tools/hdf5_file_reader.h"
 
 using namespace emscripten;
 
@@ -104,6 +105,225 @@ public:
         return extractCoeffArray(3);
     }
 
+    // -----------------------------------------------------------------------
+    // HDF5 field data reading for NF2FF
+    // -----------------------------------------------------------------------
+
+    /**
+     * Read mesh lines for a single axis from an HDF5 dump file.
+     * @param filename Path to HDF5 file in MEMFS
+     * @param axis 0=x/rho, 1=y/alpha, 2=z
+     * @return Float vector of mesh line positions
+     */
+    std::vector<float> readHDF5Mesh(const std::string& filename, int axis) {
+        HDF5_File_Reader reader(filename);
+        float* lines[3] = {nullptr, nullptr, nullptr};
+        unsigned int numLines[3] = {0, 0, 0};
+        int meshType = 0;
+
+        if (!reader.ReadMesh(lines, numLines, meshType)) {
+            for (int i = 0; i < 3; i++) delete[] lines[i];
+            return {};
+        }
+
+        if (axis < 0 || axis > 2) {
+            for (int i = 0; i < 3; i++) delete[] lines[i];
+            return {};
+        }
+
+        std::vector<float> result(lines[axis], lines[axis] + numLines[axis]);
+        for (int i = 0; i < 3; i++) delete[] lines[i];
+        return result;
+    }
+
+    /**
+     * Get the mesh type from an HDF5 dump file.
+     * @return 0 = Cartesian (x,y,z), 1 = cylindrical (rho,alpha,z)
+     */
+    int getHDF5MeshType(const std::string& filename) {
+        HDF5_File_Reader reader(filename);
+        float* lines[3] = {nullptr, nullptr, nullptr};
+        unsigned int numLines[3] = {0, 0, 0};
+        int meshType = 0;
+
+        if (!reader.ReadMesh(lines, numLines, meshType)) {
+            for (int i = 0; i < 3; i++) delete[] lines[i];
+            return -1;
+        }
+
+        for (int i = 0; i < 3; i++) delete[] lines[i];
+        return meshType;
+    }
+
+    /**
+     * Read time-domain field data from an HDF5 dump file.
+     * Returns a flat float array: [Nx*Ny*Nz*3] for one timestep.
+     * Data is ordered as [component][x][y][z] matching openEMS convention.
+     *
+     * @param filename Path to HDF5 file
+     * @param timestepIdx Index of timestep to read
+     * @return Flat float array, empty if error
+     */
+    std::vector<float> readHDF5TDField(const std::string& filename, unsigned int timestepIdx) {
+        HDF5_File_Reader reader(filename);
+        float time;
+        unsigned int data_size[4];
+        float**** field = reader.GetTDVectorData(timestepIdx, time, data_size);
+        if (!field) return {};
+
+        // data_size: [Nx, Ny, Nz, 3]
+        // Flatten: [d][i][j][k] with d=0..2, i=0..Nx-1, j=0..Ny-1, k=0..Nz-1
+        unsigned int Nx = data_size[0], Ny = data_size[1], Nz = data_size[2];
+        std::vector<float> result(3 * Nx * Ny * Nz);
+        size_t pos = 0;
+        for (unsigned int d = 0; d < 3; d++)
+            for (unsigned int i = 0; i < Nx; i++)
+                for (unsigned int j = 0; j < Ny; j++)
+                    for (unsigned int k = 0; k < Nz; k++)
+                        result[pos++] = field[d][i][j][k];
+
+        // Free the 4D array
+        for (unsigned int d = 0; d < 3; d++) {
+            for (unsigned int i = 0; i < Nx; i++) {
+                for (unsigned int j = 0; j < Ny; j++)
+                    delete[] field[d][i][j];
+                delete[] field[d][i];
+            }
+            delete[] field[d];
+        }
+        delete[] field;
+
+        return result;
+    }
+
+    /**
+     * Get the time attribute for a given timestep index.
+     */
+    float readHDF5TDTime(const std::string& filename, unsigned int timestepIdx) {
+        HDF5_File_Reader reader(filename);
+        float time = 0;
+        unsigned int data_size[4];
+        float**** field = reader.GetTDVectorData(timestepIdx, time, data_size);
+        if (field) {
+            unsigned int Nx = data_size[0], Ny = data_size[1], Nz = data_size[2];
+            for (unsigned int d = 0; d < 3; d++) {
+                for (unsigned int i = 0; i < Nx; i++) {
+                    for (unsigned int j = 0; j < Ny; j++)
+                        delete[] field[d][i][j];
+                    delete[] field[d][i];
+                }
+                delete[] field[d];
+            }
+            delete[] field;
+        }
+        return time;
+    }
+
+    /**
+     * Get the number of timesteps stored in a TD HDF5 dump file.
+     */
+    unsigned int getHDF5NumTimeSteps(const std::string& filename) {
+        HDF5_File_Reader reader(filename);
+        return reader.GetNumTimeSteps();
+    }
+
+    /**
+     * Get the data dimensions [Nx, Ny, Nz] from the first timestep.
+     */
+    std::vector<unsigned int> getHDF5TDDataSize(const std::string& filename) {
+        HDF5_File_Reader reader(filename);
+        float time;
+        unsigned int data_size[4];
+        float**** field = reader.GetTDVectorData(0, time, data_size);
+        if (!field) return {};
+
+        unsigned int Nx = data_size[0], Ny = data_size[1], Nz = data_size[2];
+        for (unsigned int d = 0; d < 3; d++) {
+            for (unsigned int i = 0; i < Nx; i++) {
+                for (unsigned int j = 0; j < Ny; j++)
+                    delete[] field[d][i][j];
+                delete[] field[d][i];
+            }
+            delete[] field[d];
+        }
+        delete[] field;
+
+        return {Nx, Ny, Nz};
+    }
+
+    /**
+     * Read frequency-domain field data from an HDF5 dump file.
+     * Returns interleaved real/imaginary float array: [2*3*Nx*Ny*Nz]
+     * ordered as [d][i][j][k] with real then imag for each element.
+     *
+     * @param filename Path to HDF5 file
+     * @param freqIdx Frequency index to read
+     * @return Flat float array with re/im interleaved, empty if error
+     */
+    std::vector<float> readHDF5FDField(const std::string& filename, unsigned int freqIdx) {
+        HDF5_File_Reader reader(filename);
+        unsigned int data_size[4];
+        std::complex<float>**** field = reader.GetFDVectorData(freqIdx, data_size);
+        if (!field) return {};
+
+        unsigned int Nx = data_size[0], Ny = data_size[1], Nz = data_size[2];
+        std::vector<float> result(2 * 3 * Nx * Ny * Nz);
+        size_t pos = 0;
+        for (unsigned int d = 0; d < 3; d++)
+            for (unsigned int i = 0; i < Nx; i++)
+                for (unsigned int j = 0; j < Ny; j++)
+                    for (unsigned int k = 0; k < Nz; k++) {
+                        result[pos++] = field[d][i][j][k].real();
+                        result[pos++] = field[d][i][j][k].imag();
+                    }
+
+        // Free
+        for (unsigned int d = 0; d < 3; d++) {
+            for (unsigned int i = 0; i < Nx; i++) {
+                for (unsigned int j = 0; j < Ny; j++)
+                    delete[] field[d][i][j];
+                delete[] field[d][i];
+            }
+            delete[] field[d];
+        }
+        delete[] field;
+
+        return result;
+    }
+
+    /**
+     * Read frequencies from an FD HDF5 dump file.
+     */
+    std::vector<float> readHDF5Frequencies(const std::string& filename) {
+        HDF5_File_Reader reader(filename);
+        std::vector<float> freqs;
+        reader.ReadFrequencies(freqs);
+        return freqs;
+    }
+
+    /**
+     * Get the FD data dimensions [Nx, Ny, Nz] from frequency index 0.
+     */
+    std::vector<unsigned int> getHDF5FDDataSize(const std::string& filename) {
+        HDF5_File_Reader reader(filename);
+        unsigned int data_size[4];
+        std::complex<float>**** field = reader.GetFDVectorData(0, data_size);
+        if (!field) return {};
+
+        unsigned int Nx = data_size[0], Ny = data_size[1], Nz = data_size[2];
+        for (unsigned int d = 0; d < 3; d++) {
+            for (unsigned int i = 0; i < Nx; i++) {
+                for (unsigned int j = 0; j < Ny; j++)
+                    delete[] field[d][i][j];
+                delete[] field[d][i];
+            }
+            delete[] field[d];
+        }
+        delete[] field;
+
+        return {Nx, Ny, Nz};
+    }
+
 private:
     openEMS* ems_;
 
@@ -160,5 +380,15 @@ EMSCRIPTEN_BINDINGS(openems) {
         .function("getVV", &OpenEMSWrapper::getVV)
         .function("getVI", &OpenEMSWrapper::getVI)
         .function("getII", &OpenEMSWrapper::getII)
-        .function("getIV", &OpenEMSWrapper::getIV);
+        .function("getIV", &OpenEMSWrapper::getIV)
+        // HDF5 field data reading for NF2FF
+        .function("readHDF5Mesh", &OpenEMSWrapper::readHDF5Mesh)
+        .function("getHDF5MeshType", &OpenEMSWrapper::getHDF5MeshType)
+        .function("readHDF5TDField", &OpenEMSWrapper::readHDF5TDField)
+        .function("readHDF5TDTime", &OpenEMSWrapper::readHDF5TDTime)
+        .function("getHDF5NumTimeSteps", &OpenEMSWrapper::getHDF5NumTimeSteps)
+        .function("getHDF5TDDataSize", &OpenEMSWrapper::getHDF5TDDataSize)
+        .function("readHDF5FDField", &OpenEMSWrapper::readHDF5FDField)
+        .function("readHDF5Frequencies", &OpenEMSWrapper::readHDF5Frequencies)
+        .function("getHDF5FDDataSize", &OpenEMSWrapper::getHDF5FDDataSize);
 }

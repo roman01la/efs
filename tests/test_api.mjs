@@ -1954,7 +1954,7 @@ function testReadNF2FFSurfaceDataError() {
   }
 
   assert(threw, 'readNF2FFSurfaceData throws an error');
-  assert(errorMsg.includes('h5wasm'), `Error mentions h5wasm: "${errorMsg.slice(0, 60)}..."`);
+  assert(errorMsg.includes('readHDF5Mesh') || errorMsg.includes('h5wasm'), `Error mentions HDF5 requirement: "${errorMsg.slice(0, 80)}..."`);
   assert(errorMsg.includes('calcNF2FF'), `Error suggests calcNF2FF alternative`);
   assert(errorMsg.includes('nf2ff_box'), `Error mentions the box name`);
 }
