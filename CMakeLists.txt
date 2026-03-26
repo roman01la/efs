@@ -7,12 +7,18 @@ option(DISABLE_MPI  "Strip MPI support"              OFF)
 
 set(WITH_MPI OFF CACHE BOOL "" FORCE)
 
+option(ENABLE_MEMORY64 "Build with wasm64 (memory64) support" OFF)
+
 if (EMSCRIPTEN)
   set(DISABLE_VTK ON CACHE BOOL "" FORCE)
   set(DISABLE_CGAL ON CACHE BOOL "" FORCE)
   set(DISABLE_MPI ON CACHE BOOL "" FORCE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pthread -sPTHREAD_POOL_SIZE=4")
+  if (ENABLE_MEMORY64)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -sMEMORY64=1")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -sMEMORY64=1")
+  endif()
 endif()
 
 add_subdirectory(vendor/CSXCAD)
@@ -32,6 +38,10 @@ if (EMSCRIPTEN)
   target_include_directories(openems_wasm PRIVATE
     ${CMAKE_SOURCE_DIR}/vendor/openEMS
     ${CMAKE_SOURCE_DIR}/vendor/CSXCAD/src
+    ${Boost_INCLUDE_DIRS}
+    ${HDF5_INCLUDE_DIRS}
+    ${TinyXML_INCLUDE_DIR}
+    ${FPARSER_ROOT_DIR}/include
   )
   set_target_properties(openems_wasm PROPERTIES
     OUTPUT_NAME "openems"
@@ -53,4 +63,10 @@ if (EMSCRIPTEN)
     "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency||4"
     "-sDEFAULT_PTHREAD_STACK_SIZE=2097152"
   )
+  if (ENABLE_MEMORY64)
+    target_link_options(openems_wasm PRIVATE
+      "-sMEMORY64=1"
+      "-sMAXIMUM_MEMORY=8589934592"
+    )
+  endif()
 endif()
