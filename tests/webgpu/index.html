@@ -920,7 +920,7 @@ async function run() {
     }
 
     log('');
-    log('  Grid          | WebGPU       | WASM basic   | WASM SSE     | WASM64       | WASM64 SSE   | JS CPU       | GPU/SSE');
+    log('  Grid          | WebGPU       | WASM basic   | WASM SSE     | WASM SSEc    | WASM64 SSE   | JS CPU       | GPU/SSEc');
     log('  --------------|--------------|--------------|--------------|--------------|--------------|--------------|--------');
 
     for (const [Nx, Ny, Nz] of sizes) {
@@ -985,6 +985,7 @@ async function run() {
 
       const wasmBasicMC = runWASMBench(WASMModule, 0, 'basic');
       const wasmSseMC = runWASMBench(WASMModule, 1, 'sse');
+      const wasmSseCompMC = runWASMBench(WASMModule, 2, 'ssec');
       const wasm64MC = WASM64Module ? runWASMBench(WASM64Module, 0, 'basic64') : null;
       const wasm64SseMC = WASM64Module ? runWASMBench(WASM64Module, 1, 'sse64') : null;
 
@@ -1007,10 +1008,10 @@ async function run() {
 
       const pad = (s, n) => s.toString().padStart(n);
       const fmc = (v) => v != null ? pad(v.toFixed(0), 5) + ' MC/s' : '  N/A   ';
-      log(`  ${label.padEnd(14)}| ${fmc(gpuMC)}   | ${fmc(wasmBasicMC)}   | ${fmc(wasmSseMC)}   | ${fmc(wasm64MC)}   | ${fmc(wasm64SseMC)}   | ${fmc(cpuMC)}   | ${pad((wasmSseMC ? gpuMC/wasmSseMC : 0).toFixed(1), 4)}x`);
+      log(`  ${label.padEnd(14)}| ${fmc(gpuMC)}   | ${fmc(wasmBasicMC)}   | ${fmc(wasmSseMC)}   | ${fmc(wasmSseCompMC)}   | ${fmc(wasm64SseMC)}   | ${fmc(cpuMC)}   | ${pad((wasmSseCompMC ? gpuMC/wasmSseCompMC : 0).toFixed(1), 4)}x`);
 
       assert(maxDiff < 1e-3, `${label}: GPU matches JS CPU (diff=${maxDiff.toExponential(2)})`);
-      assert(true, `${label}: GPU=${gpuMC.toFixed(0)}, basic=${(wasmBasicMC||0).toFixed(0)}, SSE=${(wasmSseMC||0).toFixed(0)}, w64=${(wasm64MC||0).toFixed(0)}, w64SSE=${(wasm64SseMC||0).toFixed(0)}, JS=${cpuMC.toFixed(0)} MCells/s`);
+      assert(true, `${label}: GPU=${gpuMC.toFixed(0)}, basic=${(wasmBasicMC||0).toFixed(0)}, SSE=${(wasmSseMC||0).toFixed(0)}, SSEc=${(wasmSseCompMC||0).toFixed(0)}, w64SSE=${(wasm64SseMC||0).toFixed(0)}, JS=${cpuMC.toFixed(0)} MCells/s`);
     }
 
     // Load native benchmark results if available
@@ -1035,8 +1036,8 @@ async function run() {
     }
 
     log('');
-    log('  WASM basic = scalar C++ (no SIMD). WASM SSE = SIMD128 vectorized.');
-    log('  WASM64 = memory64 build (8GB max). JS CPU = pure JavaScript reference.');
+    log('  WASM basic = scalar C++. SSE = SIMD128. SSEc = SSE compressed (memory-optimized SIMD).');
+    log('  WASM64 SSE = memory64 build with SIMD. JS CPU = pure JavaScript reference.');
 
   } catch (e) {
     log(`  FAIL: Performance test: ${e.message}\n${e.stack}`);

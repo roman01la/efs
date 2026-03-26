@@ -990,9 +990,113 @@ async function main() {
     await testCylindricalMultigrid(Module);
   }
 
+  // Performance comparison with all WASM engines
+  if (Module && process.argv.includes('--bench')) {
+    await wasmBenchmark(Module);
+  }
+
   console.log(`\n${'='.repeat(50)}`);
   console.log(`Results: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
+}
+
+// -----------------------------------------------------------------------
+// WASM Engine Performance Benchmark (run with --bench flag)
+// -----------------------------------------------------------------------
+async function wasmBenchmark(Module) {
+  console.log('\n=== WASM Engine Performance Benchmark ===');
+
+  const engines = [
+    { type: 0, name: 'basic' },
+    { type: 1, name: 'sse' },
+    { type: 2, name: 'sse-compressed' },
+    { type: 3, name: 'multithreaded' },
+  ];
+
+  const sizes = [
+    [16, 16, 16],
+    [32, 32, 32],
+    [64, 64, 64],
+  ];
+
+  const STEPS = 105;
+
+  function makeGridLines(n, sp) {
+    return Array.from({length: n}, (_, i) => (i * sp).toExponential(10)).join(',');
+  }
+
+  function makeXML(Nx, Ny, Nz) {
+    const sp = 1e-3;
+    const mx = Math.floor(Nx/2), my = Math.floor(Ny/2), mz = Math.floor(Nz/2);
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<openEMS>
+  <FDTD NumberOfTimesteps="${STEPS}" endCriteria="1e-20" f_max="1e11">
+    <Excitation Type="0" f0="5e10" fc="5e10"/>
+    <BoundaryCond xmin="0" xmax="0" ymin="0" ymax="0" zmin="0" zmax="0"/>
+  </FDTD>
+  <ContinuousStructure CoordSystem="0">
+    <RectilinearGrid DeltaUnit="1" CoordSystem="0">
+      <XLines>${makeGridLines(Nx, sp)}</XLines>
+      <YLines>${makeGridLines(Ny, sp)}</YLines>
+      <ZLines>${makeGridLines(Nz, sp)}</ZLines>
+    </RectilinearGrid>
+    <Properties>
+      <Excitation ID="0" Name="exc" Number="0" Type="0" Excite="0,0,1">
+        <Primitives>
+          <Curve Priority="0">
+            <Vertex X="${mx*sp}" Y="${my*sp}" Z="${mz*sp}"/>
+            <Vertex X="${(mx+1)*sp}" Y="${(my+1)*sp}" Z="${(mz+1)*sp}"/>
+          </Curve>
+        </Primitives>
+      </Excitation>
+    </Properties>
+  </ContinuousStructure>
+</openEMS>`;
+  }
+
+  // Header
+  const hdr = ['Grid'.padEnd(12)];
+  for (const e of engines) hdr.push(e.name.padStart(14));
+  console.log('  ' + hdr.join(' | '));
+  console.log('  ' + '-'.repeat(12 + engines.length * 17));
+
+  for (const [Nx, Ny, Nz] of sizes) {
+    const cells = Nx * Ny * Nz;
+    const label = `${Nx}x${Ny}x${Nz}`;
+    const xml = makeXML(Nx, Ny, Nz);
+    const row = [label.padEnd(12)];
+
+    for (const eng of engines) {
+      const simDir = `/bench_${eng.name}_${label}`;
+      try { Module.FS.mkdir(simDir); } catch(e) {}
+      Module.FS.chdir(simDir);
+
+      const ems = new Module.OpenEMS();
+      ems.configure(eng.type, STEPS, 1e-20);
+
+      let mc = null;
+      try {
+        if (!ems.loadXML(xml)) throw new Error('load failed');
+        const rc = ems.setup();
+        if (rc !== 0) throw new Error(`setup rc=${rc}`);
+        const t0 = Date.now();
+        try { ems.run(); } catch(e) {
+          if (e !== 'unwind' && e?.message !== 'unwind') throw e;
+        }
+        const ms = Math.max(Date.now() - t0, 1);
+        mc = cells * STEPS / ms / 1000;
+      } catch(e) {
+        // setup or load error
+      }
+      try { ems.delete(); } catch(e) {}
+
+      row.push(mc != null ? `${mc.toFixed(0).padStart(8)} MC/s` : '       N/A   ');
+    }
+
+    console.log('  ' + row.join(' | '));
+  }
+
+  console.log('');
 }
 
 main().catch(e => {
