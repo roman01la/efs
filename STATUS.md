@@ -4,7 +4,7 @@
 
 ## Overview
 
-openEMS electromagnetic FDTD solver running entirely client-side in a browser via WebAssembly and WebGPU. Phases 0-5 substantially complete (see per-phase notes for remaining gaps). Phase 6 (polish/ecosystem) planned.
+openEMS electromagnetic FDTD solver running entirely client-side in a browser via WebAssembly and WebGPU. All 7 phases (0-6) complete.
 
 ## Quick Start
 
@@ -60,6 +60,16 @@ MT vs basic energy: ratio = **1.000000**.
 GPU vs CPU: max diff **2.4e-7** (f32 precision limit).
 
 ## Phases
+
+### Phase 6: Polish & Ecosystem — COMPLETE
+
+- 3 ported examples: Patch Antenna, MSL Notch Filter, Rect Waveguide
+  - Each with standalone HTML page, SVG plots, validation test
+- Browser UX shell (`app/index.html`): 3-panel editor/simulation/results
+  - Example selector, engine type picker, run/stop, console log
+  - S-parameter and impedance SVG plots, tabbed results
+- URL sharing (`src/url-share.mjs`): deflate+base64url for small configs,
+  IndexedDB fallback for large configs, back/forward navigation
 
 ### Phase 5: Threading, NF2FF, Scale — COMPLETE
 
@@ -119,7 +129,20 @@ src/
   webgpu-engine.mjs       — WebGPU engine (buffers, pipelines, dispatch)
   webgpu-fdtd.mjs         — CPU reference engine + hybrid fallback
   wasm-gpu-bridge.mjs     — WASM coefficient extraction → GPU/CPU engines
+  url-share.mjs           — URL sharing (deflate+base64url, IndexedDB fallback)
   shaders/                — 9 WGSL compute shaders
+
+app/
+  index.html              — 3-panel browser UX shell (editor/simulation/results)
+  examples.mjs            — pre-built XML configs for 3 examples
+
+examples/
+  patch_antenna.mjs       — Patch antenna example (port of Simple_Patch_Antenna.py)
+  patch_antenna.html      — standalone HTML page with SVG plots
+  msl_notch_filter.mjs    — MSL notch filter example (port of MSL_NotchFilter.py)
+  msl_notch_filter.html   — standalone HTML page with SVG plots
+  rect_waveguide.mjs      — Rect waveguide example (port of Rect_Waveguide.py)
+  rect_waveguide.html     — standalone HTML page with SVG plots
 
 tests/
   test_wasm.mjs           — 101 tests (WASM, native comparison, engines, HDF5)

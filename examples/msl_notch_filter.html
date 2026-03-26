@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MSL Notch Filter - antenna-prop</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 24px; background: #f5f5f5; }
+    h1 { font-size: 1.4rem; margin-bottom: 8px; }
+    p.desc { color: #555; margin-bottom: 16px; font-size: 0.9rem; }
+    #controls { margin-bottom: 16px; }
+    button { padding: 8px 20px; font-size: 1rem; cursor: pointer; border: 1px solid #333; background: #fff; border-radius: 4px; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    #status { margin-top: 8px; font-size: 0.85rem; color: #333; min-height: 1.2em; }
+    .plot-container { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 16px; max-width: 800px; }
+    .plot-title { font-size: 0.95rem; font-weight: 600; margin-bottom: 8px; }
+    svg { display: block; }
+    .axis-label { font-size: 12px; fill: #333; }
+    .tick-label { font-size: 10px; fill: #555; }
+    .grid-line { stroke: #e0e0e0; stroke-width: 0.5; }
+    .legend { font-size: 11px; }
+  </style>
+</head>
+<body>
+  <h1>MSL Notch Filter</h1>
+  <p class="desc">Microstrip line notch filter on RO4350B substrate with an open stub. Port of the openEMS Python tutorial.</p>
+
+  <div id="controls">
+    <button id="runBtn" onclick="runSim()">Run Simulation</button>
+    <div id="status"></div>
+  </div>
+
+  <div class="plot-container" id="plotArea" style="display:none;">
+    <div class="plot-title">S-Parameters</div>
+    <svg id="plot" width="760" height="420"></svg>
+  </div>
+
+  <script type="module">
+    import createOpenEMS from '../build-wasm/openems.js';
+    import { runMSLNotchFilter } from './msl_notch_filter.mjs';
+
+    const statusEl = document.getElementById('status');
+    const runBtn = document.getElementById('runBtn');
+    const plotArea = document.getElementById('plotArea');
+
+    function setStatus(msg) { statusEl.textContent = msg; }
+
+    window.runSim = async function() {
+      runBtn.disabled = true;
+      setStatus('Loading WASM module...');
+      try {
+        const Module = await createOpenEMS();
+        setStatus('Running simulation (this may take a minute)...');
+
+        // Give UI a chance to update
+        await new Promise(r => setTimeout(r, 50));
+
+        const result = await runMSLNotchFilter(Module);
+        setStatus('Simulation complete. Plotting results...');
+        drawPlot(result);
+        plotArea.style.display = '';
+        setStatus('Done.');
+      } catch (e) {
+        setStatus('Error: ' + e.message);
+        console.error(e);
+      } finally {
+        runBtn.disabled = false;
+      }
+    };
+
+    function drawPlot({ freq, s11_dB, s21_dB }) {
+      const svg = document.getElementById('plot');
+      const W = 760, H = 420;
+      const margin = { top: 20, right: 20, bottom: 50, left: 60 };
+      const pw = W - margin.left - margin.right;
+      const ph = H - margin.top - margin.bottom;
+
+      const fGHz = Array.from(freq).map(f => f / 1e9);
+      const xMin = 0, xMax = 7;
+      const yMin = -40, yMax = 5;
+
+      const sx = v => margin.left + (v - xMin) / (xMax - xMin) * pw;
+      const sy = v => margin.top + (yMax - v) / (yMax - yMin) * ph;
+
+      let html = '';
+
+      // Grid lines
+      for (let x = 0; x <= 7; x++) {
+        html += `<line x1="${sx(x)}" y1="${sy(yMax)}" x2="${sx(x)}" y2="${sy(yMin)}" class="grid-line"/>`;
+        html += `<text x="${sx(x)}" y="${sy(yMin) + 16}" text-anchor="middle" class="tick-label">${x}</text>`;
+      }
+      for (let y = yMin; y <= yMax; y += 5) {
+        html += `<line x1="${sx(xMin)}" y1="${sy(y)}" x2="${sx(xMax)}" y2="${sy(y)}" class="grid-line"/>`;
+        html += `<text x="${sx(xMin) - 6}" y="${sy(y) + 4}" text-anchor="end" class="tick-label">${y}</text>`;
+      }
+
+      // Axes border
+      html += `<rect x="${margin.left}" y="${margin.top}" width="${pw}" height="${ph}" fill="none" stroke="#333" stroke-width="1"/>`;
+
+      // Axis labels
+      html += `<text x="${margin.left + pw / 2}" y="${H - 8}" text-anchor="middle" class="axis-label">Frequency (GHz)</text>`;
+      html += `<text x="14" y="${margin.top + ph / 2}" text-anchor="middle" class="axis-label" transform="rotate(-90 14 ${margin.top + ph / 2})">S-Parameter (dB)</text>`;
+
+      // Plot S11
+      let path11 = '';
+      for (let i = 0; i < fGHz.length; i++) {
+        const x = sx(fGHz[i]);
+        const y = sy(Math.max(yMin, Math.min(yMax, s11_dB[i])));
+        path11 += (i === 0 ? 'M' : 'L') + `${x.toFixed(1)},${y.toFixed(1)}`;
+      }
+      html += `<path d="${path11}" fill="none" stroke="#000" stroke-width="2"/>`;
+
+      // Plot S21
+      let path21 = '';
+      for (let i = 0; i < fGHz.length; i++) {
+        const x = sx(fGHz[i]);
+        const y = sy(Math.max(yMin, Math.min(yMax, s21_dB[i])));
+        path21 += (i === 0 ? 'M' : 'L') + `${x.toFixed(1)},${y.toFixed(1)}`;
+      }
+      html += `<path d="${path21}" fill="none" stroke="#c00" stroke-width="2" stroke-dasharray="6,3"/>`;
+
+      // Legend
+      const lx = margin.left + pw - 140, ly = margin.top + 20;
+      html += `<line x1="${lx}" y1="${ly}" x2="${lx + 24}" y2="${ly}" stroke="#000" stroke-width="2"/>`;
+      html += `<text x="${lx + 30}" y="${ly + 4}" class="legend">S11</text>`;
+      html += `<line x1="${lx}" y1="${ly + 18}" x2="${lx + 24}" y2="${ly + 18}" stroke="#c00" stroke-width="2" stroke-dasharray="6,3"/>`;
+      html += `<text x="${lx + 30}" y="${ly + 22}" class="legend">S21</text>`;
+
+      svg.innerHTML = html;
+    }
+  </script>
+</body>
+</html>

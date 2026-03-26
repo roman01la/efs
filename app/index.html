@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>antenna-prop &mdash; openEMS WASM Simulator</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, sans-serif; font-size: 14px; background: #f5f5f5; color: #222; }
+#app {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-rows: auto 1fr;
+  gap: 8px;
+  height: 100vh;
+  padding: 8px;
+}
+header {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  background: #1a1a2e;
+  color: #eee;
+  border-radius: 4px;
+}
+header h1 { font-size: 16px; font-weight: 600; }
+header .spacer { flex: 1; }
+.panel {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.panel-header {
+  padding: 6px 10px;
+  background: #e8e8e8;
+  font-weight: 600;
+  font-size: 13px;
+  border-bottom: 1px solid #ddd;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.panel-body { flex: 1; overflow: auto; padding: 8px; }
+
+/* Editor panel */
+#editor-textarea {
+  width: 100%;
+  height: 100%;
+  min-height: 300px;
+  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-size: 12px;
+  border: 1px solid #ccc;
+  padding: 6px;
+  resize: none;
+  tab-size: 2;
+}
+select, button {
+  font-size: 12px;
+  padding: 3px 8px;
+  border: 1px solid #aaa;
+  border-radius: 3px;
+  background: #fff;
+  cursor: pointer;
+}
+button:hover { background: #eee; }
+button:active { background: #ddd; }
+button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+button.primary:hover { background: #1d4ed8; }
+button.danger { background: #dc2626; color: #fff; border-color: #dc2626; }
+button.danger:hover { background: #b91c1c; }
+
+/* Simulation panel */
+#sim-status { font-size: 12px; color: #555; }
+#sim-console {
+  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-size: 11px;
+  background: #1a1a1a;
+  color: #0f0;
+  padding: 6px;
+  flex: 1;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  min-height: 200px;
+}
+
+/* Results panel */
+.tab-bar {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid #ddd;
+  background: #f0f0f0;
+}
+.tab-btn {
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 5px 12px;
+  font-size: 12px;
+  background: transparent;
+  cursor: pointer;
+}
+.tab-btn.active { border-bottom-color: #2563eb; font-weight: 600; }
+.tab-content { display: none; padding: 8px; flex: 1; overflow: auto; }
+.tab-content.active { display: block; }
+.plot-container { width: 100%; min-height: 280px; }
+.plot-container svg { width: 100%; height: auto; }
+
+/* Loading overlay */
+#loading-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 1000;
+  justify-content: center;
+  align-items: center;
+  color: #fff;
+  font-size: 18px;
+}
+#loading-overlay.visible { display: flex; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>antenna-prop</h1>
+    <span style="font-size:12px;color:#aaa;">openEMS WASM Simulator</span>
+    <div class="spacer"></div>
+    <button id="btn-share" title="Copy shareable URL to clipboard">Share</button>
+  </header>
+
+  <!-- Left panel: Editor -->
+  <div class="panel" id="panel-editor">
+    <div class="panel-header">
+      Editor
+      <select id="example-select">
+        <option value="">-- Select Example --</option>
+        <option value="patch">Patch Antenna</option>
+        <option value="msl">MSL Notch Filter</option>
+        <option value="waveguide">Rect Waveguide</option>
+      </select>
+      <button id="btn-load-example">Load Example</button>
+    </div>
+    <div class="panel-body">
+      <textarea id="editor-textarea" spellcheck="false" placeholder="Paste or type openEMS XML config here..."></textarea>
+    </div>
+  </div>
+
+  <!-- Center panel: Simulation -->
+  <div class="panel" id="panel-sim">
+    <div class="panel-header">
+      Simulation
+      <select id="engine-select">
+        <option value="0">basic</option>
+        <option value="1">sse</option>
+        <option value="2">sse-compressed</option>
+        <option value="3">multithreaded</option>
+      </select>
+      <button id="btn-run" class="primary">Run</button>
+      <button id="btn-stop" class="danger" disabled>Stop</button>
+    </div>
+    <div class="panel-body" style="display:flex;flex-direction:column;">
+      <div id="sim-status">
+        <span id="status-text">Idle</span> |
+        Timestep: <span id="status-ts">0</span> |
+        Elapsed: <span id="status-elapsed">0.0s</span>
+      </div>
+      <div id="sim-console"></div>
+    </div>
+  </div>
+
+  <!-- Right panel: Results -->
+  <div class="panel" id="panel-results">
+    <div class="tab-bar">
+      <button class="tab-btn active" data-tab="tab-sparam">S-Parameters</button>
+      <button class="tab-btn" data-tab="tab-impedance">Impedance</button>
+      <button class="tab-btn" data-tab="tab-radiation">Radiation</button>
+      <button class="tab-btn" data-tab="tab-raw">Raw Data</button>
+    </div>
+    <div id="tab-sparam" class="tab-content active">
+      <div id="plot-sparam" class="plot-container"><p style="color:#888;">Run a simulation to see results.</p></div>
+    </div>
+    <div id="tab-impedance" class="tab-content">
+      <div id="plot-impedance" class="plot-container"><p style="color:#888;">Run a simulation to see results.</p></div>
+    </div>
+    <div id="tab-radiation" class="tab-content">
+      <div id="plot-radiation" class="plot-container"><p style="color:#888;">NF2FF data required.</p></div>
+    </div>
+    <div id="tab-raw" class="tab-content">
+      <pre id="raw-data" style="font-size:11px;overflow:auto;max-height:100%;">No data yet.</pre>
+    </div>
+  </div>
+</div>
+
+<div id="loading-overlay"><span>Loading WASM module...</span></div>
+
+<script type="module">
+import { PATCH_ANTENNA, MSL_NOTCH_FILTER, RECT_WAVEGUIDE } from './examples.mjs';
+import { encodeConfig, decodeConfig, shareConfig, loadSharedConfig } from '../src/url-share.mjs';
+
+// ---- Examples map ----
+const EXAMPLES = {
+  patch: PATCH_ANTENNA,
+  msl: MSL_NOTCH_FILTER,
+  waveguide: RECT_WAVEGUIDE,
+};
+
+// ---- DOM references ----
+const editorTextarea = document.getElementById('editor-textarea');
+const exampleSelect = document.getElementById('example-select');
+const btnLoadExample = document.getElementById('btn-load-example');
+const btnRun = document.getElementById('btn-run');
+const btnStop = document.getElementById('btn-stop');
+const btnShare = document.getElementById('btn-share');
+const engineSelect = document.getElementById('engine-select');
+const statusText = document.getElementById('status-text');
+const statusTs = document.getElementById('status-ts');
+const statusElapsed = document.getElementById('status-elapsed');
+const simConsole = document.getElementById('sim-console');
+const loadingOverlay = document.getElementById('loading-overlay');
+const rawDataPre = document.getElementById('raw-data');
+
+// ---- Tab switching ----
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(btn.dataset.tab).classList.add('active');
+  });
+});
+
+// ---- Console log helper ----
+function logConsole(msg) {
+  simConsole.textContent += msg + '\n';
+  simConsole.scrollTop = simConsole.scrollHeight;
+}
+
+// ---- Load example ----
+btnLoadExample.addEventListener('click', () => {
+  const key = exampleSelect.value;
+  if (key && EXAMPLES[key]) {
+    editorTextarea.value = EXAMPLES[key];
+    logConsole(`Loaded example: ${exampleSelect.options[exampleSelect.selectedIndex].text}`);
+  }
+});
+
+// ---- Share ----
+btnShare.addEventListener('click', async () => {
+  const xml = editorTextarea.value.trim();
+  if (!xml) { logConsole('Nothing to share - editor is empty.'); return; }
+  try {
+    const fragment = await shareConfig(xml);
+    const url = `${location.origin}${location.pathname}#${fragment}`;
+    await navigator.clipboard.writeText(url);
+    logConsole(`Shareable URL copied to clipboard (${url.length} chars).`);
+  } catch (e) {
+    logConsole(`Share error: ${e.message}`);
+  }
+});
+
+// ---- Load from URL on page load ----
+async function loadFromURL() {
+  try {
+    const xml = await loadSharedConfig();
+    if (xml) {
+      editorTextarea.value = xml;
+      logConsole('Config loaded from URL.');
+    }
+  } catch (e) {
+    logConsole(`Failed to load config from URL: ${e.message}`);
+  }
+}
+
+// ---- Back/forward navigation ----
+window.addEventListener('hashchange', async () => {
+  await loadFromURL();
+});
+
+// ---- SVG Plotting ----
+
+/**
+ * Render a simple line chart in SVG.
+ * @param {HTMLElement} container
+ * @param {Object} opts
+ * @param {string} opts.title
+ * @param {string} opts.xLabel
+ * @param {string} opts.yLabel
+ * @param {Array<{x: number[], y: number[], label: string, color: string}>} opts.lines
+ */
+function plotSVG(container, { title, xLabel, yLabel, lines }) {
+  const W = 520, H = 320;
+  const margin = { top: 30, right: 20, bottom: 40, left: 55 };
+  const pw = W - margin.left - margin.right;
+  const ph = H - margin.top - margin.bottom;
+
+  // Compute data bounds
+  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  for (const line of lines) {
+    for (let i = 0; i < line.x.length; i++) {
+      const xv = line.x[i], yv = line.y[i];
+      if (!isFinite(xv) || !isFinite(yv)) continue;
+      if (xv < xMin) xMin = xv;
+      if (xv > xMax) xMax = xv;
+      if (yv < yMin) yMin = yv;
+      if (yv > yMax) yMax = yv;
+    }
+  }
+
+  if (!isFinite(xMin)) { xMin = 0; xMax = 1; }
+  if (!isFinite(yMin)) { yMin = 0; yMax = 1; }
+  if (xMin === xMax) { xMin -= 0.5; xMax += 0.5; }
+  if (yMin === yMax) { yMin -= 0.5; yMax += 0.5; }
+
+  // Add 5% padding
+  const xPad = (xMax - xMin) * 0.05 || 0.1;
+  const yPad = (yMax - yMin) * 0.05 || 0.1;
+  xMin -= xPad; xMax += xPad;
+  yMin -= yPad; yMax += yPad;
+
+  const sx = (v) => margin.left + ((v - xMin) / (xMax - xMin)) * pw;
+  const sy = (v) => margin.top + (1 - (v - yMin) / (yMax - yMin)) * ph;
+
+  // Generate tick values
+  function ticks(lo, hi, count) {
+    const step = niceStep((hi - lo) / count);
+    const start = Math.ceil(lo / step) * step;
+    const arr = [];
+    for (let v = start; v <= hi + step * 0.01; v += step) arr.push(v);
+    return arr;
+  }
+  function niceStep(rough) {
+    const mag = Math.pow(10, Math.floor(Math.log10(rough)));
+    const norm = rough / mag;
+    if (norm <= 1) return mag;
+    if (norm <= 2) return 2 * mag;
+    if (norm <= 5) return 5 * mag;
+    return 10 * mag;
+  }
+
+  function fmtNum(v) {
+    if (Math.abs(v) >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+    if (Math.abs(v) >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+    if (Math.abs(v) < 0.01 && v !== 0) return v.toExponential(1);
+    return Number(v.toPrecision(4)).toString();
+  }
+
+  const xticks = ticks(xMin, xMax, 6);
+  const yticks = ticks(yMin, yMax, 5);
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">`;
+  svg += `<rect width="${W}" height="${H}" fill="#fafafa"/>`;
+
+  // Title
+  svg += `<text x="${W / 2}" y="16" text-anchor="middle" font-size="13" font-weight="600">${esc(title)}</text>`;
+
+  // Grid + axes
+  svg += `<g stroke="#e0e0e0" stroke-width="0.5">`;
+  for (const v of xticks) svg += `<line x1="${sx(v)}" y1="${margin.top}" x2="${sx(v)}" y2="${margin.top + ph}"/>`;
+  for (const v of yticks) svg += `<line x1="${margin.left}" y1="${sy(v)}" x2="${margin.left + pw}" y2="${sy(v)}"/>`;
+  svg += `</g>`;
+
+  // Axis lines
+  svg += `<line x1="${margin.left}" y1="${margin.top + ph}" x2="${margin.left + pw}" y2="${margin.top + ph}" stroke="#333" stroke-width="1"/>`;
+  svg += `<line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top + ph}" stroke="#333" stroke-width="1"/>`;
+
+  // X ticks
+  for (const v of xticks) {
+    svg += `<text x="${sx(v)}" y="${margin.top + ph + 14}" text-anchor="middle" font-size="10">${fmtNum(v)}</text>`;
+  }
+  // Y ticks
+  for (const v of yticks) {
+    svg += `<text x="${margin.left - 5}" y="${sy(v) + 3}" text-anchor="end" font-size="10">${fmtNum(v)}</text>`;
+  }
+
+  // Axis labels
+  svg += `<text x="${W / 2}" y="${H - 4}" text-anchor="middle" font-size="11">${esc(xLabel)}</text>`;
+  svg += `<text x="12" y="${H / 2}" text-anchor="middle" font-size="11" transform="rotate(-90,12,${H / 2})">${esc(yLabel)}</text>`;
+
+  // Data lines
+  const colors = ['#2563eb', '#dc2626', '#059669', '#d97706', '#7c3aed', '#0891b2'];
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
+    const color = line.color || colors[li % colors.length];
+    let path = '';
+    let first = true;
+    for (let i = 0; i < line.x.length; i++) {
+      if (!isFinite(line.x[i]) || !isFinite(line.y[i])) continue;
+      const px = sx(line.x[i]);
+      const py = sy(line.y[i]);
+      path += first ? `M${px.toFixed(1)},${py.toFixed(1)}` : `L${px.toFixed(1)},${py.toFixed(1)}`;
+      first = false;
+    }
+    svg += `<path d="${path}" fill="none" stroke="${color}" stroke-width="1.5"/>`;
+  }
+
+  // Legend
+  if (lines.length > 1) {
+    const lx = margin.left + 10;
+    let ly = margin.top + 14;
+    for (let li = 0; li < lines.length; li++) {
+      const color = lines[li].color || colors[li % colors.length];
+      svg += `<line x1="${lx}" y1="${ly}" x2="${lx + 16}" y2="${ly}" stroke="${color}" stroke-width="2"/>`;
+      svg += `<text x="${lx + 20}" y="${ly + 3}" font-size="10">${esc(lines[li].label || `trace ${li + 1}`)}</text>`;
+      ly += 14;
+    }
+  }
+
+  svg += '</svg>';
+  container.innerHTML = svg;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ---- WASM module loading ----
+let wasmModule = null;
+
+async function loadWASM() {
+  if (wasmModule) return wasmModule;
+  loadingOverlay.classList.add('visible');
+  try {
+    const factory = (await import('/build-wasm/openems.js')).default;
+    wasmModule = await factory();
+    logConsole('WASM module loaded.');
+    return wasmModule;
+  } finally {
+    loadingOverlay.classList.remove('visible');
+  }
+}
+
+// ---- Simulation runner ----
+let running = false;
+
+btnRun.addEventListener('click', async () => {
+  if (running) return;
+  const xml = editorTextarea.value.trim();
+  if (!xml) { logConsole('Error: Editor is empty.'); return; }
+
+  running = true;
+  btnRun.disabled = true;
+  btnStop.disabled = false;
+  statusText.textContent = 'Loading...';
+  simConsole.textContent = '';
+  logConsole('Starting simulation...');
+
+  const engineType = parseInt(engineSelect.value, 10);
+  const t0 = performance.now();
+
+  try {
+    const Module = await loadWASM();
+    statusText.textContent = 'Running';
+
+    // Create simulation directory
+    const simPath = '/sim_' + Date.now();
+    try { Module.FS.mkdir(simPath); } catch (e) { /* may exist */ }
+    Module.FS.chdir(simPath);
+
+    // Load and run
+    const ems = new Module.OpenEMS();
+    ems.configure(engineType, 1000000, 1e-5);
+
+    logConsole('Loading XML config...');
+    const loadOk = ems.loadXML(xml);
+    if (!loadOk) throw new Error('Failed to load simulation XML');
+
+    logConsole('Setting up FDTD...');
+    const rc = ems.setup();
+    if (rc !== 0) throw new Error(`SetupFDTD failed with code ${rc}`);
+
+    logConsole('Running FDTD engine (type=' + engineType + ')...');
+    ems.run();
+
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+    statusElapsed.textContent = elapsed + 's';
+
+    // Try to read timestep count from engine
+    const nrTS = ems.GetNumberOfTimesteps ? ems.GetNumberOfTimesteps() : '?';
+    statusTs.textContent = String(nrTS);
+    statusText.textContent = 'Done';
+    logConsole(`Simulation complete. ${nrTS} timesteps in ${elapsed}s.`);
+
+    // ---- Post-processing: read probe data ----
+    logConsole('Reading probe data...');
+    const probeFiles = [];
+    try {
+      const files = Module.FS.readdir(simPath);
+      for (const f of files) {
+        if (f.startsWith('port_') && (f.includes('_ut') || f.includes('_it'))) {
+          probeFiles.push(f);
+        }
+      }
+    } catch (e) {
+      logConsole('Warning: could not read sim directory.');
+    }
+
+    const probeData = {};
+    for (const f of probeFiles) {
+      try {
+        const text = new TextDecoder().decode(Module.FS.readFile(`${simPath}/${f}`));
+        probeData[f] = text;
+      } catch (e) {
+        logConsole(`Warning: could not read ${f}`);
+      }
+    }
+
+    // Display raw data
+    if (Object.keys(probeData).length > 0) {
+      let rawText = '';
+      for (const [name, text] of Object.entries(probeData)) {
+        rawText += `=== ${name} ===\n`;
+        // Show first 20 lines
+        const lines = text.split('\n');
+        rawText += lines.slice(0, 20).join('\n');
+        if (lines.length > 20) rawText += `\n... (${lines.length} lines total)`;
+        rawText += '\n\n';
+      }
+      rawDataPre.textContent = rawText;
+    }
+
+    // Parse probes for plotting
+    const parsedProbes = {};
+    for (const [name, text] of Object.entries(probeData)) {
+      const lines = text.split('\n').filter(l => !l.startsWith('%') && l.trim());
+      const time = new Float64Array(lines.length);
+      const values = new Float64Array(lines.length);
+      for (let i = 0; i < lines.length; i++) {
+        const parts = lines[i].trim().split(/\s+/);
+        time[i] = parseFloat(parts[0]);
+        values[i] = parseFloat(parts[1]);
+      }
+      parsedProbes[name] = { time, values };
+    }
+
+    // Try S-parameter plot if we have port_ut1 and port_it1
+    tryPlotSParams(parsedProbes);
+    tryPlotImpedance(parsedProbes);
+
+    ems.delete();
+  } catch (e) {
+    statusText.textContent = 'Error';
+    logConsole(`Error: ${e.message}`);
+    console.error(e);
+  } finally {
+    running = false;
+    btnRun.disabled = false;
+    btnStop.disabled = true;
+  }
+});
+
+btnStop.addEventListener('click', () => {
+  // WASM runs synchronously in main thread; stop is a no-op for now.
+  // With Web Worker support this would post a stop message.
+  logConsole('Stop requested (note: synchronous WASM cannot be interrupted).');
+});
+
+function tryPlotSParams(probes) {
+  // Look for voltage/current probe pairs
+  const utKeys = Object.keys(probes).filter(k => k.includes('_ut'));
+  const itKeys = Object.keys(probes).filter(k => k.includes('_it'));
+
+  if (utKeys.length === 0 || itKeys.length === 0) {
+    logConsole('No port probe data found for S-parameter plot.');
+    return;
+  }
+
+  // Simple S11 from first port: S11 = (Z - Z0) / (Z + Z0) via V/I
+  const ut = probes[utKeys[0]];
+  const it = probes[itKeys[0]];
+  if (!ut || !it || ut.time.length < 10) return;
+
+  // Compute DFT and S11
+  const N = Math.min(ut.time.length, it.time.length);
+  const dt = ut.time[1] - ut.time[0];
+  const fmax = 0.5 / dt;
+  const nf = 201;
+  const freq = new Float64Array(nf);
+  for (let i = 0; i < nf; i++) freq[i] = (i / (nf - 1)) * fmax;
+
+  // DFT
+  function dft(time, values, freqs) {
+    const re = new Float64Array(freqs.length);
+    const im = new Float64Array(freqs.length);
+    for (let k = 0; k < freqs.length; k++) {
+      const omega = 2 * Math.PI * freqs[k];
+      let sr = 0, si = 0;
+      for (let n = 0; n < time.length; n++) {
+        const w = n > 0 ? time[n] - time[n - 1] : (time.length > 1 ? time[1] - time[0] : 1);
+        sr += values[n] * Math.cos(omega * time[n]) * w;
+        si -= values[n] * Math.sin(omega * time[n]) * w;
+      }
+      re[k] = sr;
+      im[k] = si;
+    }
+    return { re, im };
+  }
+
+  const Uf = dft(ut.time, ut.values, freq);
+  const If = dft(it.time, it.values, freq);
+
+  // Z = U / I, S11 = (Z - 50) / (Z + 50)
+  const Z0 = 50;
+  const s11_dB = new Float64Array(nf);
+  const z_re = new Float64Array(nf);
+  const z_im = new Float64Array(nf);
+
+  for (let i = 0; i < nf; i++) {
+    const denom = If.re[i] * If.re[i] + If.im[i] * If.im[i];
+    if (denom < 1e-30) { s11_dB[i] = 0; z_re[i] = 0; z_im[i] = 0; continue; }
+    const zr = (Uf.re[i] * If.re[i] + Uf.im[i] * If.im[i]) / denom;
+    const zi = (Uf.im[i] * If.re[i] - Uf.re[i] * If.im[i]) / denom;
+    z_re[i] = zr;
+    z_im[i] = zi;
+
+    // Gamma = (Z - Z0) / (Z + Z0)
+    const gnr = zr - Z0;
+    const gni = zi;
+    const gdr = zr + Z0;
+    const gdi = zi;
+    const gd2 = gdr * gdr + gdi * gdi;
+    const gr = (gnr * gdr + gni * gdi) / gd2;
+    const gi = (gni * gdr - gnr * gdi) / gd2;
+    const mag = Math.sqrt(gr * gr + gi * gi);
+    s11_dB[i] = 20 * Math.log10(Math.max(mag, 1e-15));
+  }
+
+  // Convert freq to GHz for display
+  const freqGHz = Array.from(freq).map(f => f / 1e9);
+
+  plotSVG(document.getElementById('plot-sparam'), {
+    title: 'S11 (Return Loss)',
+    xLabel: 'Frequency (GHz)',
+    yLabel: 'S11 (dB)',
+    lines: [{ x: freqGHz, y: Array.from(s11_dB), label: 'S11', color: '#2563eb' }],
+  });
+
+  logConsole('S-parameter plot updated.');
+
+  // Store for impedance plot
+  window._lastZdata = { freqGHz, z_re, z_im };
+}
+
+function tryPlotImpedance(probes) {
+  // Use data computed by tryPlotSParams
+  setTimeout(() => {
+    if (!window._lastZdata) return;
+    const { freqGHz, z_re, z_im } = window._lastZdata;
+    plotSVG(document.getElementById('plot-impedance'), {
+      title: 'Input Impedance',
+      xLabel: 'Frequency (GHz)',
+      yLabel: 'Z (Ohm)',
+      lines: [
+        { x: freqGHz, y: Array.from(z_re), label: 'Re(Z)', color: '#2563eb' },
+        { x: freqGHz, y: Array.from(z_im), label: 'Im(Z)', color: '#dc2626' },
+      ],
+    });
+    logConsole('Impedance plot updated.');
+  }, 0);
+}
+
+// ---- Init ----
+loadFromURL();
+</script>
+</body>
+</html>

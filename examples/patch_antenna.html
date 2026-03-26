@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Patch Antenna Simulation</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #f5f5f5;
+    color: #333;
+    padding: 20px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  h1 { margin-bottom: 8px; }
+  .subtitle { color: #666; margin-bottom: 20px; }
+  .controls {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 20px;
+  }
+  button {
+    background: #2563eb;
+    color: #fff;
+    border: none;
+    padding: 10px 24px;
+    border-radius: 6px;
+    font-size: 15px;
+    cursor: pointer;
+  }
+  button:disabled {
+    background: #93c5fd;
+    cursor: not-allowed;
+  }
+  button:hover:not(:disabled) { background: #1d4ed8; }
+  #status {
+    margin-top: 12px;
+    padding: 8px 12px;
+    background: #f0f9ff;
+    border-left: 3px solid #2563eb;
+    font-size: 14px;
+    white-space: pre-wrap;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .results {
+    display: none;
+    gap: 20px;
+  }
+  .results.visible {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .panel {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .panel h3 { margin-bottom: 12px; font-size: 16px; }
+  .panel.full-width { grid-column: 1 / -1; }
+  svg { width: 100%; height: auto; }
+  .info-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 16px;
+    font-size: 14px;
+  }
+  .info-grid dt { font-weight: 600; }
+  .info-grid dd { color: #555; }
+  @media (max-width: 768px) {
+    .results.visible { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Simple Patch Antenna</h1>
+<p class="subtitle">FR4 substrate, 32x40 mm patch, lumped port feed at x=-6 mm</p>
+
+<div class="controls">
+  <button id="runBtn" onclick="startSimulation()">Run Simulation</button>
+  <div id="status">Ready. Click "Run Simulation" to begin.</div>
+</div>
+
+<div class="results" id="results">
+  <div class="panel" id="summaryPanel">
+    <h3>Summary</h3>
+    <dl class="info-grid" id="summaryInfo"></dl>
+  </div>
+
+  <div class="panel" id="s11Panel">
+    <h3>S11 (Input Matching)</h3>
+    <div id="s11Plot"></div>
+  </div>
+
+  <div class="panel" id="zinPanel">
+    <h3>Input Impedance</h3>
+    <div id="zinPlot"></div>
+  </div>
+
+  <div class="panel" id="patternPanel">
+    <h3>Radiation Pattern</h3>
+    <div id="patternPlot"></div>
+  </div>
+</div>
+
+<script type="module">
+// We inline the necessary logic to avoid import map complexity in the browser.
+// The WASM module must be served from build-wasm/openems.js relative to this file.
+
+const statusEl = document.getElementById('status');
+const runBtn = document.getElementById('runBtn');
+
+function log(msg) {
+  statusEl.textContent += '\n' + msg;
+  statusEl.scrollTop = statusEl.scrollHeight;
+}
+
+window.startSimulation = async function () {
+  runBtn.disabled = true;
+  statusEl.textContent = 'Loading WASM module...';
+
+  try {
+    // Load WASM
+    const moduleFactory = await import('../build-wasm/openems.js');
+    const create = moduleFactory.default || moduleFactory;
+    const Module = await create();
+    if (!Module.ContinuousStructure) {
+      log('Error: CSXCAD bindings not available. Rebuild WASM.');
+      runBtn.disabled = false;
+      return;
+    }
+    log('WASM module loaded.');
+
+    // Dynamic import of the example
+    const { runPatchAntenna } = await import('./patch_antenna.mjs');
+
+    const results = await runPatchAntenna(Module, {
+      onProgress: (msg) => log(msg),
+    });
+
+    log('Rendering plots...');
+    renderResults(results);
+    document.getElementById('results').classList.add('visible');
+    log('Complete!');
+  } catch (e) {
+    log('Error: ' + e.message);
+    console.error(e);
+  } finally {
+    runBtn.disabled = false;
+  }
+};
+
+function renderResults(r) {
+  // Summary
+  const info = document.getElementById('summaryInfo');
+  const fRes = r.resonance_freq;
+  let minS11 = 0;
+  for (const v of r.s11_dB) if (v < minS11) minS11 = v;
+
+  const items = [
+    ['Resonance', fRes ? (fRes / 1e9).toFixed(3) + ' GHz' : 'Not found'],
+    ['Min S11', minS11.toFixed(1) + ' dB'],
+  ];
+  if (fRes) {
+    let ci = 0, cd = Infinity;
+    for (let i = 0; i < r.freq.length; i++) {
+      const d = Math.abs(r.freq[i] - fRes);
+      if (d < cd) { cd = d; ci = i; }
+    }
+    items.push(['Zin at resonance', r.zin_re[ci].toFixed(1) + ' + j' + r.zin_im[ci].toFixed(1) + ' Ohm']);
+  }
+  if (r.nf2ff) {
+    items.push(['Dmax', (10 * Math.log10(r.nf2ff.Dmax)).toFixed(1) + ' dBi']);
+  }
+  info.innerHTML = items.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+
+  // S11 plot
+  renderLinePlot('s11Plot', r.freq.map(f => f / 1e9), [{ data: r.s11_dB, color: '#000', label: 'S11' }],
+    'Frequency (GHz)', 'S11 (dB)', null, null);
+
+  // Zin plot
+  renderLinePlot('zinPlot', r.freq.map(f => f / 1e9), [
+    { data: r.zin_re, color: '#000', label: 'Re{Zin}' },
+    { data: r.zin_im, color: '#dc2626', label: 'Im{Zin}', dash: true },
+  ], 'Frequency (GHz)', 'Impedance (Ohm)', null, null);
+
+  // Radiation pattern
+  if (r.nf2ff) {
+    const nTheta = r.nf2ff.nTheta;
+    const nPhi = r.nf2ff.nPhi;
+    const xzData = [];
+    const yzData = [];
+    for (let i = 0; i < nTheta; i++) {
+      xzData.push(r.nf2ff.E_norm_dBi[i * nPhi + 0]);
+      yzData.push(r.nf2ff.E_norm_dBi[i * nPhi + 1]);
+    }
+    renderLinePlot('patternPlot', r.nf2ff.theta, [
+      { data: xzData, color: '#000', label: 'xz-plane' },
+      { data: yzData, color: '#dc2626', label: 'yz-plane', dash: true },
+    ], 'Theta (deg)', 'Directivity (dBi)', null, null);
+  } else {
+    document.getElementById('patternPlot').innerHTML = '<p style="color:#999">No far-field data (no resonance found below -10 dB)</p>';
+  }
+}
+
+/**
+ * Render a simple line plot using SVG.
+ */
+function renderLinePlot(containerId, xData, series, xLabel, yLabel) {
+  const W = 560, H = 340;
+  const m = { top: 30, right: 20, bottom: 50, left: 65 };
+  const pw = W - m.left - m.right;
+  const ph = H - m.top - m.bottom;
+
+  const xMin = Math.min(...xData);
+  const xMax = Math.max(...xData);
+
+  let yMin = Infinity, yMax = -Infinity;
+  for (const s of series) {
+    for (const v of s.data) {
+      if (isFinite(v)) {
+        if (v < yMin) yMin = v;
+        if (v > yMax) yMax = v;
+      }
+    }
+  }
+  // Add 10% margin
+  const yRange = yMax - yMin || 1;
+  yMin -= yRange * 0.1;
+  yMax += yRange * 0.1;
+
+  function sx(v) { return m.left + (v - xMin) / (xMax - xMin) * pw; }
+  function sy(v) { return m.top + (1 - (v - yMin) / (yMax - yMin)) * ph; }
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`;
+
+  // Grid
+  svg += `<rect x="${m.left}" y="${m.top}" width="${pw}" height="${ph}" fill="none" stroke="#ddd"/>`;
+  const nGridY = 5;
+  for (let i = 0; i <= nGridY; i++) {
+    const v = yMin + i * (yMax - yMin) / nGridY;
+    const y = sy(v);
+    svg += `<line x1="${m.left}" y1="${y}" x2="${m.left + pw}" y2="${y}" stroke="#eee"/>`;
+    svg += `<text x="${m.left - 6}" y="${y + 4}" text-anchor="end" font-size="11" fill="#666">${niceNum(v)}</text>`;
+  }
+  const nGridX = 5;
+  for (let i = 0; i <= nGridX; i++) {
+    const v = xMin + i * (xMax - xMin) / nGridX;
+    const x = sx(v);
+    svg += `<line x1="${x}" y1="${m.top}" x2="${x}" y2="${m.top + ph}" stroke="#eee"/>`;
+    svg += `<text x="${x}" y="${m.top + ph + 18}" text-anchor="middle" font-size="11" fill="#666">${niceNum(v)}</text>`;
+  }
+
+  // Axes labels
+  svg += `<text x="${m.left + pw / 2}" y="${H - 5}" text-anchor="middle" font-size="12" fill="#333">${xLabel}</text>`;
+  svg += `<text x="14" y="${m.top + ph / 2}" text-anchor="middle" font-size="12" fill="#333" transform="rotate(-90,14,${m.top + ph / 2})">${yLabel}</text>`;
+
+  // Series
+  for (const s of series) {
+    let path = '';
+    let started = false;
+    for (let i = 0; i < xData.length; i++) {
+      if (!isFinite(s.data[i])) continue;
+      const x = sx(xData[i]);
+      const y = sy(Math.max(yMin, Math.min(yMax, s.data[i])));
+      path += (started ? ' L' : 'M') + `${x.toFixed(1)},${y.toFixed(1)}`;
+      started = true;
+    }
+    const dashAttr = s.dash ? ' stroke-dasharray="6,3"' : '';
+    svg += `<path d="${path}" fill="none" stroke="${s.color}" stroke-width="1.5"${dashAttr}/>`;
+  }
+
+  // Legend
+  let lx = m.left + 10;
+  for (const s of series) {
+    const dashAttr = s.dash ? ' stroke-dasharray="4,2"' : '';
+    svg += `<line x1="${lx}" y1="${m.top + 14}" x2="${lx + 20}" y2="${m.top + 14}" stroke="${s.color}" stroke-width="2"${dashAttr}/>`;
+    svg += `<text x="${lx + 24}" y="${m.top + 18}" font-size="11" fill="#333">${s.label}</text>`;
+    lx += 24 + s.label.length * 7 + 12;
+  }
+
+  svg += '</svg>';
+  document.getElementById(containerId).innerHTML = svg;
+}
+
+function niceNum(v) {
+  if (Math.abs(v) >= 1000) return v.toFixed(0);
+  if (Math.abs(v) >= 100) return v.toFixed(0);
+  if (Math.abs(v) >= 10) return v.toFixed(1);
+  if (Math.abs(v) >= 1) return v.toFixed(2);
+  return v.toPrecision(3);
+}
+</script>
+
+</body>
+</html>
