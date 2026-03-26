@@ -96,14 +96,21 @@ export function createNF2FFBox(sim, name, start, stop, opts = {}) {
  *   @param {Float64Array[]} face.H - H-field components [Hx, Hy, Hz] as flat arrays over the face mesh
  *   @param {Object} face.mesh - { x: Float64Array, y: Float64Array, z: Float64Array } mesh lines for this face
  *   @param {number[]} face.normal - [nx, ny, nz] outward normal direction (one component is +/-1, rest 0)
+ *   @param {number} [face.meshType=0] - 0 = Cartesian, 1 = cylindrical (rho, alpha, z)
  * @param {number} freq - Single frequency [Hz]
  * @param {Float64Array|number[]} theta - Theta observation angles [radians]
  * @param {Float64Array|number[]} phi - Phi observation angles [radians]
  * @param {number[]} [center=[0,0,0]] - Phase reference center [x, y, z]
  * @param {number} [radius=1] - Far-field observation radius [m]
+ * @param {Object} [opts] - Additional options
+ * @param {number} [opts.meshType=0] - Default mesh type for faces: 0 = Cartesian, 1 = cylindrical
+ * @param {Object} [opts.mirror] - Mirror plane configuration
+ * @param {string} opts.mirror.type - 'PEC' or 'PMC'
+ * @param {number} opts.mirror.direction - Mirror direction: 0 (x), 1 (y), or 2 (z)
+ * @param {number} opts.mirror.position - Mirror plane position along the direction axis
  * @returns {{ E_theta_re, E_theta_im, E_phi_re, E_phi_im, Prad, Dmax, P_rad }}
  */
-export function computeNF2FF(surfaceData, freq, theta, phi, center = [0, 0, 0], radius = 1) {
+export function computeNF2FF(surfaceData, freq, theta, phi, center = [0, 0, 0], radius = 1, opts = {}) {
   const nTheta = theta.length;
   const nPhi = phi.length;
   const nAngles = nTheta * nPhi;
@@ -123,150 +130,264 @@ export function computeNF2FF(surfaceData, freq, theta, phi, center = [0, 0, 0], 
   // Accumulated radiated power from Poynting vector on the surfaces
   let radPower = 0;
 
-  for (const face of surfaceData.faces) {
-    const { E, H, mesh, normal } = face;
+  const defaultMeshType = opts.meshType ?? 0;
+  const mirrorOpt = opts.mirror ?? null;
 
-    // Determine normal direction index and tangent directions
-    let ny = -1;
-    for (let n = 0; n < 3; n++) {
-      if (normal[n] !== 0) { ny = n; break; }
-    }
-    if (ny < 0) continue;
+  // Helper: accumulate radiation integrals for a single set of face data
+  // with optional E/H sign factors (used for mirror contributions)
+  function accumulateFaces(faces, centerXYZ, E_sign, H_sign, mirrorDir, mirrorPos) {
+    for (const face of faces) {
+      const { E, H, mesh, normal } = face;
+      const meshType = face.meshType ?? defaultMeshType;
 
-    const nP = (ny + 1) % 3;
-    const nPP = (ny + 2) % 3;
+      // Determine normal direction index and tangent directions
+      let ny = -1;
+      for (let n = 0; n < 3; n++) {
+        if (normal[n] !== 0) { ny = n; break; }
+      }
+      if (ny < 0) continue;
 
-    const meshArrays = [mesh.x, mesh.y, mesh.z];
-    const numP = meshArrays[nP].length;
-    const numPP = meshArrays[nPP].length;
-    const normSign = normal[ny]; // +1 or -1
+      const nP = (ny + 1) % 3;
+      const nPP = (ny + 2) % 3;
 
-    // Compute edge lengths for area weighting (midpoint rule)
-    const edgeLenP = computeEdgeLengths(meshArrays[nP]);
-    const edgeLenPP = computeEdgeLengths(meshArrays[nPP]);
+      const meshArrays = [mesh.x, mesh.y, mesh.z];
+      const numP = meshArrays[nP].length;
+      const numPP = meshArrays[nPP].length;
+      const normSign = normal[ny]; // +1 or -1
 
-    // For each surface point, compute equivalent currents and accumulate integrals
-    for (let iP = 0; iP < numP; iP++) {
-      for (let iPP = 0; iPP < numPP; iPP++) {
-        const idx = iP * numPP + iPP;
-        const area = edgeLenP[iP] * edgeLenPP[iPP];
+      // Compute edge lengths for area weighting (midpoint rule)
+      const edgeLenP = computeEdgeLengths(meshArrays[nP]);
+      const edgeLenPP = computeEdgeLengths(meshArrays[nPP]);
 
-        // E and H field at this surface point (complex, stored as [re, im] pairs or just real for FD data)
-        // Convention: E[0..2] are Ex, Ey, Ez at this point
-        // For frequency-domain data, E[comp][idx] is complex stored as re,im interleaved
-        // or as separate re/im arrays. Here we assume re/im interleaved:
-        const Ex_re = E[0][2 * idx], Ex_im = E[0][2 * idx + 1];
-        const Ey_re = E[1][2 * idx], Ey_im = E[1][2 * idx + 1];
-        const Ez_re = E[2][2 * idx], Ez_im = E[2][2 * idx + 1];
-        const Hx_re = H[0][2 * idx], Hx_im = H[0][2 * idx + 1];
-        const Hy_re = H[1][2 * idx], Hy_im = H[1][2 * idx + 1];
-        const Hz_re = H[2][2 * idx], Hz_im = H[2][2 * idx + 1];
+      // For cylindrical meshes, adjust edge lengths per C++ reference:
+      // surface rho-z (ny==0): alpha edge lengths *= rho
+      // surface rho-alpha (ny==2): alpha edge lengths *= rho[pos_rho]
+      if (meshType === 1) {
+        if (ny === 0) {
+          // nP = alpha direction; multiply by rho (which is meshArrays[0][0])
+          const rho = meshArrays[0][0];
+          for (let i = 0; i < edgeLenP.length; i++) edgeLenP[i] *= rho;
+        } else if (ny === 2) {
+          // nP = rho direction, nPP = alpha direction
+          // alpha edge lengths *= rho at each rho position -- handled below per-point
+        }
+      }
 
-        // Js = n x H (cross product with normal)
-        // If normal = [0, 0, normSign] (ny=2): Js = normSign * [Hy, -Hx, 0]
-        // General: Js[i] = normal[(i+1)%3]*H[(i+2)%3] - normal[(i+2)%3]*H[(i+1)%3]
-        const normDir = [0, 0, 0];
-        normDir[ny] = normSign;
-        const Js_re = [
-          normDir[1] * Hz_re - normDir[2] * Hy_re,
-          normDir[2] * Hx_re - normDir[0] * Hz_re,
-          normDir[0] * Hy_re - normDir[1] * Hx_re,
-        ];
-        const Js_im = [
-          normDir[1] * Hz_im - normDir[2] * Hy_im,
-          normDir[2] * Hx_im - normDir[0] * Hz_im,
-          normDir[0] * Hy_im - normDir[1] * Hx_im,
-        ];
+      // For each surface point, compute equivalent currents and accumulate integrals
+      for (let iP = 0; iP < numP; iP++) {
+        for (let iPP = 0; iPP < numPP; iPP++) {
+          const idx = iP * numPP + iPP;
+          let area = edgeLenP[iP] * edgeLenPP[iPP];
 
-        // Ms = -n x E
-        const Ms_re = [
-          normDir[2] * Ey_re - normDir[1] * Ez_re,
-          normDir[0] * Ez_re - normDir[2] * Ex_re,
-          normDir[1] * Ex_re - normDir[0] * Ey_re,
-        ];
-        const Ms_im = [
-          normDir[2] * Ey_im - normDir[1] * Ez_im,
-          normDir[0] * Ez_im - normDir[2] * Ex_im,
-          normDir[1] * Ex_im - normDir[0] * Ey_im,
-        ];
+          // For cylindrical mesh ny==2 surface: multiply by rho for alpha edge
+          if (meshType === 1 && ny === 2) {
+            // nP = rho, nPP = alpha; rho = meshArrays[nP][iP] = meshArrays[0][iP]
+            area *= meshArrays[0][iP];
+          }
 
-        // Position of this surface point
-        const pos = [0, 0, 0];
-        pos[ny] = meshArrays[ny][0]; // face is at single coordinate along ny
-        pos[nP] = meshArrays[nP][iP];
-        pos[nPP] = meshArrays[nPP][iPP];
+          // E and H field at this surface point
+          const Ex_re = E[0][2 * idx], Ex_im = E[0][2 * idx + 1];
+          const Ey_re = E[1][2 * idx], Ey_im = E[1][2 * idx + 1];
+          const Ez_re = E[2][2 * idx], Ez_im = E[2][2 * idx + 1];
+          const Hx_re = H[0][2 * idx], Hx_im = H[0][2 * idx + 1];
+          const Hy_re = H[1][2 * idx], Hy_im = H[1][2 * idx + 1];
+          const Hz_re = H[2][2 * idx], Hz_im = H[2][2 * idx + 1];
 
-        // Radiated power: P += 0.5 * Re(E_nP * conj(H_nPP) - E_nPP * conj(H_nP)) * area * normSign
-        const E_nP_re = [Ex_re, Ey_re, Ez_re][nP];
-        const E_nP_im = [Ex_im, Ey_im, Ez_im][nP];
-        const H_nPP_re = [Hx_re, Hy_re, Hz_re][nPP];
-        const H_nPP_im = [Hx_im, Hy_im, Hz_im][nPP];
-        const E_nPP_re = [Ex_re, Ey_re, Ez_re][nPP];
-        const E_nPP_im = [Ex_im, Ey_im, Ez_im][nPP];
-        const H_nP_re = [Hx_re, Hy_re, Hz_re][nP];
-        const H_nP_im = [Hx_im, Hy_im, Hz_im][nP];
+          // Apply E/H sign factors for mirror contributions
+          const eEx_re = Ex_re * E_sign[0], eEx_im = Ex_im * E_sign[0];
+          const eEy_re = Ey_re * E_sign[1], eEy_im = Ey_im * E_sign[1];
+          const eEz_re = Ez_re * E_sign[2], eEz_im = Ez_im * E_sign[2];
+          const eHx_re = Hx_re * H_sign[0], eHx_im = Hx_im * H_sign[0];
+          const eHy_re = Hy_re * H_sign[1], eHy_im = Hy_im * H_sign[1];
+          const eHz_re = Hz_re * H_sign[2], eHz_im = Hz_im * H_sign[2];
 
-        // Re(a * conj(b)) = a_re * b_re + a_im * b_im
-        const poynting = (E_nP_re * H_nPP_re + E_nP_im * H_nPP_im)
-                       - (E_nPP_re * H_nP_re + E_nPP_im * H_nP_im);
-        radPower += 0.5 * area * poynting * normSign;
+          // Js = n x H
+          const normDir = [0, 0, 0];
+          normDir[ny] = normSign;
+          let Js_re_0 = normDir[1] * eHz_re - normDir[2] * eHy_re;
+          let Js_im_0 = normDir[1] * eHz_im - normDir[2] * eHy_im;
+          let Js_re_1 = normDir[2] * eHx_re - normDir[0] * eHz_re;
+          let Js_im_1 = normDir[2] * eHx_im - normDir[0] * eHz_im;
+          const Js_re_2 = normDir[0] * eHy_re - normDir[1] * eHx_re;
+          const Js_im_2 = normDir[0] * eHy_im - normDir[1] * eHx_im;
 
-        // For each observation angle, accumulate radiation integrals
-        for (let tn = 0; tn < nTheta; tn++) {
-          const sinT = Math.sin(theta[tn]);
-          const cosT = Math.cos(theta[tn]);
+          // Ms = -n x E
+          let Ms_re_0 = normDir[2] * eEy_re - normDir[1] * eEz_re;
+          let Ms_im_0 = normDir[2] * eEy_im - normDir[1] * eEz_im;
+          let Ms_re_1 = normDir[0] * eEz_re - normDir[2] * eEx_re;
+          let Ms_im_1 = normDir[0] * eEz_im - normDir[2] * eEx_im;
+          const Ms_re_2 = normDir[1] * eEx_re - normDir[0] * eEy_re;
+          const Ms_im_2 = normDir[1] * eEx_im - normDir[0] * eEy_im;
 
-          for (let pn = 0; pn < nPhi; pn++) {
-            const sinP = Math.sin(phi[pn]);
-            const cosP = Math.cos(phi[pn]);
+          // Transform cylindrical (rho, alpha, z) currents to Cartesian (x, y, z)
+          // Following nf2ff_calc.cpp lines 85-96
+          if (meshType === 1) {
+            // meshArrays[1] is the alpha (azimuthal angle) array
+            // Determine alpha index based on face orientation
+            let pos_alpha;
+            if (ny === 1) {
+              // face normal is alpha: face at constant alpha, alpha = meshArrays[1][0]
+              pos_alpha = 0;
+            } else if (nP === 1) {
+              pos_alpha = iP;
+            } else {
+              pos_alpha = iPP;
+            }
+            const alpha = meshArrays[1][pos_alpha];
+            const cos_a = Math.cos(alpha);
+            const sin_a = Math.sin(alpha);
 
-            const cosT_cosP = cosT * cosP;
-            const cosT_sinP = cosT * sinP;
-            const cosP_sinT = cosP * sinT;
-            const sinT_sinP = sinP * sinT;
+            // Js: transform (rho, alpha, z) -> (x, y, z)
+            const Js_rho_re = Js_re_0, Js_rho_im = Js_im_0;
+            const Js_alpha_re = Js_re_1, Js_alpha_im = Js_im_1;
+            Js_re_0 = Js_rho_re * cos_a - Js_alpha_re * sin_a;
+            Js_im_0 = Js_rho_im * cos_a - Js_alpha_im * sin_a;
+            Js_re_1 = Js_rho_re * sin_a + Js_alpha_re * cos_a;
+            Js_im_1 = Js_rho_im * sin_a + Js_alpha_im * cos_a;
+            // Js_z unchanged (Js_re_2, Js_im_2)
 
-            // Phase: exp(jk * r_dot_rhat)
-            const r_cos_psi = (pos[0] - center[0]) * cosP_sinT
-                            + (pos[1] - center[1]) * sinT_sinP
-                            + (pos[2] - center[2]) * cosT;
-            const phase = k * r_cos_psi;
-            const exp_re = Math.cos(phase);
-            const exp_im = Math.sin(phase);
+            // Ms: same transform
+            const Ms_rho_re = Ms_re_0, Ms_rho_im = Ms_im_0;
+            const Ms_alpha_re = Ms_re_1, Ms_alpha_im = Ms_im_1;
+            Ms_re_0 = Ms_rho_re * cos_a - Ms_alpha_re * sin_a;
+            Ms_im_0 = Ms_rho_im * cos_a - Ms_alpha_im * sin_a;
+            Ms_re_1 = Ms_rho_re * sin_a + Ms_alpha_re * cos_a;
+            Ms_im_1 = Ms_rho_im * sin_a + Ms_alpha_im * cos_a;
+            // Ms_z unchanged
+          }
 
-            const angIdx = tn * nPhi + pn;
+          const Js_re = [Js_re_0, Js_re_1, Js_re_2];
+          const Js_im = [Js_im_0, Js_im_1, Js_im_2];
+          const Ms_re = [Ms_re_0, Ms_re_1, Ms_re_2];
+          const Ms_im = [Ms_im_0, Ms_im_1, Ms_im_2];
 
-            // Project Js onto theta/phi: Js_theta = Jx*cosT*cosP + Jy*cosT*sinP - Jz*sinT
-            //                             Js_phi   = -Jx*sinP + Jy*cosP
-            const Js_t_re = Js_re[0] * cosT_cosP + Js_re[1] * cosT_sinP - Js_re[2] * sinT;
-            const Js_t_im = Js_im[0] * cosT_cosP + Js_im[1] * cosT_sinP - Js_im[2] * sinT;
-            const Js_p_re = Js_re[1] * cosP - Js_re[0] * sinP;
-            const Js_p_im = Js_im[1] * cosP - Js_im[0] * sinP;
+          // Position of this surface point
+          const pos = [0, 0, 0];
+          pos[ny] = meshArrays[ny][0]; // face is at single coordinate along ny
+          pos[nP] = meshArrays[nP][iP];
+          pos[nPP] = meshArrays[nPP][iPP];
 
-            const Ms_t_re = Ms_re[0] * cosT_cosP + Ms_re[1] * cosT_sinP - Ms_re[2] * sinT;
-            const Ms_t_im = Ms_im[0] * cosT_cosP + Ms_im[1] * cosT_sinP - Ms_im[2] * sinT;
-            const Ms_p_re = Ms_re[1] * cosP - Ms_re[0] * sinP;
-            const Ms_p_im = Ms_im[1] * cosP - Ms_im[0] * sinP;
+          // For cylindrical mesh, convert position to Cartesian
+          let posCart;
+          if (meshType === 1) {
+            const rho = pos[0];
+            const alpha = pos[1];
+            posCart = [rho * Math.cos(alpha), rho * Math.sin(alpha), pos[2]];
+          } else {
+            posCart = pos;
+          }
 
-            // Accumulate: integral += area * exp(jk*r_cos_psi) * Js_projected
-            // (a+jb)(c+jd) = (ac-bd) + j(ad+bc)
-            const areaExp_re = area * exp_re;
-            const areaExp_im = area * exp_im;
+          // Apply mirror position offset: reflect coordinate along mirror direction
+          if (mirrorDir >= 0) {
+            posCart[mirrorDir] = 2 * mirrorPos - posCart[mirrorDir];
+          }
 
-            Nt_re[angIdx] += areaExp_re * Js_t_re - areaExp_im * Js_t_im;
-            Nt_im[angIdx] += areaExp_re * Js_t_im + areaExp_im * Js_t_re;
+          // Radiated power (only for main, non-mirror pass)
+          if (mirrorDir < 0) {
+            const E_nP_re = [eEx_re, eEy_re, eEz_re][nP];
+            const E_nP_im = [eEx_im, eEy_im, eEz_im][nP];
+            const H_nPP_re = [eHx_re, eHy_re, eHz_re][nPP];
+            const H_nPP_im = [eHx_im, eHy_im, eHz_im][nPP];
+            const E_nPP_re = [eEx_re, eEy_re, eEz_re][nPP];
+            const E_nPP_im = [eEx_im, eEy_im, eEz_im][nPP];
+            const H_nP_re = [eHx_re, eHy_re, eHz_re][nP];
+            const H_nP_im = [eHx_im, eHy_im, eHz_im][nP];
 
-            Np_re[angIdx] += areaExp_re * Js_p_re - areaExp_im * Js_p_im;
-            Np_im[angIdx] += areaExp_re * Js_p_im + areaExp_im * Js_p_re;
+            const poynting = (E_nP_re * H_nPP_re + E_nP_im * H_nPP_im)
+                           - (E_nPP_re * H_nP_re + E_nPP_im * H_nP_im);
+            radPower += 0.5 * area * poynting * normSign;
+          }
 
-            Lt_re[angIdx] += areaExp_re * Ms_t_re - areaExp_im * Ms_t_im;
-            Lt_im[angIdx] += areaExp_re * Ms_t_im + areaExp_im * Ms_t_re;
+          // For each observation angle, accumulate radiation integrals
+          for (let tn = 0; tn < nTheta; tn++) {
+            const sinT = Math.sin(theta[tn]);
+            const cosT = Math.cos(theta[tn]);
 
-            Lp_re[angIdx] += areaExp_re * Ms_p_re - areaExp_im * Ms_p_im;
-            Lp_im[angIdx] += areaExp_re * Ms_p_im + areaExp_im * Ms_p_re;
+            for (let pn = 0; pn < nPhi; pn++) {
+              const sinP = Math.sin(phi[pn]);
+              const cosP = Math.cos(phi[pn]);
+
+              const cosT_cosP = cosT * cosP;
+              const cosT_sinP = cosT * sinP;
+              const cosP_sinT = cosP * sinT;
+              const sinT_sinP = sinP * sinT;
+
+              // Phase: exp(jk * r_dot_rhat)
+              const r_cos_psi = (posCart[0] - centerXYZ[0]) * cosP_sinT
+                              + (posCart[1] - centerXYZ[1]) * sinT_sinP
+                              + (posCart[2] - centerXYZ[2]) * cosT;
+              const phase = k * r_cos_psi;
+              const exp_re = Math.cos(phase);
+              const exp_im = Math.sin(phase);
+
+              const angIdx = tn * nPhi + pn;
+
+              const Js_t_re = Js_re[0] * cosT_cosP + Js_re[1] * cosT_sinP - Js_re[2] * sinT;
+              const Js_t_im = Js_im[0] * cosT_cosP + Js_im[1] * cosT_sinP - Js_im[2] * sinT;
+              const Js_p_re = Js_re[1] * cosP - Js_re[0] * sinP;
+              const Js_p_im = Js_im[1] * cosP - Js_im[0] * sinP;
+
+              const Ms_t_re = Ms_re[0] * cosT_cosP + Ms_re[1] * cosT_sinP - Ms_re[2] * sinT;
+              const Ms_t_im = Ms_im[0] * cosT_cosP + Ms_im[1] * cosT_sinP - Ms_im[2] * sinT;
+              const Ms_p_re = Ms_re[1] * cosP - Ms_re[0] * sinP;
+              const Ms_p_im = Ms_im[1] * cosP - Ms_im[0] * sinP;
+
+              const areaExp_re = area * exp_re;
+              const areaExp_im = area * exp_im;
+
+              Nt_re[angIdx] += areaExp_re * Js_t_re - areaExp_im * Js_t_im;
+              Nt_im[angIdx] += areaExp_re * Js_t_im + areaExp_im * Js_t_re;
+
+              Np_re[angIdx] += areaExp_re * Js_p_re - areaExp_im * Js_p_im;
+              Np_im[angIdx] += areaExp_re * Js_p_im + areaExp_im * Js_p_re;
+
+              Lt_re[angIdx] += areaExp_re * Ms_t_re - areaExp_im * Ms_t_im;
+              Lt_im[angIdx] += areaExp_re * Ms_t_im + areaExp_im * Ms_t_re;
+
+              Lp_re[angIdx] += areaExp_re * Ms_p_re - areaExp_im * Ms_p_im;
+              Lp_im[angIdx] += areaExp_re * Ms_p_im + areaExp_im * Ms_p_re;
+            }
           }
         }
       }
     }
+  }
+
+  // Convert center to Cartesian for cylindrical meshes
+  let centerXYZ;
+  if (defaultMeshType === 1) {
+    centerXYZ = [center[0] * Math.cos(center[1]), center[0] * Math.sin(center[1]), center[2]];
+  } else {
+    centerXYZ = center;
+  }
+
+  // Main pass: accumulate with identity signs
+  const E_sign_main = [1, 1, 1];
+  const H_sign_main = [1, 1, 1];
+  accumulateFaces(surfaceData.faces, centerXYZ, E_sign_main, H_sign_main, -1, 0);
+
+  // Mirror pass: if a mirror is configured, re-accumulate with mirrored position and adjusted signs
+  if (mirrorOpt) {
+    const n = mirrorOpt.direction;
+    const nP_m = (n + 1) % 3;
+    const nPP_m = (n + 2) % 3;
+
+    const E_factor = [1, 1, 1];
+    const H_factor = [1, 1, 1];
+
+    if (mirrorOpt.type === 'PEC') {
+      // PEC mirror: tangential E reversed, normal H reversed
+      H_factor[n] = -1;
+      E_factor[nP_m] = -1;
+      E_factor[nPP_m] = -1;
+    } else if (mirrorOpt.type === 'PMC') {
+      // PMC mirror: normal E reversed, tangential H reversed
+      E_factor[n] = -1;
+      H_factor[nP_m] = -1;
+      H_factor[nPP_m] = -1;
+    }
+
+    accumulateFaces(surfaceData.faces, centerXYZ, E_factor, H_factor, n, mirrorOpt.position);
   }
 
   // Compute far-field: equations 8.23a/b and 8.24a/b from Balanis
@@ -400,7 +521,10 @@ export class NF2FFBox {
     const P_rad_all = [];
 
     for (const f of freqArr) {
-      const result = computeNF2FF(surfaceData, f, thetaArr, phiArr, center, radius);
+      const result = computeNF2FF(surfaceData, f, thetaArr, phiArr, center, radius, {
+        meshType: opts.meshType,
+        mirror: opts.mirror,
+      });
 
       Dmax_arr.push(result.Dmax);
       Prad_arr.push(result.Prad);
@@ -456,6 +580,29 @@ export class NF2FFBox {
       P_rad: P_rad_all,
     });
   }
+}
+
+/**
+ * Read NF2FF surface field data from simulation output files.
+ *
+ * openEMS writes NF2FF surface dumps as HDF5 files (FileType=1).
+ * Full HDF5 reading requires h5wasm integration which is not yet available.
+ * This stub documents the expected file layout and throws a clear error.
+ *
+ * Expected files at: {simPath}/{boxName}_E_{xn,xp,yn,yp,zn,zp}.h5
+ *                and: {simPath}/{boxName}_H_{xn,xp,yn,yp,zn,zp}.h5
+ *
+ * @param {Object} wasmEms - WASM openEMS module instance
+ * @param {string} simPath - Simulation output directory path in MEMFS
+ * @param {string} boxName - NF2FF box name used in createNF2FFBox
+ * @throws {Error} Always throws — HDF5 reading not yet supported
+ */
+export function readNF2FFSurfaceData(wasmEms, simPath, boxName) {
+  throw new Error(
+    `HDF5 field dump reading requires h5wasm. ` +
+    `The NF2FF surface dumps are at "${simPath}/${boxName}_E_*.h5" and "${simPath}/${boxName}_H_*.h5". ` +
+    `Pass surface data directly to calcNF2FF() instead.`
+  );
 }
 
 /**

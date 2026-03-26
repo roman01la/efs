@@ -13,7 +13,7 @@ const ROOT = join(__dirname, '..');
 import { C0, MUE0, EPS0, Z0, linspace, dftTime2Freq, dftMagnitude, complexDivide, complexAbs, parseProbe, findPeaks, calcSParam } from '../src/analysis.mjs';
 import { Simulation } from '../src/simulation.mjs';
 import { LumpedPort, MSLPort, WaveguidePort, RectWGPort } from '../src/ports.mjs';
-import { createNF2FFBox, NF2FFBox, NF2FFResult, computeNF2FF } from '../src/nf2ff.mjs';
+import { createNF2FFBox, NF2FFBox, NF2FFResult, computeNF2FF, readNF2FFSurfaceData } from '../src/nf2ff.mjs';
 import { computeLocalSAR, computeAveragedSAR, findPeakSAR } from '../src/sar.mjs';
 import { meshHintFromBox, meshCombine, meshEstimateCflTimestep, smoothMeshLines } from '../src/automesh.mjs';
 import { prepareSParamData, prepareSmithData, prepareRadiationPattern, prepareImpedanceData, prepareTimeDomainData } from '../src/visualization.mjs';
@@ -1748,6 +1748,218 @@ function testFindPeakSAR() {
 }
 
 // -----------------------------------------------------------------------
+// Test: NF2FF with cylindrical mesh type
+// -----------------------------------------------------------------------
+function testNF2FFCylindricalMesh() {
+  console.log('\n=== Test: NF2FF Cylindrical Mesh ===');
+
+  // Create a face with cylindrical coordinates (rho, alpha, z).
+  // Place a z-directed current on a rho-normal face at rho=0.01.
+  // Mesh: x=rho, y=alpha, z=z
+  const rho = 0.01;
+  const nAlpha = 8;
+  const nZ = 3;
+  const nPts = nAlpha * nZ;
+
+  const alphaArr = new Float64Array(nAlpha);
+  for (let i = 0; i < nAlpha; i++) alphaArr[i] = i * 2 * Math.PI / nAlpha;
+
+  const face = {
+    E: [new Float64Array(nPts * 2), new Float64Array(nPts * 2), new Float64Array(nPts * 2)],
+    H: [new Float64Array(nPts * 2), new Float64Array(nPts * 2), new Float64Array(nPts * 2)],
+    mesh: { x: new Float64Array([rho]), y: alphaArr, z: new Float64Array([-0.001, 0, 0.001]) },
+    normal: [1, 0, 0],
+    meshType: 1, // cylindrical
+  };
+
+  // Set Hz (z component of H) to produce a rho-directed Js via n x H
+  // For rho-normal face (n = [1,0,0]): Js = [0, Hz, -Hy]
+  // With cylindrical transform at alpha = pi/2: Js_x = Js_rho*cos(a) - Js_alpha*sin(a) = -Js_alpha
+  // This differs from Cartesian treatment where Js is applied as-is.
+  for (let i = 0; i < nPts; i++) {
+    face.H[2][2 * i] = 1.0; // Hz_re = 1 => Js_alpha = Hz (alpha component)
+  }
+
+  const surfaceData = { faces: [face] };
+  const freq = 1e9;
+  const theta = new Float64Array([Math.PI / 4]);
+  const phi = new Float64Array([0, Math.PI / 2]);
+
+  // With cylindrical mesh (face.meshType=1 is already set on the face)
+  const resultCyl = computeNF2FF(surfaceData, freq, theta, phi, [0, 0, 0], 1);
+
+  // Without cylindrical mesh: create a copy of the face without meshType
+  const faceCart = {
+    E: face.E,
+    H: face.H,
+    mesh: face.mesh,
+    normal: face.normal,
+    // meshType omitted => defaults to 0 (Cartesian)
+  };
+  const surfaceDataCart = { faces: [faceCart] };
+  const resultCart = computeNF2FF(surfaceDataCart, freq, theta, phi, [0, 0, 0], 1);
+
+  // The cylindrical result should differ from Cartesian because the coordinate
+  // transform rotates the current direction at each alpha point.
+  // In cylindrical mode, currents at different alpha angles point in different
+  // Cartesian directions; in Cartesian mode they all point in the same direction.
+  const pCyl_0 = resultCyl.P_rad[0]; // theta=pi/4, phi=0
+  const pCyl_1 = resultCyl.P_rad[1]; // theta=pi/4, phi=pi/2
+  const pCart_0 = resultCart.P_rad[0];
+  const pCart_1 = resultCart.P_rad[1];
+
+  const pMaxCyl = Math.max(pCyl_0, pCyl_1);
+  const pMaxCart = Math.max(pCart_0, pCart_1);
+
+  assert(pMaxCyl > 0, `Cylindrical NF2FF produces non-zero P_rad (${pMaxCyl.toExponential(4)})`);
+  assert(pMaxCart > 0, `Cartesian NF2FF produces non-zero P_rad (${pMaxCart.toExponential(4)})`);
+
+  // For a circular ring of currents (cylindrical), the E-field values should differ
+  // from treating the same numeric data as Cartesian coordinates.
+  // The cylindrical transform changes both the current direction and position.
+  const etCyl_re = resultCyl.E_theta_re[0];
+  const etCart_re = resultCart.E_theta_re[0];
+  const epCyl_re = resultCyl.E_phi_re[0];
+  const epCart_re = resultCart.E_phi_re[0];
+
+  // At least one E-field component should differ between cylindrical and Cartesian
+  const diffEt = Math.abs(etCyl_re - etCart_re);
+  const diffEp = Math.abs(epCyl_re - epCart_re);
+  const maxE = Math.max(
+    Math.abs(etCyl_re), Math.abs(etCart_re),
+    Math.abs(epCyl_re), Math.abs(epCart_re), 1e-30
+  );
+
+  assert(
+    (diffEt + diffEp) / maxE > 0.01,
+    `Cylindrical and Cartesian E-fields differ (dEt=${diffEt.toExponential(3)}, dEp=${diffEp.toExponential(3)})`
+  );
+}
+
+// -----------------------------------------------------------------------
+// Test: NF2FF with PEC mirror
+// -----------------------------------------------------------------------
+function testNF2FFPECMirror() {
+  console.log('\n=== Test: NF2FF PEC Mirror ===');
+
+  // An x-directed Js on a z-normal face with a PEC mirror at z=0.
+  // The mirror should add a virtual image source with mirrored position and adjusted signs.
+  const freq = 1e9;
+  const Js0 = 1.0;
+  const nX = 3, nY = 3;
+  const nPts = nX * nY;
+
+  const face = {
+    E: [new Float64Array(nPts * 2), new Float64Array(nPts * 2), new Float64Array(nPts * 2)],
+    H: [new Float64Array(nPts * 2), new Float64Array(nPts * 2), new Float64Array(nPts * 2)],
+    mesh: { x: new Float64Array([-0.001, 0, 0.001]), y: new Float64Array([-0.001, 0, 0.001]), z: new Float64Array([0.01]) },
+    normal: [0, 0, 1],
+  };
+  for (let i = 0; i < nPts; i++) {
+    face.H[1][2 * i] = -Js0; // Hy_re => Js_x = Js0
+  }
+
+  const surfaceData = { faces: [face] };
+  const theta = new Float64Array([Math.PI / 4]);
+  const phi = new Float64Array([0]);
+
+  // Without mirror
+  const resultNoMirror = computeNF2FF(surfaceData, freq, theta, phi, [0, 0, 0], 1);
+
+  // With PEC mirror at z=0
+  const resultPEC = computeNF2FF(surfaceData, freq, theta, phi, [0, 0, 0], 1, {
+    mirror: { type: 'PEC', direction: 2, position: 0 },
+  });
+
+  // With the mirror, we expect the far-field to be different (generally larger
+  // due to constructive interference from the image source)
+  const etNoMirror = Math.sqrt(resultNoMirror.E_theta_re[0] ** 2 + resultNoMirror.E_theta_im[0] ** 2);
+  const etPEC = Math.sqrt(resultPEC.E_theta_re[0] ** 2 + resultPEC.E_theta_im[0] ** 2);
+
+  assert(etNoMirror > 0, `No-mirror E_theta magnitude > 0 (${etNoMirror.toExponential(4)})`);
+  assert(etPEC > 0, `PEC mirror E_theta magnitude > 0 (${etPEC.toExponential(4)})`);
+  assert(
+    Math.abs(etPEC - etNoMirror) > 1e-20,
+    `PEC mirror changes E_theta (no-mirror: ${etNoMirror.toExponential(4)}, PEC: ${etPEC.toExponential(4)})`
+  );
+}
+
+// -----------------------------------------------------------------------
+// Test: NF2FF with PMC mirror
+// -----------------------------------------------------------------------
+function testNF2FFPMCMirror() {
+  console.log('\n=== Test: NF2FF PMC Mirror ===');
+
+  const freq = 1e9;
+  const Js0 = 1.0;
+  const nX = 3, nY = 3;
+  const nPts = nX * nY;
+
+  const face = {
+    E: [new Float64Array(nPts * 2), new Float64Array(nPts * 2), new Float64Array(nPts * 2)],
+    H: [new Float64Array(nPts * 2), new Float64Array(nPts * 2), new Float64Array(nPts * 2)],
+    mesh: { x: new Float64Array([-0.001, 0, 0.001]), y: new Float64Array([-0.001, 0, 0.001]), z: new Float64Array([0.01]) },
+    normal: [0, 0, 1],
+  };
+  for (let i = 0; i < nPts; i++) {
+    face.H[1][2 * i] = -Js0; // Hy_re => Js_x = Js0
+  }
+
+  const surfaceData = { faces: [face] };
+  const theta = new Float64Array([Math.PI / 4]);
+  const phi = new Float64Array([0]);
+
+  // Without mirror
+  const resultNoMirror = computeNF2FF(surfaceData, freq, theta, phi, [0, 0, 0], 1);
+
+  // With PMC mirror at z=0
+  const resultPMC = computeNF2FF(surfaceData, freq, theta, phi, [0, 0, 0], 1, {
+    mirror: { type: 'PMC', direction: 2, position: 0 },
+  });
+
+  // With PEC mirror at z=0 for comparison
+  const resultPEC = computeNF2FF(surfaceData, freq, theta, phi, [0, 0, 0], 1, {
+    mirror: { type: 'PEC', direction: 2, position: 0 },
+  });
+
+  const etNoMirror = Math.sqrt(resultNoMirror.E_theta_re[0] ** 2 + resultNoMirror.E_theta_im[0] ** 2);
+  const etPMC = Math.sqrt(resultPMC.E_theta_re[0] ** 2 + resultPMC.E_theta_im[0] ** 2);
+  const etPEC = Math.sqrt(resultPEC.E_theta_re[0] ** 2 + resultPEC.E_theta_im[0] ** 2);
+
+  assert(etPMC > 0, `PMC mirror E_theta magnitude > 0 (${etPMC.toExponential(4)})`);
+  assert(
+    Math.abs(etPMC - etNoMirror) > 1e-20,
+    `PMC mirror changes E_theta (no-mirror: ${etNoMirror.toExponential(4)}, PMC: ${etPMC.toExponential(4)})`
+  );
+  // PEC and PMC should produce different results due to different sign conventions
+  assert(
+    Math.abs(etPMC - etPEC) > 1e-20,
+    `PMC and PEC mirrors give different results (PEC: ${etPEC.toExponential(4)}, PMC: ${etPMC.toExponential(4)})`
+  );
+}
+
+// -----------------------------------------------------------------------
+// Test: readNF2FFSurfaceData throws helpful error
+// -----------------------------------------------------------------------
+function testReadNF2FFSurfaceDataError() {
+  console.log('\n=== Test: readNF2FFSurfaceData Error ===');
+
+  let threw = false;
+  let errorMsg = '';
+  try {
+    readNF2FFSurfaceData({}, '/sim', 'nf2ff_box');
+  } catch (e) {
+    threw = true;
+    errorMsg = e.message;
+  }
+
+  assert(threw, 'readNF2FFSurfaceData throws an error');
+  assert(errorMsg.includes('h5wasm'), `Error mentions h5wasm: "${errorMsg.slice(0, 60)}..."`);
+  assert(errorMsg.includes('calcNF2FF'), `Error suggests calcNF2FF alternative`);
+  assert(errorMsg.includes('nf2ff_box'), `Error mentions the box name`);
+}
+
+// -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
 async function main() {
@@ -1808,6 +2020,12 @@ async function main() {
   testSARZeroDensity();
   testSARAveragedUniform();
   testFindPeakSAR();
+
+  // Phase 5: NF2FF cylindrical mesh and mirror tests
+  testNF2FFCylindricalMesh();
+  testNF2FFPECMirror();
+  testNF2FFPMCMirror();
+  testReadNF2FFSurfaceDataError();
 
   // WASM integration tests
   await testWasmCavityViaAPI();
