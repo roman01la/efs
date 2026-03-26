@@ -6,6 +6,60 @@
 
 Porting the openEMS electromagnetic FDTD solver to run entirely client-side in a browser using WebAssembly and WebGPU.
 
+## Phase 3: WebGPU Acceleration — COMPLETE
+
+FDTD update equations implemented as WGSL compute shaders with PML support, CPU reference engine, and WASM-to-GPU bridge. 179 tests pass.
+
+### WGSL Shaders (`src/shaders/`)
+
+| Shader | Purpose | Workgroup |
+|---|---|---|
+| `update_voltage.wgsl` | E-field update (3 components, boundary shift handling) | (4,4,4) |
+| `update_current.wgsl` | H-field update (3 components, Nx-1/Ny-1/Nz-1 bounds) | (4,4,4) |
+| `excitation.wgsl` | Sparse source injection (delay, period, signal lookup) | (256,1,1) |
+| `update_pml.wgsl` | UPML pre/post voltage/current (4 modes via uniform) | (4,4,4) |
+
+### Engine Classes (`src/`)
+
+| Class | File | Description |
+|---|---|---|
+| `WebGPUEngine` | `webgpu-engine.mjs` | Full GPU engine: buffer management, pipeline creation, batched dispatch (32 cmd buffers/submit), PML support |
+| `CPUFDTDEngine` | `webgpu-fdtd.mjs` | JavaScript reference implementation matching engine.cpp exactly, with PML |
+| `WebGPUFDTD` | `webgpu-fdtd.mjs` | Hybrid: tries WebGPU, falls back to CPU |
+| `WASMGPUBridge` | `wasm-gpu-bridge.mjs` | Transfers coefficients from WASM heap to GPU/CPU engines, validates PML regions |
+
+### Test Coverage (179 tests)
+
+Indexing, boundary conditions, loop bounds, timestep evolution, excitation (delay, periodic, past-signal), PEC boundaries, energy conservation, WGSL syntax validation, PML pre/post updates, PML absorption, bridge configuration, multi-region PML, 10x10x10 stress test, determinism.
+
+---
+
+## Phase 2: TypeScript API & Visualization — COMPLETE
+
+High-level simulation API mirroring the Python openEMS/CSXCAD interface. 177 tests pass.
+
+### API Surface
+
+| Module | File | Exports |
+|---|---|---|
+| Simulation | `simulation.mjs` | `Simulation` class — configure, setExcitation, setBoundaryConditions, setGrid, addMetal, addMaterial, addBox, addCylinder, addCylindricalShell, addCurve, addLumpedPort, addMSLPort, addWaveGuidePort, addRectWaveGuidePort, addProbe, createNF2FFBox, toXML, run |
+| Ports | `ports.mjs` | `Port`, `LumpedPort`, `MSLPort`, `WaveguidePort`, `RectWGPort` — geometry creation, probe naming, calcPort with S-parameter extraction |
+| Analysis | `analysis.mjs` | C0/MUE0/EPS0/Z0, dftTime2Freq, dftMagnitude, complexDivide/Multiply/Conj/Abs, parseProbe, findPeaks, calcSParam |
+| NF2FF | `nf2ff.mjs` | `createNF2FFBox` (6 E/H dump boxes), `NF2FFBox`, `NF2FFResult` |
+| Automesh | `automesh.mjs` | meshHintFromBox, meshCombine, meshEstimateCflTimestep, smoothMeshLines |
+| Types | `types.mjs` | Vec3, BoundaryType, ExcitationType, OpenEMSConfig, PortResult, NF2FFResult |
+
+### Port Types
+
+| Port | Probes | Features |
+|---|---|---|
+| LumpedPort | 1 voltage + 1 current | R>0 lumped, R=0 metal short, calcPort S-params |
+| MSLPort | 3 voltage (A/B/C) + 2 current | Beta/ZL extraction, feedShift, measPlaneShift, feedR |
+| WaveguidePort | 1 voltage + 1 current (mode-matched) | E/H weight functions, kc, beta/ZL |
+| RectWGPort | (extends WaveguidePort) | Auto TE mode functions from a, b, modeName |
+
+---
+
 ## Phase 1: WASM CPU MVP — COMPLETE
 
 openEMS runs end-to-end in the browser via WebAssembly. 35 tests pass covering cavity resonance, coaxial impedance, and dipole field probes.
@@ -142,12 +196,10 @@ python3 tests/generate_fixtures.py
 
 ---
 
-## Phases 2-6: Not Started
+## Phases 4-6: Not Started
 
 | Phase | Description | Status |
 |---|---|---|
-| 2 | TypeScript API & Visualization | Not started |
-| 3 | WebGPU Acceleration | Not started |
 | 4 | GPU Extensions (dispersive materials, TFSF, RLC) | Not started |
 | 5 | Multi-threading, NF2FF, Scale | Not started |
 | 6 | Polish & Ecosystem | Not started |
