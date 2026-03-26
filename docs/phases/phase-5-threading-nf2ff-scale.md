@@ -201,6 +201,37 @@ When porting cylindrical coordinates to WebAssembly:
 - Alpha wrapping logic is index arithmetic only — no special WASM consideration
 - Sector area formula uses standard math; verify precision with `f64` operations
 
+## Storage Strategy
+
+Simulation outputs can range from small probe files to multi-GB field dumps. A tiered storage architecture prevents memory exhaustion and enables persistence.
+
+| Storage Layer | Technology | Capacity | Persistence | Use Case |
+|---|---|---|---|---|
+| WASM Heap (MEMFS) | Emscripten virtual FS | 4 GB (wasm32) / 16 GB (memory64) | Volatile | Active simulation field arrays, probe output |
+| Origin Private File System (OPFS) | Browser API | Quota-based (GB+) | Persistent | HDF5 result files, field dumps between sessions |
+| File System Access API | Browser API | Unlimited (user disk) | Persistent | Streaming large results directly to user's disk |
+| IndexedDB | Browser API | ~50 MB practical | Persistent | Simulation metadata, small config/parameter files |
+
+**Policy:** MEMFS holds only active simulation state. Large HDF5 field dumps should stream to OPFS or File System Access API, bypassing the WASM heap size limit. IndexedDB is reserved for lightweight metadata and simulation parameters.
+
+---
+
+## Post-Processing Precision Requirements
+
+All post-processing computations (DFT accumulation, S-parameter extraction, NF2FF radiation integrals, SAR calculation) must use f64 arithmetic. Phase errors from millions of timesteps and distance-dependent phase progression in NF2FF demand double precision. The FDTD engine may run in f32, but values must be promoted to f64 at the point of post-processing ingestion. See Phase 3 "Numeric Precision Policy" for the full precision split.
+
+---
+
+## Large-Field Handling and Thread Data Sharing
+
+For multi-threaded field operations (NF2FF surface integration, SAR volume averaging), use `SharedArrayBuffer` to share field data across Web Workers without copying. This requires Cross-Origin Isolation headers (`COOP: same-origin`, `COEP: require-corp`).
+
+**Transfer pattern:** The main thread allocates field arrays in a `SharedArrayBuffer`. Worker threads receive typed array views (`Float64Array` for post-processing, `Float32Array` for FDTD fields) over the shared buffer via `postMessage`. No data copying occurs; workers operate on the same memory with barrier-based synchronization (matching the native `boost::barrier` pattern).
+
+When `SharedArrayBuffer` is unavailable, fall back to single-threaded post-processing or use `postMessage` with transferable `ArrayBuffer` (move semantics, not copy).
+
+---
+
 ## SAR Post-Processing Design
 
 SAR computation is a post-processing step that can run after the FDTD simulation completes:
@@ -214,3 +245,15 @@ SAR computation is a post-processing step that can run after the FDTD simulation
   - Volume averaging can be parallelized per voxel row using the same thread pool
   - Results displayed as a color-mapped slice viewer overlaid on the geometry
   - Export SAR data as downloadable HDF5 or JSON
+
+---
+
+## Risk Register
+
+| Risk | Mitigation | Verification |
+|------|------------|--------------|
+| Thread pool exhaustion | Cap pool size at `navigator.hardwareConcurrency`; queue excess work | Stress test with concurrent NF2FF + SAR requests |
+| Large output data (multi-GB dumps) | Stream to OPFS or File System Access API; never hold full dump in MEMFS | Field dump test with >1 GB output completes without OOM |
+| Browser memory limits | Enforce grid size limits in API; use memory64 for large grids | Automated memory budget check before simulation start |
+| SharedArrayBuffer unavailability | Fall back to single-threaded post-processing; detect at init | Test suite runs in both threaded and single-threaded modes |
+| FP determinism in multi-threaded reduction | Use deterministic summation order per thread; verify against single-threaded | NF2FF multi-thread vs single-thread result within f64 epsilon |

@@ -1650,37 +1650,37 @@ export class WebGPUEngine {
 
             const encoder = this.device.createCommandEncoder();
 
-            // === PRE-VOLTAGE ===
-            this.stepSteadyState(encoder);
-            this.stepPML(encoder, 0);
-            this.stepVoltADE(encoder);
-            this.stepMurPre(encoder);
-            this.stepRLC(encoder);
+            // === PRE-VOLTAGE (C++ DoPreVoltageUpdates) ===
+            this.stepSteadyState(encoder);  // Priority +2M
+            this.stepPML(encoder, 0);       // Priority +1M
+            this.stepVoltADE(encoder);      // Priority 0 — Lorentz/Drude ADE
+            this.stepMurPre(encoder);       // Priority 0 — Mur save boundary
+            this.stepRLC(encoder);          // Priority 0 — RLC (GPU: fused pre+apply kernel)
 
             // === CORE VOLTAGE UPDATE ===
             this.stepVoltage(encoder);
 
-            // === POST-VOLTAGE ===
-            this.stepPML(encoder, 1);
-            this.stepTFSFVoltage(encoder);
-            this.stepMurPost(encoder);
+            // === POST-VOLTAGE (C++ DoPostVoltageUpdates) ===
+            this.stepPML(encoder, 1);       // Priority +1M
+            this.stepTFSFVoltage(encoder);  // Priority +50K
+            this.stepMurPost(encoder);      // Priority 0 — Mur accumulate
 
-            // === APPLY TO VOLTAGES ===
+            // === APPLY TO VOLTAGES (C++ Apply2Voltages) ===
             if (this.excitationConfigured) {
-                this.applyExcitation(encoder);
+                this.applyExcitation(encoder); // Priority -1K
             }
-            this.stepMurApply(encoder);
+            this.stepMurApply(encoder);     // Priority 0 — Mur boundary overwrite
 
-            // === PRE-CURRENT ===
-            this.stepPML(encoder, 2);
-            this.stepCurrADE(encoder);
+            // === PRE-CURRENT (C++ DoPreCurrentUpdates) ===
+            this.stepPML(encoder, 2);       // Priority +1M
+            this.stepCurrADE(encoder);      // Priority 0 — Lorentz/Drude ADE
 
             // === CORE CURRENT UPDATE ===
             this.stepCurrent(encoder);
 
-            // === POST-CURRENT ===
-            this.stepPML(encoder, 3);
-            this.stepTFSFCurrent(encoder);
+            // === POST-CURRENT (C++ DoPostCurrentUpdates) ===
+            this.stepPML(encoder, 3);       // Priority +1M
+            this.stepTFSFCurrent(encoder);  // Priority +50K
 
             this.device.queue.submit([encoder.finish()]);
             this.numTS++;

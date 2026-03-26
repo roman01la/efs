@@ -556,6 +556,46 @@ Example: 200x200x200 grid = 192M cells across all arrays = ~768 MB. Fits within 
 
 ---
 
+## Numeric Precision Policy
+
+| Domain | Precision | Rationale |
+|--------|-----------|-----------|
+| FDTD field updates (E/H) | f32 | Standard for FDTD; sufficient dynamic range for stencil operations |
+| Material coefficients (VV/VI/II/IV) | f32 | Computed once in WASM (f64), truncated to f32 for GPU upload |
+| DFT / FFT accumulation | f64 (WASM CPU) | Phase errors accumulate over millions of timesteps; f32 is insufficient |
+| S-parameter extraction | f64 (WASM CPU) | Port voltage/current ratios require high precision |
+| NF2FF radiation integrals | f64 (WASM CPU) | Phase progression over large distances demands f64 |
+| Geometry predicates (CSXCAD) | f64 (WASM CPU) | Standard for computational geometry correctness |
+
+**Boundary:** The GPU operates exclusively in f32. All post-processing that reads GPU field data back to WASM (probe sampling, DFT accumulation, S-parameter computation, NF2FF) must promote values to f64 immediately upon readback.
+
+---
+
+## GPU vs CPU Tolerance
+
+WebGPU compute shaders operate in f32, which has a machine epsilon of ~1.19e-7 (practical precision limit ~2.4e-7 for accumulated operations). When cross-validating GPU results against WASM CPU (also f32 for FDTD), differences should be within a few ULP.
+
+**Thresholds for GPU-vs-WASM comparison:**
+
+| Metric | Threshold | Notes |
+|--------|-----------|-------|
+| Per-cell field difference | < 1e-5 relative | Accounts for f32 multiply-add ordering differences |
+| Probe time-series | Within f32 tolerance of WASM path | Same Matlab baselines as Phase 1, no additional margin needed |
+| Frequency-domain peaks | Same tolerance as WASM-vs-native | DFT is done in f64 on CPU regardless of engine |
+
+---
+
+## Data Transfer Policy
+
+Field data moves through three domains: WASM heap, JS typed arrays, and GPU buffers. Unnecessary copies waste memory and stall the simulation loop.
+
+**Transfer patterns:**
+- **WASM heap to GPU (coefficient upload):** Use `Float32Array` view of `HEAPF32` directly with `device.queue.writeBuffer()`. The browser can perform this copy on a background thread. Never serialize to JSON or JS arrays (1000x overhead).
+- **GPU to WASM (probe readback):** Use `GPUBuffer.mapAsync()` + `getMappedRange()` to obtain an `ArrayBuffer`, then create a typed array view. Copy only the probe cells needed, not the entire field.
+- **Batched timesteps:** Encode N timesteps (10-50) into a single command buffer before `queue.submit()`. Only read back field data when needed (probes, convergence checks), not every step.
+
+---
+
 ## SSE-to-GPU Translation Notes
 
 From `engine_sse.cpp`:
@@ -565,3 +605,14 @@ The SSE engine packs 4 Z-values into `f4vector` (128-bit SSE). The GPU shader na
 The SSE boundary handling at `pos[2]=0` (manual shift of last vector element) is replaced by the `idx_zm1` helper function in the shader, which returns a self-reference index at the boundary.
 
 No special vectorization is needed in WGSL; the GPU compiler handles this internally.
+
+---
+
+## Risk Register
+
+| Risk | Mitigation | Verification |
+|------|------------|--------------|
+| WebGPU device loss (TDR, tab switch) | Detect `device.lost` promise; re-create device and re-upload buffers; resume from last checkpoint | Automated device-loss injection test |
+| FP determinism across GPU vendors | Accept f32-level variation; validate against WASM CPU reference within tolerance | GPU-vs-WASM cross-validation suite (cavity, coax) |
+| Browser memory limits (128 MiB/binding) | Split field components across multiple bindings; validate grid size at setup | Grid size >200^3 tested; memory budget assertion |
+| Large field readback stalls | Read only probe cells per step; full-field readback only on demand | Timestep throughput benchmark with/without readback |

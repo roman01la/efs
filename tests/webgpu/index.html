@@ -1252,6 +1252,91 @@ async function run() {
     failed++;
   }
 
+  // ----------------------------------------------------------
+  // Test: GPU Dispatch Order Parity (runtime)
+  // Wraps WebGPUEngine methods to verify execution order matches C++ priorities.
+  // ----------------------------------------------------------
+  log('\n=== Test: GPU Dispatch Order (Runtime) ===');
+
+  try {
+    const { WebGPUEngine: DispGPU } = await import('/src/webgpu-engine.mjs');
+
+    const dispGpu = new DispGPU();
+    await dispGpu.initGPU();
+
+    const Nx = 4, Ny = 4, Nz = 4;
+    const total = Nx * Ny * Nz;
+    const s3 = 3 * total;
+    const vv = new Float32Array(s3).fill(1.0);
+    const vi = new Float32Array(s3).fill(0.3);
+    const ii = new Float32Array(s3).fill(1.0);
+    const iv = new Float32Array(s3).fill(0.3);
+    await dispGpu.init([Nx, Ny, Nz], { vv, vi, ii, iv });
+
+    // Intercept GPU dispatch methods to log call order
+    const dispatchLog = [];
+    const methodsToWrap = [
+      'stepSteadyState', 'stepPML', 'stepVoltADE', 'stepMurPre', 'stepRLC',
+      'stepVoltage', 'stepTFSFVoltage', 'stepMurPost',
+      'applyExcitation', 'stepMurApply',
+      'stepCurrADE', 'stepCurrent', 'stepTFSFCurrent',
+    ];
+    for (const method of methodsToWrap) {
+      const orig = dispGpu[method].bind(dispGpu);
+      dispGpu[method] = (...args) => {
+        if (method === 'stepPML') {
+          dispatchLog.push(`pml_${args[1]}`);
+        } else {
+          dispatchLog.push(method);
+        }
+        return orig(...args);
+      };
+    }
+
+    await dispGpu.iterate(1);
+
+    const expectedGPUOrder = [
+      'stepSteadyState',   // PRE-VOLTAGE: +2M
+      'pml_0',             // PRE-VOLTAGE: +1M
+      'stepVoltADE',       // PRE-VOLTAGE: 0 (Lorentz)
+      'stepMurPre',        // PRE-VOLTAGE: 0 (Mur)
+      'stepRLC',           // PRE-VOLTAGE: 0 (RLC fused)
+      'stepVoltage',       // CORE VOLTAGE
+      'pml_1',             // POST-VOLTAGE: +1M
+      'stepTFSFVoltage',   // POST-VOLTAGE: +50K
+      'stepMurPost',       // POST-VOLTAGE: 0
+      // excitation skipped (not configured)
+      'stepMurApply',      // APPLY2VOLTAGES: 0
+      'pml_2',             // PRE-CURRENT: +1M
+      'stepCurrADE',       // PRE-CURRENT: 0
+      'stepCurrent',       // CORE CURRENT
+      'pml_3',             // POST-CURRENT: +1M
+      'stepTFSFCurrent',   // POST-CURRENT: +50K
+    ];
+
+    assert(dispatchLog.length === expectedGPUOrder.length,
+      `GPU dispatch: ${dispatchLog.length} phases (expected ${expectedGPUOrder.length})`);
+
+    let gpuOrderOk = true;
+    for (let i = 0; i < expectedGPUOrder.length; i++) {
+      if (dispatchLog[i] !== expectedGPUOrder[i]) {
+        assert(false, `GPU dispatch mismatch at ${i}: '${dispatchLog[i]}' !== '${expectedGPUOrder[i]}'`);
+        gpuOrderOk = false;
+        break;
+      }
+    }
+    if (gpuOrderOk) {
+      assert(true, 'GPU dispatch: all phases in correct C++ priority order');
+    }
+
+    assert(dispGpu.numTS === 1, `GPU dispatch: numTS incremented to ${dispGpu.numTS}`);
+
+    dispGpu.destroy();
+  } catch (e) {
+    log(`  FAIL: GPU dispatch order: ${e.message}\n${e.stack}`);
+    failed++;
+  }
+
   finish();
 }
 

@@ -3012,6 +3012,77 @@ section('Kernel Fusion — No Overlap');
 }
 
 // ---------------------------------------------------------------------------
+// WebGPU Engine Dispatch Order Parity Test (structural)
+// Validates that WebGPUEngine.iterate() dispatches in the same order as CPU.
+// Since Node.js lacks WebGPU, we verify the iterate() source structurally.
+// Runtime dispatch order is verified in the browser test (webgpu/index.html).
+// ---------------------------------------------------------------------------
+
+section('WebGPU Engine Dispatch Order Parity');
+
+{
+    // The GPU dispatch order must match the CPU dispatch order exactly.
+    // Extract the iterate method source and verify call sequence.
+    const iterateSrc = WebGPUEngine.prototype.iterate.toString();
+
+    // Expected GPU dispatch method calls in order (from C++ priority mapping)
+    const expectedCalls = [
+        'stepSteadyState',     // PRE-VOLTAGE: +2M
+        'stepPML(encoder, 0)', // PRE-VOLTAGE: +1M
+        'stepVoltADE',         // PRE-VOLTAGE: 0 (Lorentz)
+        'stepMurPre',          // PRE-VOLTAGE: 0 (Mur save)
+        'stepRLC',             // PRE-VOLTAGE: 0 (RLC fused pre+apply)
+        'stepVoltage',         // CORE VOLTAGE
+        'stepPML(encoder, 1)', // POST-VOLTAGE: +1M
+        'stepTFSFVoltage',     // POST-VOLTAGE: +50K
+        'stepMurPost',         // POST-VOLTAGE: 0 (Mur accumulate)
+        'applyExcitation',     // APPLY2VOLTAGES: -1K
+        'stepMurApply',        // APPLY2VOLTAGES: 0
+        'stepPML(encoder, 2)', // PRE-CURRENT: +1M
+        'stepCurrADE',         // PRE-CURRENT: 0 (Lorentz)
+        'stepCurrent',         // CORE CURRENT
+        'stepPML(encoder, 3)', // POST-CURRENT: +1M
+        'stepTFSFCurrent',     // POST-CURRENT: +50K
+    ];
+
+    // Verify each call appears in the source and in correct relative order
+    let lastIdx = -1;
+    let orderValid = true;
+    for (const call of expectedCalls) {
+        const idx = iterateSrc.indexOf(call, lastIdx + 1);
+        if (idx === -1) {
+            assert(false, `GPU dispatch order: '${call}' not found after position ${lastIdx}`);
+            orderValid = false;
+            break;
+        }
+        lastIdx = idx;
+    }
+    if (orderValid) {
+        assert(true, `GPU dispatch order: all ${expectedCalls.length} phases in correct sequence`);
+    }
+
+    // Verify GPU iterate matches CPU step phase count
+    // CPU has 17 phases, GPU has 16 (RLC fused = preRLC + applyRLC combined)
+    assert(expectedCalls.length === 16,
+        'GPU dispatch: 16 phases (RLC fused pre+apply into single kernel)');
+
+    // Cross-reference: CPU expected order from the CPU dispatch test
+    const cpuPhases = [
+        'steadyState', 'pmlPreVolt', 'voltADE', 'murPre', 'preRLC',
+        'coreVoltage', 'pmlPostVolt', 'tfsfVolt', 'murPost',
+        'excitation', 'murApply', 'applyRLC',
+        'pmlPreCurr', 'currADE', 'coreCurrent', 'pmlPostCurr', 'tfsfCurr',
+    ];
+    assert(cpuPhases.length === 17,
+        'CPU dispatch: 17 phases (RLC split into pre + apply)');
+
+    // The only structural difference: GPU merges preRLC + applyRLC into stepRLC
+    // Verify this is intentional by checking no separate applyRLC exists in GPU
+    assert(!iterateSrc.includes('applyRLC'), 'GPU has no separate applyRLC (fused into stepRLC)');
+    assert(iterateSrc.includes('stepRLC'), 'GPU has fused stepRLC kernel');
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

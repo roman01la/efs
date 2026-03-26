@@ -4,7 +4,7 @@
 
 ## Overview
 
-openEMS electromagnetic FDTD solver running entirely client-side in a browser via WebAssembly and WebGPU. Phases 0-5 complete. 667 Node.js tests + 52 browser GPU tests, 0 failures.
+openEMS electromagnetic FDTD solver running entirely client-side in a browser via WebAssembly and WebGPU. Phases 0-5 substantially complete (see per-phase notes for remaining gaps). Phase 6 (polish/ecosystem) planned.
 
 ## Quick Start
 
@@ -18,12 +18,13 @@ npm run test:browser  # headless Chrome WebGPU tests (52 tests)
 ## Test Suite
 
 ```
-npm test                 # 667 tests — all Node.js suites
-  npm run test:wasm      #  99 — WASM FDTD, native comparison, engine equivalence, HDF5
-  npm run test:api       # 285 — simulation API, ports, NF2FF, SAR, visualization
-  npm run test:gpu       # 283 — CPU FDTD reference, extensions, dispatch order
+npm test                 # 715 tests — all Node.js suites
+  npm run test:wasm      # 101 — WASM FDTD, native comparison, engine equivalence, HDF5
+  npm run test:api       # 326 — simulation API, ports, NF2FF, SAR, readFromXML, visualization
+  npm run test:gpu       # 288 — CPU FDTD reference, extensions, dispatch order parity
 npm run test:browser     #  52 — Chrome headless: shaders, GPU-vs-CPU, benchmarks
 npm run test:browser:all # 207 — unified browser suite: all modules in Chrome
+npm run test:count       # validate test counts match STATUS.md
 npm run test:all         # everything
 ```
 
@@ -54,7 +55,7 @@ Dipole     | E-field   |      24 |    8.2e-9    |   1.9e-5
 Dipole     | H-field   |      24 |    2.8e-11   |   1.6e-4
 ```
 
-Engine equivalence: basic vs SSE vs SSE-compressed = **bit-identical** (diff=0.000).
+Engine equivalence: basic vs SSE vs SSE-compressed = **bit-identical** (enforced: maxAbsDiff=0 in tests).
 MT vs basic energy: ratio = **1.000000**.
 GPU vs CPU: max diff **2.4e-7** (f32 precision limit).
 
@@ -63,7 +64,7 @@ GPU vs CPU: max diff **2.4e-7** (f32 precision limit).
 ### Phase 5: Threading, NF2FF, Scale — COMPLETE
 
 - Emscripten pthreads: basic/sse/multithreaded engines validated
-- NF2FF: far-field computation with cylindrical mesh + PEC/PMC mirrors
+- NF2FF: far-field computation with cylindrical mesh + PEC/PMC mirrors (synchronous JS; parallelization at application layer via Web Workers)
 - SAR: local + averaged (IEEE 62704/C95.3/Simple), Newton-Raphson box sizing
 - Memory64: wasm64 build, 8GB max memory, zero performance overhead
 - HDF5 reading: readHDF5Mesh/TDField/FDField via Embind
@@ -71,7 +72,8 @@ GPU vs CPU: max diff **2.4e-7** (f32 precision limit).
 
 ### Phase 4: GPU Extensions — COMPLETE
 
-9 WGSL shaders, 17-phase timestep dispatch matching C++ priorities.
+9 WGSL shaders, 16-phase GPU timestep dispatch matching C++ priorities.
+GPU RLC uses a single fused kernel (vs 2 CPU phases); dispatch order parity tested.
 All extensions on GPU: Lorentz ADE, TFSF, lumped RLC, Mur ABC, steady-state.
 PML: 4 separate params buffers per mode. Mur: per-point dual-component coefficients.
 
@@ -84,8 +86,11 @@ WASM-to-GPU bridge: coefficient extraction via Embind.
 ### Phase 2: TypeScript API — COMPLETE
 
 Simulation class with 10 primitive types, 4 port classes, XML generation.
-NF2FF box creation + far-field computation. Automesh. Analysis utilities.
-Visualization data preparation. SAR post-processing.
+XML round-trip via `readFromXML()`. NF2FF box creation + far-field computation.
+Automesh. Analysis utilities. Visualization data preparation. SAR post-processing.
+Native CSXCAD bindings via Embind: ContinuousStructure, CSRectGrid, all property
+and primitive classes exposed to JS. Direct CSX path (skip XML round-trip) via
+`setCSX()` + `loadFDTDSettings()`.
 
 ### Phase 1: WASM CPU MVP — COMPLETE
 
@@ -102,6 +107,7 @@ Reference fixtures: cavity, coax, dipole, engine comparison.
 ```
 src/
   embind_api.cpp          — C++ Embind wrapper + HDF5 reading
+  csxcad_bindings.cpp     — CSXCAD native API exposed via Embind
   simulation.mjs          — Simulation class, XML generation
   ports.mjs               — LumpedPort, MSLPort, WaveguidePort, RectWGPort
   analysis.mjs            — DFT, S-params, complex math, constants
@@ -116,9 +122,10 @@ src/
   shaders/                — 9 WGSL compute shaders
 
 tests/
-  test_wasm.mjs           — 99 tests (WASM, native comparison, engines, HDF5)
-  test_api.mjs            — 285 tests (API, ports, NF2FF, SAR, visualization)
-  test_webgpu.mjs         — 283 tests (CPU FDTD, extensions, dispatch order)
+  test_wasm.mjs           — 101 tests (WASM, native comparison, engines, HDF5)
+  test_api.mjs            — 326 tests (API, ports, NF2FF, SAR, readFromXML, visualization)
+  test_webgpu.mjs         — 288 tests (CPU FDTD, extensions, dispatch order parity)
+  validate_test_counts.mjs — CI test-count validation
   test_webgpu_browser.mjs — Playwright runner for Chrome GPU tests
   webgpu/index.html       — 52 browser tests (shaders, GPU-vs-CPU, benchmarks)
   browser/all-tests.html  — 207 unified browser tests

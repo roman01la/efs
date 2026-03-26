@@ -25,7 +25,7 @@ add_subdirectory(vendor/CSXCAD)
 add_subdirectory(vendor/openEMS)
 
 if (EMSCRIPTEN)
-  add_executable(openems_wasm src/embind_api.cpp)
+  add_executable(openems_wasm src/embind_api.cpp src/csxcad_bindings.cpp)
   target_link_libraries(openems_wasm
     openEMS
     CSXCAD
@@ -43,6 +43,7 @@ if (EMSCRIPTEN)
     ${TinyXML_INCLUDE_DIR}
     ${FPARSER_ROOT_DIR}/include
   )
+  target_compile_definitions(openems_wasm PRIVATE TIXML_USE_STL)
   set_target_properties(openems_wasm PROPERTIES
     OUTPUT_NAME "openems"
     SUFFIX ".js"
@@ -57,7 +58,8 @@ if (EMSCRIPTEN)
     "-sEXPORT_NAME=createOpenEMS"
     "-sINITIAL_MEMORY=67108864"
     "-sSTACK_SIZE=2097152"
-    "-sNO_EXIT_RUNTIME=0"
+    "-sNO_EXIT_RUNTIME=1"
+    "-sDISABLE_EXCEPTION_CATCHING=0"
     "-sENVIRONMENT=web,node"
     "-pthread"
     "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency||4"

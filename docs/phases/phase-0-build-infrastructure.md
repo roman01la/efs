@@ -849,6 +849,28 @@ ls tests/fixtures/dipole/reference.json
 
 ---
 
+## CGAL Rounding-Mode Constraint
+
+CGAL's interval arithmetic relies on hardware FP rounding mode switching (round toward +inf/-inf) to bound errors in geometric predicates. WASM only supports round-to-nearest-even with no mechanism to change rounding modes. Without correct rounding, CGAL's standard kernels can produce incorrect geometry: crashing predicates, non-physical intersections, or non-watertight meshes.
+
+**Chosen mitigation:** Disable CGAL entirely via `-DCSXCAD_NO_CGAL` (section 0.2). This is a ~20-line conditional compilation patch.
+
+**Geometry features lost:** `CSPrimPolyhedron` (point-in-polyhedron via AABB tree ray casting) and `CSPrimPolyhedronReader` (STL/PLY import). All simpler primitives (boxes, cylinders, spheres, polygons, curves, wires) remain available. Most antenna simulations do not require polyhedra.
+
+**Alternative paths (not taken for MVP):** Software rounding emulation via `nextafter()`, exact constructions kernel (`Exact_predicates_exact_constructions_kernel`), or CGAL rounding-mode-free static-filter predicates. These could be revisited if polyhedron support is required later.
+
+---
+
+## Risk Register
+
+| Risk | Mitigation | Verification |
+|------|------------|--------------|
+| CGAL rounding-mode correctness | Disabled via `-DCSXCAD_NO_CGAL`; polyhedron primitives excluded | Build completes without CGAL; no `CSPrimPolyhedron` in generated makefiles |
+| FP determinism (transcendentals) | Cross-verify WASM output against native reference fixtures | Phase 1 WASM-vs-native tolerance tests pass |
+| Browser memory limits (4 GB wasm32) | Memory64 flag for large grids; enforce grid size limits in API | Grid size validation in setup; memory64 build tested |
+
+---
+
 ## Summary checklist
 
 | Step | Description | Key files | Blocked by |

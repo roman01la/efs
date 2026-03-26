@@ -10,6 +10,7 @@
     "test:browser": "node tests/test_webgpu_browser.mjs",
     "test:browser:all": "node tests/browser/run-all.mjs",
     "test:all": "npm run test && npm run test:browser && npm run test:browser:all",
+    "test:count": "node tests/validate_test_counts.mjs",
     "bench": "node tests/test_wasm.mjs -- --bench",
     "bench:native": "python3 tests/bench_native.py",
     "bench:browser": "node tests/test_webgpu_browser.mjs",

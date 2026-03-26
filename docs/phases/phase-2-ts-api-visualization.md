@@ -84,6 +84,10 @@ Constructor keyword arguments:
 - `AddCurve(points)`
 - `AddWire(points, radius)`
 
+## Geometry Feature Limits
+
+The WASM build disables CGAL (see Phase 0, "CGAL Rounding-Mode Constraint"). As a result, the TypeScript API does not expose `Polyhedron` or `PolyhedronReader` primitives. STL/PLY geometry import is unavailable. The API surface covers all other CSXCAD primitives: Point, Box, Cylinder, CylindricalShell, Sphere, SphericalShell, Polygon, LinPoly, RotPoly, Curve, and Wire. This covers the geometry needs of standard antenna and transmission line simulations.
+
 ## TypeScript Interface Definitions
 
 ### Physical Constants

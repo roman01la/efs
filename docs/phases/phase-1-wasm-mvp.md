@@ -188,6 +188,24 @@ function parseProbe(tsv: string): { time: Float64Array; values: Float64Array } {
 - Time difference: < 1e-13
 - Amplitude difference: < 1e-7
 
+## Tolerance Policy
+
+WASM-vs-native comparisons must account for floating-point differences arising from f32/f64 accumulation order, WASM SIMD vs native SSE minor variations, and browser transcendental function implementations.
+
+**Baseline:** Matlab test tolerances from upstream openEMS (cavity TE freq +/-0.13%, coax Z0 +3%/-1%, field probe amplitude < 1e-7).
+
+**Cross-platform margin:** Add 10% on top of Matlab baselines for WASM-vs-native comparison. For example, if Matlab tolerance is 0.13%, the WASM comparison threshold is 0.143%.
+
+**Absolute thresholds for probe-level comparison:**
+
+| Metric | Threshold | Notes |
+|--------|-----------|-------|
+| maxAbsDiff (time-domain) | 1e-12 | Accounts for f64 rounding in timestep accumulation |
+| maxRelDiff (frequency peaks) | Matlab tolerance * 1.1 | 10% margin over analytical tolerance |
+| Amplitude floor | Per-test minimum | Peaks below floor are excluded from frequency checks |
+
+Tests that exceed these thresholds indicate a porting regression rather than acceptable FP variation.
+
 ## Test Harness Structure
 
 ```typescript

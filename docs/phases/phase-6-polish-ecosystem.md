@@ -1,302 +1,190 @@
 # Phase 6: Polish & Ecosystem
 
-## Available Examples to Port
+## Goal and scope
 
-### Antennas
-- `Patch_Antenna` — rectangular microstrip patch
-- `Patch_Antenna_Array` — array of patch elements
-- `infDipol` — infinitesimal dipole
-- `Bi_Quad_Antenna` — bi-quad design
-- `inverted_f` — inverted-F antenna
+Phase 6 focuses on productization of the existing engine stack: reproducible examples, a usable browser workflow, and shareable simulation state.
 
-### Waveguides
-- `Rect_Waveguide` — rectangular waveguide
-- `Circ_Waveguide` — circular waveguide
-- `Coax` (3 variants) — coaxial transmission line
+### Mandatory for Phase 6 completion
 
-### Transmission Lines
-- `MSL` — microstrip line
-- `MSL_Losses` — microstrip line with loss modeling
-- `Stripline` — stripline
-- `Finite_Stripline` — finite-width stripline
-- `CPW_Line` — coplanar waveguide
-- `directional_coupler` — coupled-line directional coupler
+1. **Examples v1:** `Patch_Antenna`, `MSL`, `Rect_Waveguide` with validation tests.
+2. **UX shell:** editor/simulation/results workflow with local URL sharing.
 
-### Other
-- `PlaneWave` — plane wave excitation
-- `Helix` — helical antenna
-- `LumpedElement` — lumped element demo
-- `Metamaterial_PlaneWave_Drude` — Drude metamaterial with plane wave
-- `PML_reflection_analysis` — PML boundary reflection study
-- `resistance_sheet` — resistive sheet modeling
+### Out of scope for Phase 6 completion
 
-## Patch Antenna Example Details
+- Full cloud sharing backend
+- Full IDE feature parity with desktop tools
+- Porting all tutorials/examples from upstream at once
+- Hard production SLA/observability program (kept as follow-up backlog)
 
-Reference design for the primary demo:
+## Milestone plan (execution order)
+
+### Milestone A — Examples v1 (mandatory)
+
+Deliverables:
+- Port 3 examples:
+  - `Patch_Antenna`
+  - `MSL`
+  - `Rect_Waveguide`
+- For each example:
+  - Loadable config (XML or JSON->XML)
+  - Run + post-processing path
+  - Short explanatory guide
+  - Baseline validation test
+
+Acceptance criteria:
+- Example runs end-to-end in browser/WASM.
+- Validation metrics within tolerance:
+  - S11 / Zin / mode metrics are within predefined thresholds.
+- Each example has a deterministic test case in automated test suite.
+
+Dependencies:
+- Stable Simulation API (`simulation.mjs`, ports, analysis, nf2ff).
+- Existing fixture/test utilities.
+
+### Milestone B — UX shell (mandatory)
+
+Deliverables:
+- **Editor panel:** XML editing + basic validation feedback.
+- **Simulation panel:** run/stop, progress/status, console output.
+- **Results panel:** S-parameter, impedance, NF2FF outputs already supported by APIs.
+- **Layout:** three-panel responsive layout with tabbed results.
+- **Local URL sharing v1:**
+  - `#config=<base64url(deflate(xml))>` for compact configs
+  - `#id=<local-id>` backed by IndexedDB for large configs
+
+Acceptance criteria:
+- User can open/edit/run/view results without leaving one workflow.
+- Copy-link reproduces same config and selected result view.
+- Back/forward navigation restores state from fragment changes.
+
+Dependencies:
+- Milestone A examples for smoke/regression checks.
+- Browser storage and compression utility integration.
+
+## Phase 6 backlog (non-blocking follow-up)
+
+### Expanded examples
+
+Priority 2:
+- `Patch_Antenna_Array`, `Helix`, `CPW_Line`, `Coax`
+
+Priority 3:
+- `Metamaterial_PlaneWave_Drude`, `directional_coupler`, `PML_reflection_analysis`
+
+Additional candidate set:
+- Antennas: `infDipol`, `Bi_Quad_Antenna`, `inverted_f`
+- Waveguides: `Circ_Waveguide`
+- Transmission lines: `MSL_Losses`, `Stripline`, `Finite_Stripline`
+- Other: `PlaneWave`, `LumpedElement`, `resistance_sheet`
+
+### Production hardening baseline
+
+- Build: optimized WASM, compression, asset fingerprinting.
+- Security/runtime headers: COOP/COEP/CSP, HTTPS.
+- Browser compatibility policy + single-thread fallback behavior.
+- Performance ergonomics: streaming compile, worker usage, lazy-load heavy modules.
+- Reliability checks: regression, browser matrix, leak checks, benchmark tracking.
+- Documentation pack: getting started, API reference, FAQ, changelog.
+
+## Persistence and Export Behavior
+
+Users expect simulation results to survive page reloads and to be downloadable. The storage tiers defined in Phase 5 surface here as user-facing behavior:
+
+- **Auto-save:** Active simulation results (probe data, S-parameters) are persisted to OPFS automatically. Reopening the app restores the last session's results.
+- **Export:** Users can download HDF5 field dumps, probe CSVs, and NF2FF results via the File System Access API (with a fallback to `<a download>` for browsers that lack it).
+- **Config sharing:** Small configs use URL fragment encoding (`#config=<base64url(deflate(xml))>`). Large configs fall back to IndexedDB with `#id=<local-id>`.
+
+---
+
+## Regression Gate Definition
+
+All examples (Milestone A) and upstream test cases must pass within the tolerance policy defined in Phase 1. The regression gate runs in CI on every merge to main:
+
+- WASM-vs-native comparison within Matlab baselines + 10% margin.
+- GPU-vs-WASM comparison within f32 tolerance (see Phase 3).
+- No example result may drift beyond its golden-result baseline.
+
+A failure in any gate blocks the merge. Tolerance thresholds are codified in `tests/fixtures/*/reference.json`.
+
+---
+
+## Reference data and formats
+
+### Patch antenna reference (primary demo)
 
 | Parameter | Value |
-|-----------|-------|
+|---|---|
 | Patch size | 32.86 x 41.37 mm |
 | Substrate | FR4, epsilon_r = 3.38 |
 | Substrate thickness | 1.524 mm |
 | Ground plane | 60 x 60 mm |
-| Feed | Lumped port, 50 ohm, at x = -5.5 mm, z-direction |
+| Feed | Lumped port, 50 ohm, x = -5.5 mm, z-dir |
 | Excitation | Gaussian, 0-6 GHz |
 | Max timesteps | 30000 |
 | End criteria | 1e-5 |
 
-**Analysis outputs:** S11, input impedance (Zin), NF2FF (radiated power, max directivity, efficiency).
+Outputs: S11, Zin, NF2FF (`Prad`, `Dmax`, efficiency).
 
-## XML Format
-
-The openEMS simulation is defined by an XML file with this structure:
+### XML structure (openEMS)
 
 ```xml
 <openEMS>
-  <FDTD NumberOfTimesteps="20000" endCriteria="1e-6" ...>
-    <Excitation Type="0" f0="4.5e9" fc="4.5e9"/>
-    <BoundaryCond xmin="0" xmax="0" ymin="0" ymax="0" zmin="0" zmax="0"/>
+  <FDTD NumberOfTimesteps="..." endCriteria="...">
+    <Excitation Type="..." .../>
+    <BoundaryCond xmin="..." xmax="..." ymin="..." ymax="..." zmin="..." zmax="..."/>
   </FDTD>
   <ContinuousStructure>
-    <RectilinearGrid DeltaUnit="1e-3">
+    <RectilinearGrid DeltaUnit="...">
       <XLines>...</XLines>
       <YLines>...</YLines>
       <ZLines>...</ZLines>
     </RectilinearGrid>
-    <Properties>
-      <!-- Metal, material, lumped port, probe, dump definitions -->
-    </Properties>
+    <Properties>...</Properties>
   </ContinuousStructure>
 </openEMS>
 ```
 
-Key sections:
-- `<FDTD>`: timestep count, end criteria, excitation type and parameters, boundary conditions
-- `<ContinuousStructure>`: mesh definition and all geometric/material properties
-- Boundary condition codes: 0 = PEC, 1 = PMC, 2 = MUR, 3 = PML (with configurable cells)
+Boundary types: `0=PEC`, `1=PMC`, `2=MUR`, `3=PML` (+ PML cell counts).
 
-## ReadUI File Format
+### Probe and field data references
 
-ASCII tab-separated values used for voltage/current probe output:
+- ReadUI probe files are ASCII TSV with `%` comment headers.
+- HDF5 layout used by post-processing:
+  - `/Mesh/*`
+  - `/FieldData/TD/*`
+  - `/FieldData/FD/*`
 
-```
-% time [s]        voltage [V]
-% openEMS v0.0.35
-% x-coords: [x1, x2]
-% y-coords: [y1, y2]
-% z-coords: [z1, z2]
-1.234e-12    0.00567
-2.468e-12    0.01234
-...
-```
+## Analysis parity requirements
 
-- Column 1: time in seconds
-- Column 2: value (voltage in V or current in A)
-- Comment lines start with `%`
-- Header comments include probe coordinates and openEMS version
+Target formulas and workflows to preserve:
 
-## HDF5 Field Data Structure
+- `calcPort` dispatch by port type (`Lumped`, `TL`, `WG`).
+- `calcLumpedPort` decomposition:
+  - `uf_inc = 0.5 * (u + i * Z)`
+  - `if_inc = 0.5 * (i + u / Z)`
+  - `uf_ref = u - uf_inc`
+  - `if_ref = i - if_inc`
+- `FFT_time2freq`: uniform `dt`, zero-padding, FFT scaling, single-sided spectrum, phase correction.
+- `CalcNF2FF`: run NF2FF computation, read `E_theta`, `E_phi`, `Prad`, `Dmax`.
 
-```
-/Mesh/
-  x: float64[]          # X coordinate array
-  y: float64[]          # Y coordinate array
-  z: float64[]          # Z coordinate array
-  @MeshType: string     # "Cartesian" or "Cylindrical"
+## Risks and mitigations
 
-/FieldData/TD/
-  00000001/             # Timestep group
-    @time: float64      # Simulation time in seconds
-    Ex: float32[nx,ny,nz]
-    Ey: float32[nx,ny,nz]
-    Ez: float32[nx,ny,nz]
-  00000002/
-    ...
+- **Risk:** Example results drift from reference after API/engine changes.  
+  **Mitigation:** keep golden-result regression tests tied to Milestone A.
 
-/FieldData/FD/
-  f0_real/              # Frequency bin 0, real part
-    @frequency: float64
-    Ex: float32[nx,ny,nz]
-    ...
-  f0_imag/              # Frequency bin 0, imaginary part
-    ...
-```
+- **Risk:** URL fragment size limits for large configs.  
+  **Mitigation:** automatic fallback to IndexedDB (`#id=`).
 
-## Analysis Functions to Port
+- **Risk:** UI responsiveness on larger runs.
+  **Mitigation:** worker execution path and progressive status updates.
 
-### calcPort
+## Risk Register
 
-Dispatches based on port type:
-- `calcLumpedPort` — lumped element ports
-- `calcTLPort` — transmission line ports
-- `calcWGPort` — waveguide ports
-
-### calcLumpedPort
-
-Incident/reflected wave decomposition:
-
-```
-uf_inc = 0.5 * (u + i * Z)
-if_inc = 0.5 * (i + u / Z)
-uf_ref = u - uf_inc
-if_ref = i - if_inc
-```
-
-Where `u` is voltage, `i` is current, `Z` is reference impedance.
-
-### FFT_time2freq
-
-1. Assume uniform `dt` spacing
-2. Zero-pad to next power of 2
-3. Apply FFT, scale by `dt`
-4. Take single-sided spectrum
-5. Apply phase correction for time offset
-
-### CalcNF2FF
-
-Calls the nf2ff computation (library or binary), then reads HDF5 results containing E_theta, E_phi, radiated power, and directivity.
-
-## Python Tutorials
-
-Reference tutorials that demonstrate the analysis workflow:
-
-| Tutorial | Key Concepts |
-|----------|-------------|
-| Simple_Patch_Antenna | Basic setup, S11, NF2FF |
-| Bent_Patch_Antenna | Curved geometry |
-| Helical_Antenna | 3D winding, circular polarization |
-| Rect_Waveguide | Waveguide modes, port extraction |
-| CRLH_Extraction | Metamaterial parameter extraction |
-| MSL_NotchFilter | Coupled resonators, filter design |
-| RCS_Sphere | Radar cross section, plane wave |
-
-## Example Porting Plan
-
-### Priority 1 — Core demos (ship with v1.0)
-1. **Patch_Antenna** — the canonical antenna example; validates S11, impedance, and NF2FF
-2. **MSL** — simplest transmission line; validates port calculation and FFT
-3. **Rect_Waveguide** — validates waveguide port extraction
-
-### Priority 2 — Extended library
-4. **Patch_Antenna_Array** — demonstrates array patterns
-5. **Helix** — 3D geometry, circular polarization
-6. **CPW_Line** — coplanar waveguide, different port type
-7. **Coax** — cylindrical coordinate variant
-
-### Priority 3 — Advanced
-8. **Metamaterial_PlaneWave_Drude** — dispersive materials
-9. **directional_coupler** — coupled structures
-10. **PML_reflection_analysis** — boundary condition validation
-
-### Porting process per example
-1. Convert the Python/Matlab setup script to a JSON or XML configuration
-2. Verify simulation runs in WebAssembly and produces matching results (S11 within 0.5 dB)
-3. Build an interactive parameter panel (substrate thickness, patch dimensions, frequency range)
-4. Add guided annotations explaining each step
-5. Write a short description for the example gallery
-
-## IDE Integration Spec
-
-The web IDE provides a complete simulation workflow:
-
-### Editor Panel
-- XML syntax highlighting for openEMS configuration files
-- Schema-aware autocomplete for element names and attributes
-- Inline validation: flag unknown elements, out-of-range values, missing required fields
-- Template insertion: right-click to insert common structures (port, probe, material)
-
-### Simulation Panel
-- Run/Stop controls with progress bar (timestep count, energy decay)
-- Real-time convergence plot (energy vs timestep)
-- Console output: meshing stats, timestep info, warnings
-- Parameter sweep mode: define a variable, set range, queue multiple runs
-
-### Results Panel
-- S-parameter plots (magnitude in dB, phase, Smith chart)
-- Impedance plots (real/imaginary vs frequency)
-- 2D/3D field visualization with slice controls
-- NF2FF radiation pattern (polar and 3D)
-- Export: PNG plots, CSV data, HDF5 raw data
-
-### Layout
-- Three-panel layout: editor (left), 3D viewport (center), results (right)
-- Collapsible panels for small screens
-- Tabs within each panel for multiple files/plots
-- Drag-and-drop file import for XML configurations
-
-## URL Sharing Design
-
-Every simulation state should be shareable via URL:
-
-### Encoding Strategy
-- **Short simulations** (XML < 10 KB): compress with pako (zlib), base64url-encode, store in URL fragment (`#config=...`)
-- **Large simulations**: store configuration in IndexedDB, generate a short ID, encode as `#id=...` (local only)
-- **Cloud sharing** (future): POST to a storage backend, return a short URL like `antenna.app/s/abc123`
-
-### URL Fragment Format
-```
-#config=<base64url(pako.deflate(xml))>&view=results&tab=s11&freq=2.4e9
-```
-
-Parameters:
-- `config` — compressed XML configuration
-- `view` — active panel (`editor`, `sim`, `results`)
-- `tab` — active results tab (`s11`, `zin`, `nf2ff`, `fields`)
-- `freq` — selected frequency for NF2FF display
-- `theta` / `phi` — radiation pattern view angles
-
-### Behavior
-- On load: decompress config, populate editor, optionally auto-run simulation
-- Changing parameters updates the URL fragment in real time (no page reload)
-- Browser back/forward navigates parameter history
-- Copy-link button in toolbar with tooltip confirmation
-
-## Deployment Checklist
-
-### Build
-- [ ] Production WASM build with `-O3 -flto` and SIMD enabled
-- [ ] Gzip or Brotli pre-compression for `.wasm` and `.js` files
-- [ ] Asset fingerprinting (content hash in filenames) for cache busting
-- [ ] Source maps generated but hosted separately (not shipped to users)
-- [ ] Bundle size budget: WASM < 5 MB compressed, JS < 500 KB compressed
-
-### Headers & Security
-- [ ] `Cross-Origin-Opener-Policy: same-origin` (required for SharedArrayBuffer)
-- [ ] `Cross-Origin-Embedder-Policy: require-corp` (required for SharedArrayBuffer)
-- [ ] `Content-Security-Policy` allowing `wasm-unsafe-eval` and worker blob URLs
-- [ ] HTTPS enforced (SharedArrayBuffer requires secure context)
-
-### Browser Compatibility
-- [ ] Chrome 91+ (SharedArrayBuffer re-enabled)
-- [ ] Firefox 79+ (SharedArrayBuffer with headers)
-- [ ] Safari 15.2+ (SharedArrayBuffer support)
-- [ ] Edge 91+ (Chromium-based)
-- [ ] Fallback: detect missing SharedArrayBuffer, show message with browser upgrade suggestion
-- [ ] Fallback: single-threaded engine when threads unavailable
-
-### Performance
-- [ ] WASM streaming compilation (`WebAssembly.compileStreaming`)
-- [ ] Thread pool pre-warming on page load
-- [ ] Lazy-load NF2FF and SAR modules (not needed until post-processing)
-- [ ] Web Worker for simulation engine (keep UI responsive)
-- [ ] Memory limit detection and warning (check `navigator.deviceMemory` where available)
-
-### Testing
-- [ ] Regression tests: known antenna results match within tolerance
-- [ ] Cross-browser automated tests (Playwright)
-- [ ] Memory leak tests: run simulation 10x, check heap growth
-- [ ] Performance benchmarks: patch antenna < 30s on modern hardware
-- [ ] Mobile device testing: iPad Pro as minimum target
-
-### Monitoring
-- [ ] Error reporting (uncaught exceptions, WASM traps)
-- [ ] Performance telemetry (simulation time, mesh size, thread count)
-- [ ] Usage analytics (which examples are popular, common parameter ranges)
-- [ ] Crash recovery: auto-save simulation state to IndexedDB every 60s
-
-### Documentation
-- [ ] Getting started guide with the patch antenna example
-- [ ] API reference for the JavaScript simulation interface
-- [ ] Example gallery with thumbnails and descriptions
-- [ ] FAQ: browser requirements, performance tips, known limitations
-- [ ] Changelog for each release
+| Risk | Phase Owner | Mitigation | Verification |
+|------|-------------|------------|--------------|
+| CGAL correctness (polyhedron geometry) | Phase 0 | Disabled via `-DCSXCAD_NO_CGAL` | Build succeeds without CGAL; no polyhedron tests expected |
+| FP determinism (cross-platform) | Phase 1 | Matlab baselines + 10% margin; f64 for post-processing | WASM-vs-native and GPU-vs-WASM tolerance suites pass |
+| Large output data (multi-GB) | Phase 5 | OPFS/File System Access API streaming; MEMFS for active state only | Field dump >1 GB completes without OOM |
+| Browser memory limits | Phase 5 | Grid size validation; memory64 for large grids | Automated budget check before simulation |
+| Thread pool exhaustion | Phase 5 | Cap at `hardwareConcurrency`; work queue overflow handling | Stress test with concurrent operations |
+| WebGPU device loss | Phase 3 | Detect `device.lost`; re-create and resume from checkpoint | Device-loss injection test passes |

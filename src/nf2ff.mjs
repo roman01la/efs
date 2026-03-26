@@ -5,6 +5,14 @@
  * The far-field computation is implemented in pure JavaScript following the
  * algorithm from vendor/openEMS/nf2ff/nf2ff_calc.cpp.
  *
+ * Threading model:
+ *   This module runs synchronously on the main thread. The computation loops
+ *   (surface integration over theta/phi/freq) are single-threaded JavaScript.
+ *   Multi-threaded FDTD execution happens at the WASM layer (Emscripten
+ *   pthreads, engine type=3) and is independent of this post-processing step.
+ *   For large angular grids, consider chunking theta/phi ranges across Web
+ *   Workers at the application level.
+ *
  * Complexity: O(N_surface * N_theta * N_phi * N_freq) -- can be slow for
  * fine angular resolution over large surfaces.
  */
@@ -40,24 +48,24 @@ export function createNF2FFBox(sim, name, start, stop, opts = {}) {
   const eFile = `${name}_E`;
   const hFile = `${name}_H`;
 
-  // Add E-field and H-field dump properties
-  const eDumpProp = {
-    type: 'DumpBox',
-    name: eFile,
-    attrs: { DumpType: dumpType, DumpMode: dumpMode, FileType: 1 },
-    primitives: [],
-  };
-  const hDumpProp = {
-    type: 'DumpBox',
-    name: hFile,
-    attrs: { DumpType: dumpType + 1, DumpMode: dumpMode, FileType: 1 },
-    primitives: [],
-  };
+  // Create dump box properties via CSXCAD
+  const M = sim._module;
+  const csx = sim._csx;
+  const ps = csx.GetParameterSet();
 
-  if (frequency !== null) {
-    eDumpProp.attrs.Frequency = frequency.join(',');
-    hDumpProp.attrs.Frequency = frequency.join(',');
-  }
+  const eDump = M.CSPropDumpBox.create(ps);
+  eDump.SetName(eFile);
+  eDump.SetDumpType(dumpType);
+  eDump.SetDumpMode(dumpMode);
+  eDump.SetFileType(1);
+  csx.AddProperty(eDump);
+
+  const hDump = M.CSPropDumpBox.create(ps);
+  hDump.SetName(hFile);
+  hDump.SetDumpType(dumpType + 1);
+  hDump.SetDumpMode(dumpMode);
+  hDump.SetFileType(1);
+  csx.AddProperty(hDump);
 
   // Add 6 face boxes (one per direction pair)
   for (let ny = 0; ny < 3; ny++) {
@@ -67,21 +75,22 @@ export function createNF2FFBox(sim, name, start, stop, opts = {}) {
       const lStart = [...start];
       const lStop = [...stop];
       lStop[ny] = lStart[ny];
-      eDumpProp.primitives.push({ type: 'Box', start: lStart, stop: lStop, priority: 0 });
-      hDumpProp.primitives.push({ type: 'Box', start: lStart, stop: lStop, priority: 0 });
+      const eb = M.CSPrimBox.create(ps, eDump);
+      eb.SetStartStop(lStart[0], lStart[1], lStart[2], lStop[0], lStop[1], lStop[2]);
+      const hb = M.CSPrimBox.create(ps, hDump);
+      hb.SetStartStop(lStart[0], lStart[1], lStart[2], lStop[0], lStop[1], lStop[2]);
     }
     // Upper face (stop side)
     if (directions[pos + 1]) {
       const lStart = [...start];
       const lStop = [...stop];
       lStart[ny] = lStop[ny];
-      eDumpProp.primitives.push({ type: 'Box', start: lStart, stop: lStop, priority: 0 });
-      hDumpProp.primitives.push({ type: 'Box', start: lStart, stop: lStop, priority: 0 });
+      const eb = M.CSPrimBox.create(ps, eDump);
+      eb.SetStartStop(lStart[0], lStart[1], lStart[2], lStop[0], lStop[1], lStop[2]);
+      const hb = M.CSPrimBox.create(ps, hDump);
+      hb.SetStartStop(lStart[0], lStart[1], lStart[2], lStop[0], lStop[1], lStop[2]);
     }
   }
-
-  sim._properties.push(eDumpProp);
-  sim._properties.push(hDumpProp);
 
   return new NF2FFBox(name, start, stop, directions, mirror, frequency);
 }

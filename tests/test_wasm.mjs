@@ -1236,6 +1236,13 @@ async function testEngineEquivalence(Module) {
     }
 
     console.log(`  basic vs ${engName}: max abs diff=${maxAbsDiff.toExponential(3)}, max rel diff=${maxRelDiff.toExponential(3)}`);
+    // Strict bit-identical check: basic/sse/sse-compressed must produce
+    // identical results (same f64 arithmetic, same operation order).
+    assert(
+      maxAbsDiff === 0,
+      `basic vs ${engName}: bit-identical (max abs diff=${maxAbsDiff.toExponential(3)})`
+    );
+    // Fallback relative tolerance in case bit-identical check is relaxed
     assert(
       maxRelDiff < 1e-6,
       `basic vs ${engName}: max relative diff ${maxRelDiff.toExponential(3)} < 1e-6`

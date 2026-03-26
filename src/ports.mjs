@@ -252,85 +252,75 @@ export class LumpedPort extends Port {
   }
 
   /**
-   * Generate XML elements for this port's geometry (lumped element, excitation, probes).
-   * @returns {string} XML fragment to include in <Properties>
+   * Add this port's geometry (lumped element, excitation, probes) to a native
+   * ContinuousStructure via CSXCAD Embind bindings.
+   * @param {Object} csx - native ContinuousStructure
+   * @param {Object} Module - WASM module
    */
-  toXML() {
-    const parts = [];
+  addToCSX(csx, Module) {
+    const ps = csx.GetParameterSet();
     const ny = this.excDir;
     const dir = this.direction;
     const p = this.priority;
+    const s = this.start;
+    const e = this.stop;
 
     // Lumped element or metal short
     if (this.R > 0) {
-      parts.push(
-        `<LumpedElement ID="0" Name="${this._label('resist')}" Direction="${ny}" R="${this.R}" Caps="1">`,
-        `  <Primitives>`,
-        `    <Box Priority="${p}">`,
-        `      <P1 X="${this.start[0]}" Y="${this.start[1]}" Z="${this.start[2]}"/>`,
-        `      <P2 X="${this.stop[0]}" Y="${this.stop[1]}" Z="${this.stop[2]}"/>`,
-        `    </Box>`,
-        `  </Primitives>`,
-        `</LumpedElement>`
-      );
+      const le = Module.CSPropLumpedElement.create(ps);
+      le.SetName(this._label('resist'));
+      le.SetResistance(this.R);
+      le.SetDirection(ny);
+      le.SetCaps(true);
+      csx.AddProperty(le);
+      const box = Module.CSPrimBox.create(ps, le);
+      box.SetStartStop(s[0], s[1], s[2], e[0], e[1], e[2]);
+      box.SetPriority(p);
     } else if (this.R === 0) {
-      parts.push(
-        `<Metal ID="0" Name="${this._label('resist')}">`,
-        `  <Primitives>`,
-        `    <Box Priority="${p}">`,
-        `      <P1 X="${this.start[0]}" Y="${this.start[1]}" Z="${this.start[2]}"/>`,
-        `      <P2 X="${this.stop[0]}" Y="${this.stop[1]}" Z="${this.stop[2]}"/>`,
-        `    </Box>`,
-        `  </Primitives>`,
-        `</Metal>`
-      );
+      const metal = Module.CSPropMetal.create(ps);
+      metal.SetName(this._label('resist'));
+      csx.AddProperty(metal);
+      const box = Module.CSPrimBox.create(ps, metal);
+      box.SetStartStop(s[0], s[1], s[2], e[0], e[1], e[2]);
+      box.SetPriority(p);
     }
 
     // Excitation
     if (this.excite !== 0) {
-      const excVec = [0, 0, 0];
-      excVec[ny] = -1 * dir * this.excite;
-      parts.push(
-        `<Excitation ID="0" Name="${this._label('excite')}" Number="0" Type="0" Excite="${excVec.join(',')}">`,
-        `  <Primitives>`,
-        `    <Box Priority="${p}">`,
-        `      <P1 X="${this.start[0]}" Y="${this.start[1]}" Z="${this.start[2]}"/>`,
-        `      <P2 X="${this.stop[0]}" Y="${this.stop[1]}" Z="${this.stop[2]}"/>`,
-        `    </Box>`,
-        `  </Primitives>`,
-        `</Excitation>`
-      );
+      const exc = Module.CSPropExcitation.create(ps, 0);
+      exc.SetName(this._label('excite'));
+      exc.SetExcitType(0);
+      for (let c = 0; c < 3; c++) {
+        exc.SetExcitation(c === ny ? -1 * dir * this.excite : 0, c);
+      }
+      csx.AddProperty(exc);
+      const box = Module.CSPrimBox.create(ps, exc);
+      box.SetStartStop(s[0], s[1], s[2], e[0], e[1], e[2]);
+      box.SetPriority(p);
     }
 
-    // Voltage probe (weight = -1)
+    // Voltage probe
     const us = this._u_probe_start;
     const ue = this._u_probe_stop;
-    parts.push(
-      `<ProbeBox ID="0" Name="${this.U_filenames[0]}" Number="0" Type="0" Weight="-1" NormDir="-1">`,
-      `  <Primitives>`,
-      `    <Box Priority="0">`,
-      `      <P1 X="${us[0]}" Y="${us[1]}" Z="${us[2]}"/>`,
-      `      <P2 X="${ue[0]}" Y="${ue[1]}" Z="${ue[2]}"/>`,
-      `    </Box>`,
-      `  </Primitives>`,
-      `</ProbeBox>`
-    );
+    const vProbe = Module.CSPropProbeBox.create(ps);
+    vProbe.SetName(this.U_filenames[0]);
+    vProbe.SetProbeType(0);
+    vProbe.SetWeighting(-1);
+    csx.AddProperty(vProbe);
+    const vBox = Module.CSPrimBox.create(ps, vProbe);
+    vBox.SetStartStop(us[0], us[1], us[2], ue[0], ue[1], ue[2]);
 
-    // Current probe (weight = direction, norm_dir = excDir)
+    // Current probe
     const is_ = this._i_probe_start;
     const ie = this._i_probe_stop;
-    parts.push(
-      `<ProbeBox ID="0" Name="${this.I_filenames[0]}" Number="0" Type="1" Weight="${dir}" NormDir="${ny}">`,
-      `  <Primitives>`,
-      `    <Box Priority="0">`,
-      `      <P1 X="${is_[0]}" Y="${is_[1]}" Z="${is_[2]}"/>`,
-      `      <P2 X="${ie[0]}" Y="${ie[1]}" Z="${ie[2]}"/>`,
-      `    </Box>`,
-      `  </Primitives>`,
-      `</ProbeBox>`
-    );
-
-    return parts.join('\n');
+    const iProbe = Module.CSPropProbeBox.create(ps);
+    iProbe.SetName(this.I_filenames[0]);
+    iProbe.SetProbeType(1);
+    iProbe.SetWeighting(dir);
+    iProbe.SetNormalDir(ny);
+    csx.AddProperty(iProbe);
+    const iBox = Module.CSPrimBox.create(ps, iProbe);
+    iBox.SetStartStop(is_[0], is_[1], is_[2], ie[0], ie[1], ie[2]);
   }
 
   /**
@@ -494,6 +484,16 @@ export class MSLPort extends Port {
     if (dir === 1) return g.y && g.y.length > 0 ? [...g.y].sort((a, b) => a - b) : null;
     if (dir === 2) return g.z && g.z.length > 0 ? [...g.z].sort((a, b) => a - b) : null;
     return null;
+  }
+
+  /**
+   * Add MSL port geometry to native ContinuousStructure via XML bridge.
+   * @param {Object} csx - native ContinuousStructure
+   * @param {Object} Module - WASM module
+   */
+  addToCSX(csx, Module) {
+    const xml = `<ContinuousStructure><Properties>${this.toXML()}</Properties></ContinuousStructure>`;
+    Module.csxFromXML(csx, xml);
   }
 
   /**
@@ -742,6 +742,17 @@ export class WaveguidePort extends Port {
    * Generate XML for this waveguide port.
    * @returns {string}
    */
+
+  /**
+   * Add waveguide port geometry to native ContinuousStructure via XML bridge.
+   * @param {Object} csx - native ContinuousStructure
+   * @param {Object} Module - WASM module
+   */
+  addToCSX(csx, Module) {
+    const xml = `<ContinuousStructure><Properties>${this.toXML()}</Properties></ContinuousStructure>`;
+    Module.csxFromXML(csx, xml);
+  }
+
   toXML() {
     const parts = [];
     const p = this.priority;

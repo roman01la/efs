@@ -1,11 +1,15 @@
 #include <emscripten/bind.h>
 #include <fstream>
 #include <sstream>
+#include <cstdio>
+#include <stdexcept>
+#include <atomic>
 #include <dirent.h>
 #include <string>
 #include <vector>
 #include "openems.h"
 #include "FDTD/operator.h"
+#include "ContinuousStructure.h"
 #include "tools/hdf5_file_reader.h"
 
 using namespace emscripten;
@@ -16,6 +20,8 @@ class openEMS_Accessor : public openEMS {
 public:
     Operator* getFDTD_Op() const { return FDTD_Op; }
 };
+
+static std::atomic<int> g_xmlPathCounter{0};
 
 class OpenEMSWrapper {
 public:
@@ -40,20 +46,57 @@ public:
     }
 
     bool loadXML(const std::string& xmlString) {
-        std::string path = "/tmp/sim.xml";
+        std::string path = "/tmp/sim_" + std::to_string(g_xmlPathCounter++) + ".xml";
         std::ofstream out(path);
         if (!out.is_open()) return false;
         out << xmlString;
         out.close();
-        return ems_->ParseFDTDSetup(path);
+        bool ok = ems_->ParseFDTDSetup(path);
+        std::remove(path.c_str());
+        return ok;
+    }
+
+    /**
+     * Set a ContinuousStructure directly (skip XML round-trip).
+     * The FDTD settings (excitation, BCs) must still come from loadXML or
+     * be set via configure(). Call loadFDTDSettings() for the FDTD portion.
+     */
+    void setCSX(ContinuousStructure* csx) {
+        ems_->SetCSX(csx);
+    }
+
+    /**
+     * Parse only the <FDTD> settings from an XML string (excitation, BCs).
+     * Use with setCSX() when geometry is built via CSXCAD bindings.
+     */
+    bool loadFDTDSettings(const std::string& xmlString) {
+        std::string path = "/tmp/fdtd_" + std::to_string(g_xmlPathCounter++) + ".xml";
+        std::ofstream out(path);
+        if (!out.is_open()) return false;
+        out << xmlString;
+        out.close();
+        bool ok = ems_->ParseFDTDSetup(path);
+        std::remove(path.c_str());
+        return ok;
     }
 
     int setup() {
-        return ems_->SetupFDTD();
+        try {
+            return ems_->SetupFDTD();
+        } catch (int exitCode) {
+            return exitCode != 0 ? exitCode : -1;
+        } catch (...) {
+            return -1;
+        }
     }
 
     void run() {
-        ems_->RunFDTD();
+        try {
+            ems_->RunFDTD();
+        } catch (int exitCode) {
+            // Vendor exit() converted to throw — propagate as JS exception
+            throw std::runtime_error("openEMS exited with code " + std::to_string(exitCode));
+        }
     }
 
     std::string readFile(const std::string& path) {
@@ -372,6 +415,8 @@ EMSCRIPTEN_BINDINGS(openems) {
         .constructor<>()
         .function("configure", &OpenEMSWrapper::configure)
         .function("loadXML", &OpenEMSWrapper::loadXML)
+        .function("setCSX", &OpenEMSWrapper::setCSX, allow_raw_pointers())
+        .function("loadFDTDSettings", &OpenEMSWrapper::loadFDTDSettings)
         .function("setup", &OpenEMSWrapper::setup)
         .function("run", &OpenEMSWrapper::run)
         .function("readFile", &OpenEMSWrapper::readFile)
