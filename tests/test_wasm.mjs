@@ -1641,9 +1641,9 @@ async function testHDF5Reading(Module) {
   // Small 10x10x10 mm cavity for speed
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <openEMS>
-  <FDTD NumberOfTimesteps="50" endCriteria="1e-4" f_max="${f0 + fc}">
+  <FDTD NumberOfTimesteps="200" endCriteria="1e-20" f_max="${f0 + fc}">
     <Excitation Type="0" f0="${f0}" fc="${fc}"/>
-    <BoundaryCond xmin="PEC" xmax="PEC" ymin="PEC" ymax="PEC" zmin="PEC" zmax="PEC"/>
+    <BoundaryCond xmin="0" xmax="0" ymin="0" ymax="0" zmin="0" zmax="0"/>
   </FDTD>
   <ContinuousStructure CoordSystem="0">
     <RectilinearGrid DeltaUnit="${unit}" CoordSystem="0">
@@ -1660,33 +1660,28 @@ async function testHDF5Reading(Module) {
           </Curve>
         </Primitives>
       </Excitation>
-      <DumpBox Name="Et_xn" DumpType="0" DumpMode="1" FileType="1">
+      <DumpBox Name="Et_xn" DumpType="0" DumpMode="0" FileType="1">
         <Primitives>
           <Box Priority="0">
-            <P1 X="0" Y="0" Z="0"/>
-            <P2 X="0" Y="10" Z="10"/>
+            <P1 X="3" Y="0" Z="0"/>
+            <P2 X="3" Y="10" Z="10"/>
           </Box>
         </Primitives>
       </DumpBox>
-      <DumpBox Name="Ht_xn" DumpType="1" DumpMode="1" FileType="1">
+      <DumpBox Name="Ht_xn" DumpType="1" DumpMode="0" FileType="1">
         <Primitives>
           <Box Priority="0">
-            <P1 X="0" Y="0" Z="0"/>
-            <P2 X="0" Y="10" Z="10"/>
+            <P1 X="3" Y="0" Z="0"/>
+            <P2 X="3" Y="10" Z="10"/>
           </Box>
         </Primitives>
       </DumpBox>
     </Properties>
-    <RectilinearGrid DeltaUnit="${unit}">
-      <XLines>0,1,2,3,4,5,6,7,8,9,10</XLines>
-      <YLines>0,1,2,3,4,5,6,7,8,9,10</YLines>
-      <ZLines>0,1,2,3,4,5,6,7,8,9,10</ZLines>
-    </RectilinearGrid>
   </ContinuousStructure>
 </openEMS>`;
 
   const ems = new Module.OpenEMS();
-  ems.configure(0, 50, 1e-4); // basic engine, 50 timesteps, quick convergence
+  ems.configure(0, 200, 1e-20); // basic engine, 200 timesteps, run all
 
   let simOk = false;
   try {
@@ -1810,12 +1805,7 @@ async function testHDF5Reading(Module) {
           const v = Math.abs(hFieldVec.get(i));
           if (v > hMaxField) hMaxField = v;
         }
-        if (hMaxField > 0) {
-          assert(true, `H-field data has non-zero values (max: ${hMaxField.toExponential(3)})`);
-        } else {
-          console.log(`  INFO: H-field data all zeros (simulation may be too short for field to reach dump face)`);
-          assert(true, 'H-field data readable (zero values expected for short simulation)');
-        }
+        assert(hMaxField > 0, `H-field data has non-zero values (max: ${hMaxField.toExponential(3)})`);
         hFieldVec.delete();
       }
     } else {
