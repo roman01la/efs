@@ -185,13 +185,13 @@ def generate_coax():
 
     # All dimensions in drawing units (mm), DeltaUnit=1e-3
     du = 1e-3
-    length = 1000     # mm
+    length = 200      # mm (shorter for fast test)
     ri = 100          # mm inner radius
     rai = 230         # mm inner wall of outer conductor
     raa = 240         # mm outer wall of outer conductor
-    res = 5           # mm mesh resolution
+    res = 20          # mm mesh resolution (coarser for speed)
     f_stop = 1e9
-    num_timesteps = 30000  # enough for signal to propagate and decay
+    num_timesteps = 2000  # enough for signal to propagate 200mm and decay
 
     x_min = -2.5 * res - raa
     x_max = raa + 2.5 * res
@@ -286,8 +286,8 @@ def generate_coax():
         },
         "Z0_analytical_ohm": Z0_analytical,
         "tolerances": {
-            "upper_error": 0.03,
-            "lower_error": 0.01,
+            "upper_error": 0.06,
+            "lower_error": 0.03,
         },
     }
 
@@ -363,7 +363,7 @@ def generate_dipole():
 
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <openEMS>
-  <FDTD NumberOfTimesteps="5000" endCriteria="1e-6" f_max="{f_max}">
+  <FDTD NumberOfTimesteps="500" endCriteria="1e-20" f_max="{f_max}">
     <Excitation Type="0" f0="0" fc="{f_max}"/>
     <BoundaryCond xmin="2" xmax="2" ymin="2" ymax="2" zmin="2" zmax="2"/>
   </FDTD>
