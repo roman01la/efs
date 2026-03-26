@@ -845,6 +845,13 @@ export class WaveguidePort extends Port {
   addToCSX(csx, Module) {
     const ps = csx.GetParameterSet();
     const p = this.priority;
+    const grid = csx.GetGrid();
+
+    // Add port edges as grid lines for proper snapping
+    for (let d = 0; d < 3; d++) {
+      grid.AddDiscLine(d, this.start[d]);
+      grid.AddDiscLine(d, this.stop[d]);
+    }
 
     // Excitation with weight functions
     if (this.excite !== 0) {
@@ -860,7 +867,7 @@ export class WaveguidePort extends Port {
       for (let c = 0; c < 3; c++) exc.SetExcitation(eVec[c], c);
       // Set weight functions for mode-matched excitation
       for (let c = 0; c < 3; c++) {
-        if (this.E_func[c] && this.E_func[c] !== '0') {
+        if (this.E_func[c] && this.E_func[c] !== 0 && this.E_func[c] !== '0') {
           try { exc.SetWeightFunction(String(this.E_func[c]), c); } catch(e) {}
         }
       }
@@ -876,6 +883,12 @@ export class WaveguidePort extends Port {
     const vp = Module.CSPropProbeBox.create(ps);
     vp.SetName(this.U_filenames[0]);
     vp.SetProbeType(10);
+    // Mode functions for E-field matching (openEMS reads ModeFunctionX/Y/Z)
+    // All three must be set — empty string causes parse error
+    const mfNames = ['ModeFunctionX', 'ModeFunctionY', 'ModeFunctionZ'];
+    for (let c = 0; c < 3; c++) {
+      vp.AddAttribute(mfNames[c], this.E_func[c] ? String(this.E_func[c]) : '0');
+    }
     csx.AddProperty(vp);
     const vBox = Module.CSPrimBox.create(ps, vp);
     vBox.SetStartStop(us[0], us[1], us[2], ue[0], ue[1], ue[2]);
@@ -888,6 +901,10 @@ export class WaveguidePort extends Port {
     ip.SetProbeType(11);
     ip.SetWeighting(this.direction);
     ip.SetNormalDir(this.excDir);
+    // Mode functions for H-field matching (openEMS reads ModeFunctionX/Y/Z)
+    for (let c = 0; c < 3; c++) {
+      ip.AddAttribute(mfNames[c], this.H_func[c] ? String(this.H_func[c]) : '0');
+    }
     csx.AddProperty(ip);
     const iBox = Module.CSPrimBox.create(ps, ip);
     iBox.SetStartStop(is_[0], is_[1], is_[2], ie[0], ie[1], ie[2]);
