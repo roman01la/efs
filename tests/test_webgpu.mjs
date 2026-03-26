@@ -593,8 +593,8 @@ section('WGSL Shader Syntax Validation');
         'Excitation WGSL has @compute @workgroup_size(256)');
     assert(EXCITATION_WGSL.includes('fn apply_excitation'),
         'Excitation WGSL has apply_excitation entry point');
-    assert(EXCITATION_WGSL.includes('@group(4) @binding(0)'),
-        'Excitation WGSL has bind group 4');
+    assert(EXCITATION_WGSL.includes('@group(1) @binding(0)'),
+        'Excitation WGSL has bind group 1');
     assert(EXCITATION_WGSL.includes('exc.numExcitations'),
         'Excitation WGSL checks numExcitations bound');
 
@@ -793,12 +793,12 @@ section('WGSL Shader — Buffer Binding Consistency');
     for (const m of EXCITATION_WGSL.matchAll(/@group\((\d+)\)\s+@binding\((\d+)\)/g)) {
         excBindings.push([parseInt(m[1]), parseInt(m[2])]);
     }
-    assert(excBindings.some(([g, b]) => g === 4 && b === 0), 'Excitation shader: group(4) binding(0) — exc params');
-    assert(excBindings.some(([g, b]) => g === 4 && b === 1), 'Excitation shader: group(4) binding(1) — signal');
-    assert(excBindings.some(([g, b]) => g === 4 && b === 2), 'Excitation shader: group(4) binding(2) — delay');
-    assert(excBindings.some(([g, b]) => g === 4 && b === 3), 'Excitation shader: group(4) binding(3) — amp');
-    assert(excBindings.some(([g, b]) => g === 4 && b === 4), 'Excitation shader: group(4) binding(4) — dir');
-    assert(excBindings.some(([g, b]) => g === 4 && b === 5), 'Excitation shader: group(4) binding(5) — pos');
+    assert(excBindings.some(([g, b]) => g === 1 && b === 0), 'Excitation shader: group(1) binding(0) — exc params');
+    assert(excBindings.some(([g, b]) => g === 1 && b === 1), 'Excitation shader: group(1) binding(1) — signal');
+    assert(excBindings.some(([g, b]) => g === 1 && b === 2), 'Excitation shader: group(1) binding(2) — delay');
+    assert(excBindings.some(([g, b]) => g === 1 && b === 3), 'Excitation shader: group(1) binding(3) — amp');
+    assert(excBindings.some(([g, b]) => g === 1 && b === 4), 'Excitation shader: group(1) binding(4) — dir');
+    assert(excBindings.some(([g, b]) => g === 1 && b === 5), 'Excitation shader: group(1) binding(5) — pos');
 }
 
 // ---------------------------------------------------------------------------

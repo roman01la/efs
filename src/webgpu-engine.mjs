@@ -223,12 +223,12 @@ struct ExcParams {
 @group(0) @binding(1) var<storage, read_write> curr: array<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
 
-@group(4) @binding(0) var<uniform> exc: ExcParams;
-@group(4) @binding(1) var<storage, read> signal: array<f32>;
-@group(4) @binding(2) var<storage, read> delay: array<u32>;
-@group(4) @binding(3) var<storage, read> amp: array<f32>;
-@group(4) @binding(4) var<storage, read> dir: array<u32>;
-@group(4) @binding(5) var<storage, read> pos: array<u32>;
+@group(1) @binding(0) var<uniform> exc: ExcParams;
+@group(1) @binding(1) var<storage, read> signal: array<f32>;
+@group(1) @binding(2) var<storage, read> delay: array<u32>;
+@group(1) @binding(3) var<storage, read> amp: array<f32>;
+@group(1) @binding(4) var<storage, read> dir: array<u32>;
+@group(1) @binding(5) var<storage, read> pos: array<u32>;
 
 @compute @workgroup_size(256)
 fn apply_excitation(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -598,7 +598,7 @@ export class WebGPUEngine {
         this.excitationPipeline = null;
 
         // Bind groups
-        this.coreBindGroup = null;
+        // Core bind groups created lazily via _coreBindGroupFor()
         this.voltCoeffBindGroup = null;
         this.currCoeffBindGroup = null;
         this.excBindGroup = null;
@@ -629,6 +629,8 @@ export class WebGPUEngine {
                 maxStorageBufferBindingSize: this.adapter.limits.maxStorageBufferBindingSize,
                 maxBufferSize: this.adapter.limits.maxBufferSize,
                 maxComputeWorkgroupsPerDimension: this.adapter.limits.maxComputeWorkgroupsPerDimension,
+                maxStorageBuffersPerShaderStage: this.adapter.limits.maxStorageBuffersPerShaderStage,
+                maxBindGroups: this.adapter.limits.maxBindGroups,
             },
         });
 
@@ -826,7 +828,7 @@ export class WebGPUEngine {
 
             const pass = encoder.beginComputePass();
             pass.setPipeline(this.pmlPipeline);
-            pass.setBindGroup(0, this.coreBindGroup);
+            pass.setBindGroup(0, this._coreBindGroupFor(this.pmlPipeline));
             pass.setBindGroup(3, region.bindGroup);
             pass.dispatchWorkgroups(...region.dispatch);
             pass.end();
@@ -974,7 +976,7 @@ export class WebGPUEngine {
             for (const d of order.directions) {
                 const pass = encoder.beginComputePass();
                 pass.setPipeline(order.pipeline);
-                pass.setBindGroup(0, this.coreBindGroup);
+                pass.setBindGroup(0, this._coreBindGroupFor(this.pmlPipeline));
                 pass.setBindGroup(1, d.bindGroup);
                 pass.dispatchWorkgroups(d.dispatch, 1, 1);
                 pass.end();
@@ -992,7 +994,7 @@ export class WebGPUEngine {
             for (const d of order.directions) {
                 const pass = encoder.beginComputePass();
                 pass.setPipeline(order.pipeline);
-                pass.setBindGroup(0, this.coreBindGroup);
+                pass.setBindGroup(0, this._coreBindGroupFor(this.pmlPipeline));
                 pass.setBindGroup(1, d.bindGroup);
                 pass.dispatchWorkgroups(d.dispatch, 1, 1);
                 pass.end();
@@ -1171,7 +1173,7 @@ export class WebGPUEngine {
         this._updateTFSFParams();
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.tfsfVoltPipeline);
-        pass.setBindGroup(0, this.coreBindGroup);
+        pass.setBindGroup(0, this._coreBindGroupFor(this.tfsfVoltPipeline));
         pass.setBindGroup(1, this.tfsfVoltBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._tfsfNumVoltPoints / this.WG_SIZE_EXC), 1, 1);
         pass.end();
@@ -1285,7 +1287,7 @@ export class WebGPUEngine {
         if (!this.rlcConfigured) return;
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.rlcPipeline);
-        pass.setBindGroup(0, this.coreBindGroup);
+        pass.setBindGroup(0, this._coreBindGroupFor(this.rlcPipeline));
         pass.setBindGroup(1, this.rlcBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._rlcCount / this.WG_SIZE_EXC), 1, 1);
         pass.end();
@@ -1391,7 +1393,7 @@ export class WebGPUEngine {
         if (!this.murConfigured) return;
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.murPrePipeline);
-        pass.setBindGroup(0, this.coreBindGroup);
+        pass.setBindGroup(0, this._coreBindGroupFor(this.murPrePipeline));
         pass.setBindGroup(1, this.murBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
         pass.end();
@@ -1405,7 +1407,7 @@ export class WebGPUEngine {
         if (!this.murConfigured) return;
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.murPostPipeline);
-        pass.setBindGroup(0, this.coreBindGroup);
+        pass.setBindGroup(0, this._coreBindGroupFor(this.murPostPipeline));
         pass.setBindGroup(1, this.murBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
         pass.end();
@@ -1419,7 +1421,7 @@ export class WebGPUEngine {
         if (!this.murConfigured) return;
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.murApplyPipeline);
-        pass.setBindGroup(0, this.coreBindGroup);
+        pass.setBindGroup(0, this._coreBindGroupFor(this.murApplyPipeline));
         pass.setBindGroup(1, this.murBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
         pass.end();
@@ -1502,7 +1504,7 @@ export class WebGPUEngine {
 
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.ssPipeline);
-        pass.setBindGroup(0, this.coreBindGroup);
+        pass.setBindGroup(0, this._coreBindGroupFor(this.ssPipeline));
         pass.setBindGroup(1, this.ssBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._ssNumProbes / this.WG_SIZE_EXC), 1, 1);
         pass.end();
@@ -1522,7 +1524,7 @@ export class WebGPUEngine {
 
         const pass = enc.beginComputePass();
         pass.setPipeline(this.voltagePipeline);
-        pass.setBindGroup(0, this.coreBindGroup);
+        pass.setBindGroup(0, this._coreBindGroupFor(this.voltagePipeline));
         pass.setBindGroup(1, this.voltCoeffBindGroup);
         pass.dispatchWorkgroups(
             Math.ceil(Nx / wgX),
@@ -1549,7 +1551,7 @@ export class WebGPUEngine {
 
         const pass = enc.beginComputePass();
         pass.setPipeline(this.currentPipeline);
-        pass.setBindGroup(0, this.coreBindGroup);
+        pass.setBindGroup(0, this._coreBindGroupFor(this.currentPipeline));
         pass.setBindGroup(2, this.currCoeffBindGroup);
         pass.dispatchWorkgroups(
             Math.ceil(Math.max(Nx - 1, 1) / wgX),
@@ -1579,8 +1581,8 @@ export class WebGPUEngine {
 
         const pass = enc.beginComputePass();
         pass.setPipeline(this.excitationPipeline);
-        pass.setBindGroup(0, this.coreBindGroup);
-        pass.setBindGroup(4, this.excBindGroup);
+        pass.setBindGroup(0, this._coreBindGroupFor(this.excitationPipeline, [0, 2]));
+        pass.setBindGroup(1, this.excBindGroup);
         pass.dispatchWorkgroups(
             Math.ceil(this._excCount / this.WG_SIZE_EXC),
             1,
@@ -1601,56 +1603,49 @@ export class WebGPUEngine {
      * @param {number} numSteps - number of timesteps to run
      */
     async iterate(numSteps) {
-        const BATCH_SIZE = 32;
-        const commandBuffers = [];
-
         for (let step = 0; step < numSteps; step++) {
+            // Update uniforms BEFORE encoding so the command buffer sees correct values
+            this._updateParams();
+            if (this.excitationConfigured) {
+                this._updateExcParams();
+            }
+
             const encoder = this.device.createCommandEncoder();
 
             // === PRE-VOLTAGE ===
-            this.stepSteadyState(encoder);        // Priority +2M: steady-state energy
-            this.stepPML(encoder, 0);              // Priority +1M: PML pre-voltage
-            this.stepVoltADE(encoder);             // Priority 0: Lorentz/Drude ADE
-            this.stepMurPre(encoder);              // Priority 0: Mur pre-voltage (save boundary)
-            this.stepRLC(encoder);                 // Priority 0: RLC pre-voltage + apply
+            this.stepSteadyState(encoder);
+            this.stepPML(encoder, 0);
+            this.stepVoltADE(encoder);
+            this.stepMurPre(encoder);
+            this.stepRLC(encoder);
 
             // === CORE VOLTAGE UPDATE ===
             this.stepVoltage(encoder);
 
             // === POST-VOLTAGE ===
-            this.stepPML(encoder, 1);              // Priority +1M: PML post-voltage
-            this.stepTFSFVoltage(encoder);         // Priority +50K: TFSF voltage injection
-            this.stepMurPost(encoder);             // Priority 0: Mur post-voltage
+            this.stepPML(encoder, 1);
+            this.stepTFSFVoltage(encoder);
+            this.stepMurPost(encoder);
 
             // === APPLY TO VOLTAGES ===
             if (this.excitationConfigured) {
-                this.applyExcitation(encoder);     // Priority -1K: Excitation voltage
+                this.applyExcitation(encoder);
             }
-            this.stepMurApply(encoder);            // Priority 0: Mur apply (overwrite boundary)
+            this.stepMurApply(encoder);
 
             // === PRE-CURRENT ===
-            this.stepPML(encoder, 2);              // Priority +1M: PML pre-current
-            this.stepCurrADE(encoder);             // Priority 0: Lorentz/Drude ADE current
+            this.stepPML(encoder, 2);
+            this.stepCurrADE(encoder);
 
             // === CORE CURRENT UPDATE ===
             this.stepCurrent(encoder);
 
             // === POST-CURRENT ===
-            this.stepPML(encoder, 3);              // Priority +1M: PML post-current
-            this.stepTFSFCurrent(encoder);         // Priority +50K: TFSF current injection
+            this.stepPML(encoder, 3);
+            this.stepTFSFCurrent(encoder);
 
-            commandBuffers.push(encoder.finish());
+            this.device.queue.submit([encoder.finish()]);
             this.numTS++;
-            this._updateParams();
-
-            if (this.excitationConfigured) {
-                this._updateExcParams();
-            }
-
-            if (commandBuffers.length >= BATCH_SIZE || step === numSteps - 1) {
-                this.device.queue.submit(commandBuffers);
-                commandBuffers.length = 0;
-            }
         }
 
         await this.device.queue.onSubmittedWorkDone();
@@ -1823,66 +1818,65 @@ export class WebGPUEngine {
     }
 
     async _createPipelines() {
-        // Voltage update pipeline
-        const voltShaderModule = this.device.createShaderModule({
-            code: UPDATE_VOLTAGE_WGSL,
-        });
-        this.voltagePipeline = await this.device.createComputePipelineAsync({
-            layout: 'auto',
-            compute: {
-                module: voltShaderModule,
-                entryPoint: 'update_voltages',
-            },
-        });
-
-        // Current update pipeline
-        const currShaderModule = this.device.createShaderModule({
-            code: UPDATE_CURRENT_WGSL,
-        });
-        this.currentPipeline = await this.device.createComputePipelineAsync({
-            layout: 'auto',
-            compute: {
-                module: currShaderModule,
-                entryPoint: 'update_currents',
-            },
-        });
-
-        // PML pipeline
-        const pmlShaderModule = this.device.createShaderModule({
-            code: UPDATE_PML_WGSL,
-        });
-        this.pmlPipeline = await this.device.createComputePipelineAsync({
-            layout: 'auto',
-            compute: {
-                module: pmlShaderModule,
-                entryPoint: 'update_pml',
-            },
-        });
-
-        // Excitation pipeline
-        const excShaderModule = this.device.createShaderModule({
-            code: EXCITATION_WGSL,
-        });
-        this.excitationPipeline = await this.device.createComputePipelineAsync({
-            layout: 'auto',
-            compute: {
-                module: excShaderModule,
-                entryPoint: 'apply_excitation',
-            },
-        });
-    }
-
-    _createBindGroups() {
-        // Bind Group 0: Core FDTD (shared by E and H shaders)
-        this.coreBindGroup = this.device.createBindGroup({
-            layout: this.voltagePipeline.getBindGroupLayout(0),
+        // Shared bind group layout for group 0 (volt, curr, params)
+        // Used by all pipelines that read/write fields
+        this.coreBindGroupLayout = this.device.createBindGroupLayout({
             entries: [
-                { binding: 0, resource: { buffer: this.voltBuffer } },
-                { binding: 1, resource: { buffer: this.currBuffer } },
-                { binding: 2, resource: { buffer: this.paramsBuffer } },
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
             ],
         });
 
+        const makeAutoLayout = (extraLayouts) => {
+            // We only fix group 0; let 'auto' handle the rest
+            // Actually we can't mix explicit and auto. Use full auto and create
+            // per-pipeline bind groups. OR use explicit for everything.
+            // Simplest: use explicit group 0 layout for all pipelines.
+            return undefined; // placeholder
+        };
+
+        const createPipeline = async (code, entryPoint) => {
+            const module = this.device.createShaderModule({ code });
+            return await this.device.createComputePipelineAsync({
+                layout: 'auto',
+                compute: { module, entryPoint },
+            });
+        };
+
+        this.voltagePipeline = await createPipeline(UPDATE_VOLTAGE_WGSL, 'update_voltages');
+        this.currentPipeline = await createPipeline(UPDATE_CURRENT_WGSL, 'update_currents');
+        this.pmlPipeline = await createPipeline(UPDATE_PML_WGSL, 'update_pml');
+        this.excitationPipeline = await createPipeline(EXCITATION_WGSL, 'apply_excitation');
+    }
+
+    _coreBindGroupFor(pipeline, bindings) {
+        // With layout:'auto', each pipeline has its own group 0 layout.
+        // The auto layout only includes bindings the shader actually uses.
+        // Pass bindings=[0,1,2] for most pipelines, [0,2] for excitation.
+        if (!this._coreBindGroupCache) this._coreBindGroupCache = new Map();
+        const key = pipeline;
+        if (this._coreBindGroupCache.has(key)) return this._coreBindGroupCache.get(key);
+
+        const bufferMap = {
+            0: this.voltBuffer,
+            1: this.currBuffer,
+            2: this.paramsBuffer,
+        };
+        const entries = (bindings || [0, 1, 2]).map(b => ({
+            binding: b,
+            resource: { buffer: bufferMap[b] },
+        }));
+
+        const bg = this.device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries,
+        });
+        this._coreBindGroupCache.set(key, bg);
+        return bg;
+    }
+
+    _createBindGroups() {
         // Bind Group 1: Voltage coefficients
         this.voltCoeffBindGroup = this.device.createBindGroup({
             layout: this.voltagePipeline.getBindGroupLayout(1),
@@ -1892,7 +1886,7 @@ export class WebGPUEngine {
             ],
         });
 
-        // Bind Group 2: Current coefficients
+        // Bind Group 2: Current coefficients (current shader uses @group(2) for ii/iv)
         this.currCoeffBindGroup = this.device.createBindGroup({
             layout: this.currentPipeline.getBindGroupLayout(2),
             entries: [
@@ -1904,7 +1898,7 @@ export class WebGPUEngine {
 
     _createExcitationBindGroup() {
         this.excBindGroup = this.device.createBindGroup({
-            layout: this.excitationPipeline.getBindGroupLayout(4),
+            layout: this.excitationPipeline.getBindGroupLayout(1),
             entries: [
                 { binding: 0, resource: { buffer: this.excParamsBuffer } },
                 { binding: 1, resource: { buffer: this.excSignalBuffer } },

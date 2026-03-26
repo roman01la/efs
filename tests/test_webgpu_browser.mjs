@@ -94,20 +94,16 @@ async function main() {
 
   page.on('console', (msg) => {
     const text = msg.text();
-    if (text.startsWith('  PASS:') || text.startsWith('  FAIL:') ||
-        text.startsWith('  INFO:') || text.startsWith('  SKIP:') ||
-        text.startsWith('===') || text.startsWith('Results:') ||
-        text.startsWith('FATAL:') || text.startsWith('openEMS')) {
-      console.log(text);
-    }
+    console.log(text);
   });
 
   page.on('pageerror', (err) => {
     console.error(`Page error: ${err.message}`);
   });
 
-  console.log(`Navigating to http://127.0.0.1:${port}/tests/webgpu/index.html`);
-  await page.goto(`http://127.0.0.1:${port}/tests/webgpu/index.html`, {
+  const testPage = process.argv[2] || '/tests/webgpu/index.html';
+  console.log(`Navigating to http://127.0.0.1:${port}${testPage}`);
+  await page.goto(`http://127.0.0.1:${port}${testPage}`, {
     waitUntil: 'domcontentloaded',
   });
 

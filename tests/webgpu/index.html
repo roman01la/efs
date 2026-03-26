@@ -680,6 +680,167 @@ async function run() {
     failed++;
   }
 
+  // ----------------------------------------------------------
+  // Test 12: GPU vs CPU — Full comparison using CPUFDTDEngine
+  // ----------------------------------------------------------
+  log('\n=== Test: GPU vs CPU Full FDTD Comparison ===');
+
+  try {
+    const { WebGPUEngine } = await import('/src/webgpu-engine.mjs');
+    const { CPUFDTDEngine } = await import('/src/webgpu-fdtd.mjs');
+
+    const gpu = new WebGPUEngine();
+    await gpu.initGPU();
+
+    const Nx = 8, Ny = 8, Nz = 8;
+    const total = Nx * Ny * Nz;
+    const size3 = 3 * total;
+
+    const vv = new Float32Array(size3).fill(1.0);
+    const vi = new Float32Array(size3).fill(0.3);
+    const ii = new Float32Array(size3).fill(1.0);
+    const iv = new Float32Array(size3).fill(0.3);
+    const coeffs = { vv, vi, ii, iv };
+
+    await gpu.init([Nx, Ny, Nz], coeffs);
+    const cpu = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    // Excitation config (shared)
+    const signal = new Float32Array(100);
+    for (let i = 0; i < 100; i++) signal[i] = Math.exp(-(Math.pow((i-20)/8, 2)));
+    const excConfig = {
+      signal,
+      delay: new Uint32Array([0]),
+      amp: new Float32Array([1.0]),
+      dir: new Uint32Array([2]),
+      pos: new Uint32Array([4 * Ny * Nz + 4 * Nz + 4]),
+      period: 0,
+    };
+    gpu.configureExcitation(excConfig);
+    cpu.configureExcitation(excConfig);
+
+    const STEPS = 20;
+    log(`  INFO: gpu.excitationConfigured=${gpu.excitationConfigured}, numTS before iterate=${gpu.numTS}`);
+    // Run 1 step and check
+    await gpu.iterate(1);
+    const f1 = await gpu.getFields();
+    const v1 = new Float32Array(f1.volt);
+    let v1sum = 0, v1max = 0;
+    for (let i = 0; i < v1.length; i++) { v1sum += Math.abs(v1[i]); if (Math.abs(v1[i]) > v1max) v1max = Math.abs(v1[i]); }
+    log(`  INFO: after 1 step: volt sum=${v1sum.toExponential(6)}, max=${v1max.toExponential(6)}, len=${v1.length}, numTS=${gpu.numTS}`);
+    await gpu.iterate(STEPS - 1);
+    cpu.iterate(STEPS);
+    log(`  INFO: gpu.numTS after iterate=${gpu.numTS}, cpu.numTS=${cpu.numTS}`);
+
+    const gpuFields = await gpu.getFields();
+    const gpuVolt = new Float32Array(gpuFields.volt);
+    const gpuCurr = new Float32Array(gpuFields.curr);
+
+    let maxVDiff = 0, maxCDiff = 0;
+    for (let i = 0; i < size3; i++) {
+      const vd = Math.abs(gpuVolt[i] - cpu.volt[i]);
+      const cd = Math.abs(gpuCurr[i] - cpu.curr[i]);
+      if (vd > maxVDiff) maxVDiff = vd;
+      if (cd > maxCDiff) maxCDiff = cd;
+    }
+    assert(maxVDiff < 1e-4, `GPU vs CPU voltage (${STEPS} steps): max diff=${maxVDiff.toExponential(3)}`);
+    assert(maxCDiff < 1e-4, `GPU vs CPU current (${STEPS} steps): max diff=${maxCDiff.toExponential(3)}`);
+
+    let gpuE = 0, cpuE = 0;
+    for (let i = 0; i < size3; i++) {
+      gpuE += gpuVolt[i] * gpuVolt[i];
+      cpuE += cpu.volt[i] * cpu.volt[i];
+    }
+    assert(gpuE > 0, `GPU energy non-zero: ${gpuE.toExponential(3)}`);
+    assertApprox(gpuE, cpuE, cpuE * 1e-4, `Energy match: GPU=${gpuE.toExponential(4)} CPU=${cpuE.toExponential(4)}`);
+
+    gpu.destroy();
+  } catch (e) {
+    log(`  FAIL: GPU vs CPU FDTD: ${e.message}\n${e.stack}`);
+    failed++;
+  }
+
+  // ----------------------------------------------------------
+  // Test 13: GPU vs CPU — With PML
+  // ----------------------------------------------------------
+  log('\n=== Test: GPU vs CPU with PML ===');
+
+  try {
+    const { WebGPUEngine: WE2 } = await import('/src/webgpu-engine.mjs');
+    const { CPUFDTDEngine: CPU2 } = await import('/src/webgpu-fdtd.mjs');
+
+    const gpu2 = new WE2();
+    await gpu2.initGPU();
+
+    const Nx = 10, Ny = 10, Nz = 10;
+    const total = Nx * Ny * Nz;
+    const size3 = 3 * total;
+
+    const coeffs = {
+      vv: new Float32Array(size3).fill(1.0),
+      vi: new Float32Array(size3).fill(0.25),
+      ii: new Float32Array(size3).fill(1.0),
+      iv: new Float32Array(size3).fill(0.25),
+    };
+
+    await gpu2.init([Nx, Ny, Nz], coeffs);
+    const cpu2 = new CPU2([Nx, Ny, Nz], coeffs);
+
+    const pmlNz = 2;
+    const pmlCells = Nx * Ny * pmlNz;
+    const pmlSize3 = 3 * pmlCells;
+    const pmlConfig = [{
+      startPos: [0, 0, Nz - pmlNz],
+      numLines: [Nx, Ny, pmlNz],
+      vv: new Float32Array(pmlSize3).fill(0.9),
+      vvfo: new Float32Array(pmlSize3).fill(0.1),
+      vvfn: new Float32Array(pmlSize3).fill(0.8),
+      ii: new Float32Array(pmlSize3).fill(0.9),
+      iifo: new Float32Array(pmlSize3).fill(0.1),
+      iifn: new Float32Array(pmlSize3).fill(0.8),
+    }];
+    gpu2.configurePML(pmlConfig);
+    cpu2.configurePML(pmlConfig);
+
+    const signal = new Float32Array(50);
+    for (let i = 0; i < 50; i++) signal[i] = Math.sin(i * 0.5) * Math.exp((-i)/20);
+    const excConfig = {
+      signal,
+      delay: new Uint32Array([0]),
+      amp: new Float32Array([1.0]),
+      dir: new Uint32Array([2]),
+      pos: new Uint32Array([5 * Ny * Nz + 5 * Nz + 5]),
+      period: 0,
+    };
+    gpu2.configureExcitation(excConfig);
+    cpu2.configureExcitation(excConfig);
+
+    const STEPS = 15;
+    await gpu2.iterate(STEPS);
+    cpu2.iterate(STEPS);
+
+    const gpuFields = await gpu2.getFields();
+    const gpuVolt = new Float32Array(gpuFields.volt);
+
+    let maxDiff = 0;
+    for (let i = 0; i < size3; i++) {
+      const d = Math.abs(gpuVolt[i] - cpu2.volt[i]);
+      if (d > maxDiff) maxDiff = d;
+    }
+    assert(maxDiff < 1e-3, `GPU vs CPU with PML (${STEPS} steps): max diff=${maxDiff.toExponential(3)}`);
+
+    let hasNaN = false;
+    for (let i = 0; i < gpuVolt.length; i++) {
+      if (isNaN(gpuVolt[i])) { hasNaN = true; break; }
+    }
+    assert(!hasNaN, 'No NaN in GPU+PML output');
+
+    gpu2.destroy();
+  } catch (e) {
+    log(`  FAIL: GPU vs CPU PML: ${e.message}`);
+    failed++;
+  }
+
   finish();
 }
 

@@ -22,12 +22,12 @@ struct ExcParams {
 @group(0) @binding(1) var<storage, read_write> curr: array<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
 
-@group(4) @binding(0) var<uniform> exc: ExcParams;
-@group(4) @binding(1) var<storage, read> signal: array<f32>;
-@group(4) @binding(2) var<storage, read> delay: array<u32>;
-@group(4) @binding(3) var<storage, read> amp: array<f32>;
-@group(4) @binding(4) var<storage, read> dir: array<u32>;     // component direction (0,1,2)
-@group(4) @binding(5) var<storage, read> pos: array<u32>;     // packed linear position (x*Ny*Nz + y*Nz + z)
+@group(1) @binding(0) var<uniform> exc: ExcParams;
+@group(1) @binding(1) var<storage, read> signal: array<f32>;
+@group(1) @binding(2) var<storage, read> delay: array<u32>;
+@group(1) @binding(3) var<storage, read> amp: array<f32>;
+@group(1) @binding(4) var<storage, read> dir: array<u32>;     // component direction (0,1,2)
+@group(1) @binding(5) var<storage, read> pos: array<u32>;     // packed linear position (x*Ny*Nz + y*Nz + z)
 
 @compute @workgroup_size(256)
 fn apply_excitation(@builtin(global_invocation_id) gid: vec3<u32>) {
