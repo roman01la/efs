@@ -901,12 +901,26 @@ async function run() {
       [64, 64, 64],
     ];
 
-    // wasm64 loading disabled for perf benchmarks (SharedArrayBuffer + memory64
-    // initialization is slow in headless Chrome; run separately if needed)
-    const WASM64Module = null;
+    // Try loading wasm64 module
+    let WASM64Module = null;
+    try {
+      const resp = await fetch('/build-wasm64/openems.js');
+      if (resp.ok) {
+        const blob = new Blob([await resp.text()], { type: 'text/javascript' });
+        const url = URL.createObjectURL(blob);
+        const mod = await import(url);
+        const factory = mod.default || globalThis.createOpenEMS;
+        if (factory) {
+          WASM64Module = await factory();
+          log('  INFO: wasm64 module loaded');
+        }
+      }
+    } catch(e) {
+      log(`  INFO: wasm64 not available (${e.message})`);
+    }
 
     log('');
-    log('  Grid          | WebGPU       | WASM basic   | WASM MT      | JS CPU       | GPU/WASM');
+    log('  Grid          | WebGPU       | WASM32       | WASM64       | JS CPU       | GPU/WASM');
     log('  --------------|--------------|--------------|--------------|--------------|----------');
 
     for (const [Nx, Ny, Nz] of sizes) {
@@ -970,6 +984,7 @@ async function run() {
       }
 
       const wasmMC = runWASMBench(WASMModule, 0, 'basic');
+      const wasm64MC = WASM64Module ? runWASMBench(WASM64Module, 0, 'basic64') : null;
       // WASM multithreaded requires manual browser testing (pthreads hang in headless)
       const wasmMtMC = null;
 
@@ -992,10 +1007,10 @@ async function run() {
 
       const pad = (s, n) => s.toString().padStart(n);
       const fmc = (v) => v != null ? pad(v.toFixed(0), 5) + ' MC/s' : '  N/A   ';
-      log(`  ${label.padEnd(14)}| ${fmc(gpuMC)}   | ${fmc(wasmMC)}   | ${fmc(wasmMtMC)}   | ${fmc(cpuMC)}   | ${pad((wasmMC ? gpuMC/wasmMC : 0).toFixed(1), 5)}x`);
+      log(`  ${label.padEnd(14)}| ${fmc(gpuMC)}   | ${fmc(wasmMC)}   | ${fmc(wasm64MC)}   | ${fmc(cpuMC)}   | ${pad((wasmMC ? gpuMC/wasmMC : 0).toFixed(1), 5)}x`);
 
       assert(maxDiff < 1e-3, `${label}: GPU matches JS CPU (diff=${maxDiff.toExponential(2)})`);
-      assert(true, `${label}: GPU=${gpuMC.toFixed(0)}, WASM=${(wasmMC||0).toFixed(0)}, MT=${(wasmMtMC||0).toFixed(0)}, JS=${cpuMC.toFixed(0)} MCells/s`);
+      assert(true, `${label}: GPU=${gpuMC.toFixed(0)}, WASM32=${(wasmMC||0).toFixed(0)}, WASM64=${(wasm64MC||0).toFixed(0)}, JS=${cpuMC.toFixed(0)} MCells/s`);
     }
 
     // Load native benchmark results if available
@@ -1020,8 +1035,8 @@ async function run() {
     }
 
     log('');
-    log('  WASM basic = openEMS basic engine (wasm32, no SIMD).');
-    log('  WASM MT = openEMS multithreaded engine (wasm32, SSE compressed + pthreads).');
+    log('  WASM32 = openEMS basic engine (wasm32, 4GB max memory).');
+    log('  WASM64 = openEMS basic engine (wasm64/memory64, 8GB max memory).');
     log('  JS CPU = pure JavaScript FDTD reference implementation.');
 
   } catch (e) {
