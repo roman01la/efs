@@ -4,178 +4,134 @@
 
 ## Overview
 
-Porting the openEMS electromagnetic FDTD solver to run entirely client-side in a browser using WebAssembly and WebGPU. Phases 0-4 complete. 599 tests, 0 failures.
+openEMS electromagnetic FDTD solver running entirely client-side in a browser via WebAssembly and WebGPU. Phases 0-5 complete. 667 Node.js tests + 52 browser GPU tests, 0 failures.
 
-## Test Summary
-
-```
-node tests/test_wasm.mjs           # 35 tests  — WASM FDTD + fixtures
-node tests/test_api.mjs            # 252 tests — TS API, ports, visualization
-node tests/test_webgpu.mjs         # 272 tests — CPU FDTD reference, extensions
-node tests/test_webgpu_browser.mjs # 40 tests  — Real GPU: shaders, GPU-vs-CPU comparison
-                                   # 599 total, 0 failures
-```
-
-## GPU vs CPU Numerical Accuracy
-
-After 20 timesteps on 8x8x8 grid with identical coefficients and excitation:
-- Voltage max diff: **2.384e-7** (f32 machine epsilon = 1.19e-7)
-- Current max diff: **1.192e-7**
-- Energy match: GPU=14.647, CPU=14.647
-
-With PML (15 steps, 10x10x10, 2-cell PML at z-max): max diff **2.384e-7**.
-
-GPU and CPU produce identical results within f32 rounding. Per the research doc (Section 9), f32 is correct for FDTD field updates (matches native openEMS `FDTD_FLOAT`). Post-processing (DFT, S-parameters) uses f64 in JavaScript to avoid phase error accumulation.
-
----
-
-## Phase 4: GPU Extensions — COMPLETE
-
-All FDTD extensions ported as WGSL compute shaders with CPU reference implementations. 17-phase timestep dispatch matching C++ engine_extension.h priorities.
-
-### WGSL Shaders (9 total in `src/shaders/`)
-
-| Shader | Purpose | Dispatch |
-|---|---|---|
-| `update_voltage.wgsl` | E-field update (3 components, boundary shift) | Dense 3D (4,4,4) |
-| `update_current.wgsl` | H-field update (3 components, Nx-1/Ny-1/Nz-1) | Dense 3D (4,4,4) |
-| `excitation.wgsl` | Sparse source injection | 1D (256) |
-| `update_pml.wgsl` | UPML 4-mode (pre/post voltage/current) | Dense 3D (4,4,4) |
-| `lorentz_ade.wgsl` | Lorentz/Drude ADE with hasLorentz flag | Sparse 1D (256) |
-| `tfsf.wgsl` | TFSF plane wave with fractional delay | Sparse 1D (256) |
-| `lumped_rlc.wgsl` | Parallel/series RLC, 3-deep history | Sparse 1D (256) |
-| `mur_abc.wgsl` | Mur ABC, per-point coefficients, 3 entry points | Sparse 1D (256) |
-| `steady_state.wgsl` | Energy accumulation for convergence | Sparse 1D (256) |
-
-### CPU Reference Engine (`src/webgpu-fdtd.mjs`)
-
-`CPUFDTDEngine` with 17-phase step() matching C++ hook priorities:
-```
-PRE-VOLTAGE:  steadyState → PML → Lorentz ADE → Mur save → RLC shift
-CORE VOLTAGE
-POST-VOLTAGE: PML → TFSF → Mur accumulate
-APPLY VOLTAGE: excitation → Mur apply → RLC series
-PRE-CURRENT:  PML → Lorentz ADE current
-CORE CURRENT
-POST-CURRENT: PML → TFSF current
-```
-
-### WebGPU Engine (`src/webgpu-engine.mjs`)
-
-Full GPU dispatch for all extensions. Per-pipeline bind group cache (`_coreBindGroupFor`). PML uses 4 separate params buffers per mode. `dispatchIfActive()` helper. Per-step submission for correct uniform state.
-
----
-
-## Phase 3: WebGPU Acceleration — COMPLETE
-
-### Key Components
-
-| Component | File | Description |
-|---|---|---|
-| WebGPUEngine | `webgpu-engine.mjs` | GPU init, buffer management, pipeline creation, dispatch |
-| CPUFDTDEngine | `webgpu-fdtd.mjs` | JS reference matching C++ engine.cpp exactly |
-| WebGPUFDTD | `webgpu-fdtd.mjs` | Hybrid: tries GPU, falls back to CPU |
-| WASMGPUBridge | `wasm-gpu-bridge.mjs` | Extracts coefficients from WASM, configures GPU/CPU engines |
-
-### Embind Coefficient Extraction
-
-`getGridSize()`, `getVV()`, `getVI()`, `getII()`, `getIV()` exposed via `openEMS_Accessor` helper class (accesses protected `FDTD_Op` without modifying vendor code).
-
----
-
-## Phase 2: TypeScript API & Visualization — COMPLETE
-
-### Simulation API (`src/simulation.mjs`)
-
-Configuration: `setExcitation`, `setBoundaryConditions`, `setGrid`, `smoothGrid`
-Properties: `addMetal`, `addMaterial`, `addProbe`
-Primitives: `addBox`, `addCylinder`, `addCylindricalShell`, `addCurve`, `addSphere`, `addSphericalShell`, `addPolygon`, `addLinPoly`, `addRotPoly`, `addWire`
-Ports: `addLumpedPort`, `addMSLPort`, `addWaveGuidePort`, `addRectWaveGuidePort`
-NF2FF: `createNF2FFBox`
-Output: `toXML()`, `run()`
-
-### Port Classes (`src/ports.mjs`)
-
-| Port | Probes | Features |
-|---|---|---|
-| LumpedPort | 1V + 1I | R>0 lumped, R=0 metal, calcPort S-params |
-| MSLPort | 3V + 2I | Beta/ZL, feedShift, measPlaneShift, feedR |
-| WaveguidePort | 1V + 1I (mode-matched) | E/H weight functions, kc, beta/ZL |
-| RectWGPort | (extends WaveguidePort) | Auto TE mode functions from a, b, modeName |
-
-### Analysis (`src/analysis.mjs`)
-
-Constants, DFT, complex arithmetic, probe parsing, peak finding, S-parameter computation.
-
-### Visualization Data (`src/visualization.mjs`)
-
-Pure data transforms (no rendering): `prepareSParamData`, `prepareSmithData`, `prepareRadiationPattern`, `prepareImpedanceData`, `prepareTimeDomainData`.
-
-### Automesh (`src/automesh.mjs`)
-
-`meshHintFromBox`, `meshCombine`, `meshEstimateCflTimestep`, `smoothMeshLines`.
-
-### NF2FF (`src/nf2ff.mjs`)
-
-`createNF2FFBox` (6 E/H dump boxes), `NF2FFBox`, `NF2FFResult`. Far-field computation deferred to Phase 5.
-
----
-
-## Phase 1: WASM CPU MVP — COMPLETE
-
-WASM module: `openems.js` (121 KB) + `openems.wasm` (3.2 MB). Runs FDTD simulations in browser/Node.js. 35 tests validate cavity resonance, coax impedance, dipole field probes.
-
-## Phase 0: Build Infrastructure — COMPLETE
-
-Emscripten cross-compilation of openEMS + CSXCAD + all dependencies (Boost 1.86, HDF5 1.14.6, TinyXML, fparser). CGAL/VTK disabled for WASM. Reference fixtures from native build.
-
----
-
-## Phases 5-6: Not Started
-
-| Phase | Description | Status |
-|---|---|---|
-| 5 | Multi-threading, NF2FF far-field, memory64, cylindrical coords | Not started |
-| 6 | Browser UI, examples, URL sharing, deployment | Not started |
-
-## Build Commands
+## Quick Start
 
 ```bash
-bash scripts/build-wasm-deps.sh    # One-time: cross-compile dependencies (~10 min)
-bash scripts/build-wasm.sh         # Build WASM module (~2 min)
-node tests/test_wasm.mjs           # WASM tests
-node tests/test_api.mjs            # API tests
-node tests/test_webgpu.mjs         # CPU FDTD + extension tests
-node tests/test_webgpu_browser.mjs # Browser WebGPU tests (requires Chrome)
+npm run build:deps    # one-time: cross-compile dependencies (~10 min)
+npm run build         # build WASM module (~2 min)
+npm test              # run all tests (667 tests)
+npm run test:browser  # headless Chrome WebGPU tests (52 tests)
 ```
+
+## Test Suite
+
+```
+npm test                 # 667 tests — all Node.js suites
+  npm run test:wasm      #  99 — WASM FDTD, native comparison, engine equivalence, HDF5
+  npm run test:api       # 285 — simulation API, ports, NF2FF, SAR, visualization
+  npm run test:gpu       # 283 — CPU FDTD reference, extensions, dispatch order
+npm run test:browser     #  52 — Chrome headless: shaders, GPU-vs-CPU, benchmarks
+npm run test:browser:all # 207 — unified browser suite: all modules in Chrome
+npm run test:all         # everything
+```
+
+## Performance (Chrome 146, Apple Silicon)
+
+```
+Grid   | WebGPU | WASM SSEc | WASM SSE | WASM64 SSE | Native MT | Native SSE
+-------|--------|-----------|----------|------------|-----------|----------
+16^3   |   92   |   177     |  105     |   133      |   280     |   196
+32^3   |  401   |   277     |  150     |   151      |   290     |   184
+64^3   | 1325   |   282     |  147     |   151      |   316     |   175
+(MCells/s)
+```
+
+- **WebGPU at 64^3: 4.2x faster than native multithreaded C++**
+- WASM SSE-compressed: 282 MC/s = 89% of native MT
+- WASM64 SSE: zero overhead vs WASM32 SSE
+
+## Correctness: Native C++ vs WASM (sample-by-sample)
+
+```
+Simulation | Probe     | Samples | Max Abs Diff | Max Rel Diff
+-----------|-----------|---------|--------------|-------------
+Cavity     | Voltage   |   6,667 |    3.8e-10   |   0.2%
+Coax       | Voltage   |     667 |    3.5e-10   |   5.7e-6
+Coax       | Current   |     667 |    3.9e-12   |   9.0e-7
+Dipole     | E-field   |      24 |    8.2e-9    |   1.9e-5
+Dipole     | H-field   |      24 |    2.8e-11   |   1.6e-4
+```
+
+Engine equivalence: basic vs SSE vs SSE-compressed = **bit-identical** (diff=0.000).
+MT vs basic energy: ratio = **1.000000**.
+GPU vs CPU: max diff **2.4e-7** (f32 precision limit).
+
+## Phases
+
+### Phase 5: Threading, NF2FF, Scale — COMPLETE
+
+- Emscripten pthreads: basic/sse/multithreaded engines validated
+- NF2FF: far-field computation with cylindrical mesh + PEC/PMC mirrors
+- SAR: local + averaged (IEEE 62704/C95.3/Simple), Newton-Raphson box sizing
+- Memory64: wasm64 build, 8GB max memory, zero performance overhead
+- HDF5 reading: readHDF5Mesh/TDField/FDField via Embind
+- Kernel fusion: RLC ring buffer, PML+ADE overlap detection
+
+### Phase 4: GPU Extensions — COMPLETE
+
+9 WGSL shaders, 17-phase timestep dispatch matching C++ priorities.
+All extensions on GPU: Lorentz ADE, TFSF, lumped RLC, Mur ABC, steady-state.
+PML: 4 separate params buffers per mode. Mur: per-point dual-component coefficients.
+
+### Phase 3: WebGPU Acceleration — COMPLETE
+
+WebGPU engine with per-pipeline bind groups. GPU-vs-CPU verified to f32 precision.
+CPU reference engine matches C++ engine.cpp exactly. Hybrid fallback.
+WASM-to-GPU bridge: coefficient extraction via Embind.
+
+### Phase 2: TypeScript API — COMPLETE
+
+Simulation class with 10 primitive types, 4 port classes, XML generation.
+NF2FF box creation + far-field computation. Automesh. Analysis utilities.
+Visualization data preparation. SAR post-processing.
+
+### Phase 1: WASM CPU MVP — COMPLETE
+
+Embind API: configure, loadXML, setup, run, readFile, listFiles, getGridSize, getVV/VI/II/IV.
+HDF5 field reading: readHDF5Mesh, readHDF5TDField, readHDF5FDField.
+
+### Phase 0: Build Infrastructure — COMPLETE
+
+Emscripten cross-compilation. CGAL/VTK disabled. 4 dependency build scripts.
+Reference fixtures: cavity, coax, dipole, engine comparison.
 
 ## File Manifest
 
-### Source (20 files)
 ```
-src/embind_api.cpp          — Embind wrapper (C++ → JS API)
-src/simulation.mjs          — Simulation class (XML generation, run)
-src/ports.mjs               — Port classes (Lumped, MSL, Waveguide, RectWG)
-src/analysis.mjs            — DFT, S-params, complex math, constants
-src/automesh.mjs            — Mesh generation utilities
-src/nf2ff.mjs               — NF2FF recording box
-src/types.mjs               — TypeScript-style type definitions
-src/visualization.mjs       — Visualization data preparation
-src/webgpu-engine.mjs       — WebGPU engine (buffers, pipelines, dispatch)
-src/webgpu-fdtd.mjs         — CPU reference engine + hybrid fallback
-src/wasm-gpu-bridge.mjs     — WASM coefficient extraction → GPU/CPU engines
-src/shaders/*.wgsl          — 9 WGSL compute shaders
-```
+src/
+  embind_api.cpp          — C++ Embind wrapper + HDF5 reading
+  simulation.mjs          — Simulation class, XML generation
+  ports.mjs               — LumpedPort, MSLPort, WaveguidePort, RectWGPort
+  analysis.mjs            — DFT, S-params, complex math, constants
+  automesh.mjs            — mesh generation, CFL timestep
+  nf2ff.mjs               — NF2FF far-field, cylindrical mesh, mirrors, HDF5 reading
+  sar.mjs                 — SAR local + averaged (3 IEEE methods)
+  types.mjs               — TypeScript-style type definitions
+  visualization.mjs       — data preparation (S-param, Smith, radiation, impedance)
+  webgpu-engine.mjs       — WebGPU engine (buffers, pipelines, dispatch)
+  webgpu-fdtd.mjs         — CPU reference engine + hybrid fallback
+  wasm-gpu-bridge.mjs     — WASM coefficient extraction → GPU/CPU engines
+  shaders/                — 9 WGSL compute shaders
 
-### Tests (6 files + fixtures)
-```
-tests/test_wasm.mjs         — 35 tests (WASM FDTD + physics validation)
-tests/test_api.mjs          — 252 tests (TS API, ports, visualization)
-tests/test_webgpu.mjs       — 272 tests (CPU FDTD, extensions, dispatch order)
-tests/test_webgpu_browser.mjs — Runner for headless Chrome GPU tests
-tests/webgpu/index.html     — 40 browser tests (shader compilation, GPU-vs-CPU)
-tests/generate_fixtures.py  — Reference data generator
-tests/fixtures/             — Cavity, coax, dipole reference data
+tests/
+  test_wasm.mjs           — 99 tests (WASM, native comparison, engines, HDF5)
+  test_api.mjs            — 285 tests (API, ports, NF2FF, SAR, visualization)
+  test_webgpu.mjs         — 283 tests (CPU FDTD, extensions, dispatch order)
+  test_webgpu_browser.mjs — Playwright runner for Chrome GPU tests
+  webgpu/index.html       — 52 browser tests (shaders, GPU-vs-CPU, benchmarks)
+  browser/all-tests.html  — 207 unified browser tests
+  browser/run-all.mjs     — Playwright runner for unified suite
+  generate_fixtures.py    — reference data generator
+  bench_native.py         — native C++ benchmark
+  fixtures/               — cavity, coax, dipole, engine comparison, native benchmark
+
+scripts/
+  build-wasm.sh           — build WASM32 module
+  build-wasm-deps.sh      — cross-compile dependencies
+  build-wasm64.sh         — build WASM64 (memory64) module
+  build-native-deps.sh    — build native dependencies
 ```
 
 ## Toolchain
@@ -188,3 +144,4 @@ tests/fixtures/             — Cavity, coax, dipole reference data
 | HDF5 | 1.14.6 |
 | Chrome | 146 (headless WebGPU) |
 | Playwright | 1.58.2 |
+| Node.js | 24.14.0 |
