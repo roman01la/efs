@@ -471,6 +471,136 @@ export class Simulation {
   }
 
   /**
+   * Run bypassing XML for geometry (avoids coordinate precision loss).
+   * @param {Object} [opts]
+   * @param {number} [opts.engineType=0]
+   * @param {string} [opts.simPath='/sim']
+   * @returns {Promise<{ module: Object, ems: Object, simPath: string }>}
+   */
+  async runDirect(opts = {}) {
+    const Module = this._module;
+    const engineType = opts.engineType || 0;
+    const simPath = opts.simPath || '/sim';
+
+    try { Module.FS.mkdir(simPath); } catch (e) { /* may exist */ }
+    Module.FS.chdir(simPath);
+
+    const ems = new Module.OpenEMS();
+    try {
+      ems.configure(engineType, this.config.nrTS, this.config.endCriteria);
+      ems.setCSX(this._csx);
+
+      // Parse FDTD settings from minimal XML (excitation, BCs)
+      const fdtdXml = this._fdtdXML();
+      const ok = ems.loadFDTDSettings(fdtdXml);
+      if (!ok) throw new Error('Failed to parse FDTD settings');
+
+      const rc = ems.setup();
+      if (rc !== 0) throw new Error(`SetupFDTD failed with code ${rc}`);
+
+      ems.run();
+    } catch (e) {
+      ems.delete();
+      throw e;
+    }
+
+    return { module: Module, ems, simPath };
+  }
+
+  /** Generate FDTD-only XML (excitation + boundary conditions). */
+  _fdtdXML() {
+    const lines = ['<?xml version="1.0" encoding="UTF-8"?>', '<openEMS>'];
+    const attrs = [`NumberOfTimesteps="${this.config.nrTS}"`, `endCriteria="${this.config.endCriteria}"`];
+    let fmax = 0;
+    if (this._excitation) {
+      const e = this._excitation;
+      if (e.type === 'gauss') fmax = e.f0 + e.fc;
+      else if (e.type === 'sinus') fmax = e.f0;
+      else fmax = e.fmax || 0;
+    }
+    if (fmax > 0) attrs.push(`f_max="${fmax}"`);
+    lines.push(`  <FDTD ${attrs.join(' ')}>`);
+    if (this._excitation) {
+      const e = this._excitation;
+      if (e.type === 'gauss') lines.push(`    <Excitation Type="0" f0="${e.f0}" fc="${e.fc}"/>`);
+      else if (e.type === 'sinus') lines.push(`    <Excitation Type="1" f0="${e.f0}"/>`);
+      else if (e.type === 'dirac') lines.push(`    <Excitation Type="2" f0="0" fc="${e.fmax}"/>`);
+      else if (e.type === 'step') lines.push(`    <Excitation Type="3" f0="0" fc="${e.fmax}"/>`);
+      else if (e.type === 'custom') lines.push(`    <Excitation Type="10" f0="${e.f0}" fc="${e.fmax}" Function="${e.func}"/>`);
+    }
+    const bc = this._boundary;
+    const n = (b) => b === 'PEC' ? '0' : b === 'PMC' ? '1' : b === 'MUR' ? '2' : (typeof b === 'string' && b.startsWith('PML_')) ? '3' : '0';
+    const p = (b) => (typeof b === 'string' && b.startsWith('PML_')) ? parseInt(b.slice(4), 10) || 8 : 0;
+    const ba = [`xmin="${n(bc[0])}"`,`xmax="${n(bc[1])}"`,`ymin="${n(bc[2])}"`,`ymax="${n(bc[3])}"`,`zmin="${n(bc[4])}"`,`zmax="${n(bc[5])}"`];
+    if (bc.some(b => typeof b === 'string' && b.startsWith('PML_')))
+      ba.push(`PML_xmin="${p(bc[0])}"`,`PML_xmax="${p(bc[1])}"`,`PML_ymin="${p(bc[2])}"`,`PML_ymax="${p(bc[3])}"`,`PML_zmin="${p(bc[4])}"`,`PML_zmax="${p(bc[5])}"`);
+    lines.push(`    <BoundaryCond ${ba.join(' ')}/>`);
+    lines.push('  </FDTD>', '</openEMS>');
+    return lines.join('\n');
+  }
+
+  /**
+   * Add a single grid line to the mesh (e.g., for port snap points after smoothing).
+   * @param {number} dir - 0=x, 1=y, 2=z
+   * @param {number} value
+   */
+  addGridLine(dir, value) {
+    this._csx.GetGrid().AddDiscLine(dir, value);
+  }
+
+  /**
+   * Run the simulation on WebGPU.
+   * Uses WASM only for operator setup (coefficient extraction), then runs
+   * the FDTD timestep loop on the GPU via WebGPUEngine.
+   *
+   * @param {Object} [opts]
+   * @param {string} [opts.simPath='/sim'] - MEMFS simulation directory
+   * @param {Function} [opts.onProgress] - callback(step, numTS)
+   * @returns {Promise<{ module: Object, ems: Object, engine: Object, simPath: string }>}
+   */
+  async runGPU(opts = {}) {
+    const Module = this._module;
+    const simPath = opts.simPath || '/sim';
+    const onProgress = opts.onProgress || null;
+
+    try { Module.FS.mkdir(simPath); } catch (e) { /* may exist */ }
+    Module.FS.chdir(simPath);
+
+    const xml = this.toXML();
+    const ems = new Module.OpenEMS();
+
+    // Use WASM only for operator setup — extract coefficients, don't run FDTD
+    ems.configure(0, this.config.nrTS, this.config.endCriteria);
+    const loadOk = ems.loadXML(xml);
+    if (!loadOk) { ems.delete(); throw new Error('Failed to load simulation XML'); }
+    const rc = ems.setup();
+    if (rc !== 0) { ems.delete(); throw new Error(`SetupFDTD failed with code ${rc}`); }
+
+    // Extract coefficients and run on GPU
+    const { WASMGPUBridge } = await import('./wasm-gpu-bridge.mjs');
+    const bridge = new WASMGPUBridge();
+    console.log('[runGPU] Extracting coefficients from WASM...');
+    bridge.configureFromWASM(ems);
+    const cfg = bridge.getConfig();
+    console.log(`[runGPU] Grid: ${cfg.gridSize.join('x')}, coefficients extracted`);
+
+    console.log('[runGPU] Creating WebGPU engine...');
+    const engine = await bridge.createGPUEngine();
+    console.log('[runGPU] WebGPU engine ready, starting FDTD...');
+
+    // Run FDTD on GPU in chunks for progress reporting
+    const numTS = this.config.nrTS;
+    const chunkSize = Math.min(500, numTS);
+    for (let step = 0; step < numTS; step += chunkSize) {
+      const steps = Math.min(chunkSize, numTS - step);
+      await engine.iterate(steps);
+      if (onProgress) onProgress(step + steps, numTS);
+    }
+
+    return { module: Module, ems, engine, simPath };
+  }
+
+  /**
    * Add an MSL (microstrip line) port.
    */
   addMSLPort(params) {

@@ -134,7 +134,7 @@ export async function runPatchAntenna(Module, opts = {}) {
   // --- Run simulation ---
   log('Running FDTD simulation...');
   const t0 = Date.now();
-  const { module: M, ems, simPath } = await sim.run();
+  const { module: M, ems, simPath } = await sim.runDirect({ engineType: 2 });
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
   log(`Simulation complete in ${elapsed}s`);
 
@@ -213,9 +213,8 @@ export async function runPatchAntenna(Module, opts = {}) {
     }
   }
 
-  // Clean up
+  // Clean up (runDirect transfers CSX ownership — don't call sim.destroy())
   ems.delete();
-  sim.destroy();
 
   // Build results
   const results = {

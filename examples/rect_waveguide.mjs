@@ -93,7 +93,7 @@ export async function runRectWaveguide(Module) {
   // --- Run simulation ---
   console.log('Running Rectangular Waveguide simulation...');
   const t0 = Date.now();
-  const { module: M, ems, simPath } = await sim.run();
+  const { module: M, ems, simPath } = await sim.runDirect({ engineType: 2 });
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(`Simulation complete in ${elapsed}s.`);
 
@@ -145,9 +145,8 @@ export async function runRectWaveguide(Module) {
     s21_dB[i] = 20 * Math.log10(Math.max(s21_mag[i], 1e-15));
   }
 
-  // Clean up
+  // Clean up (runDirect transfers CSX ownership — don't call sim.destroy())
   ems.delete();
-  sim.destroy();
 
   return {
     freq,

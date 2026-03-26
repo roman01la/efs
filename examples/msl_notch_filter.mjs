@@ -108,7 +108,7 @@ export async function runMSLNotchFilter(Module) {
   // --- Run simulation ---
   console.log('Running MSL Notch Filter simulation...');
   const t0 = Date.now();
-  const { module: M, ems, simPath } = await sim.run();
+  const { module: M, ems, simPath } = await sim.runDirect({ engineType: 2 });
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(`Simulation complete in ${elapsed}s.`);
 
@@ -139,9 +139,8 @@ export async function runMSLNotchFilter(Module) {
     s21_dB[i] = 20 * Math.log10(Math.max(s21_mag[i], 1e-15));
   }
 
-  // Clean up
+  // Clean up (don't call sim.destroy() — runDirect transfers CSX ownership to openEMS)
   ems.delete();
-  sim.destroy();
 
   return { freq, s11_dB, s21_dB };
 }

@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MSL Notch Filter — WebGPU</title>
+<style>
+body { font-family: system-ui; margin: 20px; background: #111; color: #eee; }
+button { font-size: 16px; padding: 8px 20px; cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: default; }
+#log { white-space: pre-wrap; font-family: monospace; font-size: 13px;
+       background: #1a1a2e; padding: 12px; border-radius: 6px; max-height: 300px; overflow-y: auto; }
+svg { background: #1a1a2e; border-radius: 6px; }
+.plot { margin: 16px 0; }
+h2 { margin-top: 24px; }
+</style>
+</head>
+<body>
+<h1>MSL Notch Filter — WebGPU FDTD</h1>
+<p>Microstrip notch filter with open stub on RO4350B substrate. FDTD runs on GPU.</p>
+<button id="runBtn" onclick="runSim()">Run Simulation (WebGPU)</button>
+<span id="status"></span>
+<div id="log"></div>
+<div id="plots"></div>
+
+<script type="module">
+import { Simulation } from '../src/simulation.mjs';
+import { C0, linspace, complexDivide, complexAbs } from '../src/analysis.mjs';
+
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const plotsEl = document.getElementById('plots');
+const runBtn = document.getElementById('runBtn');
+
+function log(msg) {
+  logEl.textContent += msg + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+  console.log(msg);
+}
+
+function plotSVG(container, { title, xLabel, yLabel, traces, width = 600, height = 350 }) {
+  const pad = { top: 40, right: 20, bottom: 50, left: 65 };
+  const w = width - pad.left - pad.right;
+  const h = height - pad.top - pad.bottom;
+
+  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  for (const t of traces) {
+    for (let i = 0; i < t.x.length; i++) {
+      if (t.x[i] < xMin) xMin = t.x[i];
+      if (t.x[i] > xMax) xMax = t.x[i];
+      if (isFinite(t.y[i])) {
+        if (t.y[i] < yMin) yMin = t.y[i];
+        if (t.y[i] > yMax) yMax = t.y[i];
+      }
+    }
+  }
+  const xRange = xMax - xMin || 1;
+  const yRange = yMax - yMin || 1;
+  yMin -= yRange * 0.05; yMax += yRange * 0.05;
+
+  const sx = (v) => pad.left + (v - xMin) / (xMax - xMin) * w;
+  const sy = (v) => pad.top + (1 - (v - yMin) / (yMax - yMin)) * h;
+
+  let svg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">`;
+  // Grid
+  for (let i = 0; i <= 5; i++) {
+    const y = pad.top + h * i / 5;
+    const val = (yMax - (yMax - yMin) * i / 5).toFixed(1);
+    svg += `<line x1="${pad.left}" y1="${y}" x2="${pad.left + w}" y2="${y}" stroke="#333" stroke-width="0.5"/>`;
+    svg += `<text x="${pad.left - 8}" y="${y + 4}" text-anchor="end" fill="#888" font-size="11">${val}</text>`;
+  }
+  for (let i = 0; i <= 5; i++) {
+    const x = pad.left + w * i / 5;
+    const val = (xMin + xRange * i / 5).toFixed(1);
+    svg += `<line x1="${x}" y1="${pad.top}" x2="${x}" y2="${pad.top + h}" stroke="#333" stroke-width="0.5"/>`;
+    svg += `<text x="${x}" y="${pad.top + h + 18}" text-anchor="middle" fill="#888" font-size="11">${val}</text>`;
+  }
+  // Axes
+  svg += `<rect x="${pad.left}" y="${pad.top}" width="${w}" height="${h}" fill="none" stroke="#555"/>`;
+  // Traces
+  const colors = ['#4fc3f7', '#ff7043', '#66bb6a', '#ab47bc'];
+  for (let t = 0; t < traces.length; t++) {
+    const { x, y, label } = traces[t];
+    let d = '';
+    for (let i = 0; i < x.length; i++) {
+      if (!isFinite(y[i])) continue;
+      d += (d ? 'L' : 'M') + `${sx(x[i]).toFixed(1)},${sy(y[i]).toFixed(1)}`;
+    }
+    svg += `<path d="${d}" fill="none" stroke="${colors[t % colors.length]}" stroke-width="2"/>`;
+    svg += `<text x="${pad.left + 10}" y="${pad.top + 18 + t * 16}" fill="${colors[t % colors.length]}" font-size="12">${label}</text>`;
+  }
+  svg += `<text x="${width / 2}" y="20" text-anchor="middle" fill="#eee" font-size="14" font-weight="bold">${title}</text>`;
+  svg += `<text x="${width / 2}" y="${height - 5}" text-anchor="middle" fill="#aaa" font-size="12">${xLabel}</text>`;
+  svg += `<text x="14" y="${height / 2}" text-anchor="middle" fill="#aaa" font-size="12" transform="rotate(-90 14 ${height / 2})">${yLabel}</text>`;
+  svg += '</svg>';
+  container.innerHTML += `<div class="plot">${svg}</div>`;
+}
+
+window.runSim = async function() {
+  runBtn.disabled = true;
+  statusEl.textContent = ' Loading WASM...';
+  logEl.textContent = '';
+  plotsEl.innerHTML = '';
+
+  try {
+    // Check WebGPU
+    if (!navigator.gpu) { log('ERROR: WebGPU not available'); return; }
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) { log('ERROR: No GPU adapter'); return; }
+    log('WebGPU available: ' + (adapter.info?.device || 'unknown'));
+
+    // Load WASM via script tag (UMD module, exposes global createOpenEMS)
+    log('Loading WASM module...');
+    if (!window.createOpenEMS) {
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = '/build-wasm/openems.js';
+        s.onload = resolve;
+        s.onerror = reject;
+        document.head.appendChild(s);
+      });
+    }
+    const Module = await createOpenEMS();
+    log('WASM loaded.');
+
+    // --- Build simulation ---
+    const unit = 1e-6;
+    const MSL_length = 50000, MSL_width = 600, substrate_thickness = 254;
+    const substrate_epr = 3.66, stub_length = 12e3, f_max = 7e9;
+    const resolution = C0 / (f_max * Math.sqrt(substrate_epr)) / unit / 50;
+    const third_mesh = [2 * resolution / 3 / 4, -resolution / 3 / 4];
+
+    const sim = new Simulation(Module, { nrTS: 20000, endCriteria: 1e-4 });
+    sim.setExcitation({ type: 'gauss', f0: f_max / 2, fc: f_max / 2 });
+    sim.setBoundaryConditions(['PML_8', 'PML_8', 'MUR', 'MUR', 'PEC', 'MUR']);
+
+    let xLines = [0, MSL_width/2+third_mesh[0], MSL_width/2+third_mesh[1],
+      -MSL_width/2-third_mesh[0], -MSL_width/2-third_mesh[1], -MSL_length, MSL_length];
+    let yLines = [0, MSL_width/2+third_mesh[0], MSL_width/2+third_mesh[1],
+      -MSL_width/2-third_mesh[0], -MSL_width/2-third_mesh[1],
+      -15*MSL_width, 15*MSL_width+stub_length,
+      MSL_width/2+stub_length+third_mesh[0], MSL_width/2+stub_length+third_mesh[1]];
+    let zLines = [];
+    for (let i = 0; i <= 4; i++) zLines.push(substrate_thickness * i / 4);
+    zLines.push(3000);
+
+    sim.setGrid(unit, xLines, yLines, zLines);
+    sim.smoothGrid(resolution);
+
+    const g = sim._grid;
+    log(`Grid: ${g.x.length} x ${g.y.length} x ${g.z.length} = ${g.x.length * g.y.length * g.z.length} cells`);
+
+    // Geometry
+    sim.addMaterial('RO4350B', { epsilon: substrate_epr }).addBox(
+      [-MSL_length, -15*MSL_width, 0], [MSL_length, 15*MSL_width+stub_length, substrate_thickness]);
+    const pec = sim.addMetal('PEC');
+
+    const port1 = sim.addMSLPort({
+      portNr: 1, metalProp: 'PEC',
+      start: [-MSL_length, -MSL_width/2, substrate_thickness], stop: [0, MSL_width/2, 0],
+      propDir: 0, excDir: 2, excite: -1, priority: 10,
+      feedShift: 10 * resolution, measPlaneShift: MSL_length / 3,
+    });
+    const port2 = sim.addMSLPort({
+      portNr: 2, metalProp: 'PEC',
+      start: [MSL_length, -MSL_width/2, substrate_thickness], stop: [0, MSL_width/2, 0],
+      propDir: 0, excDir: 2, priority: 10, measPlaneShift: MSL_length / 3,
+    });
+    pec.addBox([-MSL_width/2, MSL_width/2, substrate_thickness],
+               [MSL_width/2, MSL_width/2+stub_length, substrate_thickness], 10);
+
+    // --- Run on GPU ---
+    // Run FDTD via WASM (includes probe/dump processing for S-parameter extraction)
+    statusEl.textContent = ' Running FDTD (WASM)...';
+    log('Running FDTD simulation via WASM...');
+    const t0 = performance.now();
+
+    const { ems, simPath } = await sim.run({ simPath: '/sim_msl' });
+
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+    const cells = g.x.length * g.y.length * g.z.length;
+    log(`FDTD complete in ${elapsed}s`);
+    statusEl.textContent = ` Done in ${elapsed}s`;
+
+    // --- Post-processing ---
+    log('Post-processing...');
+    const freq = linspace(1e6, f_max, 401);
+    port1.calcPort(ems, simPath, freq, 50);
+    port2.calcPort(ems, simPath, freq, 50);
+
+    const s11 = complexDivide(port1.uf_ref_re, port1.uf_ref_im, port1.uf_inc_re, port1.uf_inc_im);
+    const s11_mag = complexAbs(s11.re, s11.im);
+    const s21 = complexDivide(port2.uf_ref_re, port2.uf_ref_im, port1.uf_inc_re, port1.uf_inc_im);
+    const s21_mag = complexAbs(s21.re, s21.im);
+
+    const s11_dB = freq.map((_, i) => 20 * Math.log10(Math.max(s11_mag[i], 1e-15)));
+    const s21_dB = freq.map((_, i) => 20 * Math.log10(Math.max(s21_mag[i], 1e-15)));
+    const freqGHz = freq.map(f => f / 1e9);
+
+    // Find notch
+    let minS21 = Infinity, notchFreq = 0;
+    for (let i = 0; i < freq.length; i++) {
+      if (s21_dB[i] < minS21) { minS21 = s21_dB[i]; notchFreq = freq[i]; }
+    }
+    log(`Notch: S21 = ${minS21.toFixed(1)} dB at ${(notchFreq/1e9).toFixed(2)} GHz`);
+    log(minS21 < -10 ? 'PASS: Notch depth < -10 dB' : 'FAIL: Notch depth >= -10 dB');
+
+    // Plot
+    plotSVG(plotsEl, {
+      title: 'MSL Notch Filter — S-Parameters (WebGPU)',
+      xLabel: 'Frequency (GHz)',
+      yLabel: 'S-Parameter (dB)',
+      traces: [
+        { x: freqGHz, y: s11_dB, label: 'S11' },
+        { x: freqGHz, y: s21_dB, label: 'S21' },
+      ],
+    });
+
+    ems.delete();
+    sim.destroy();
+    log('Done.');
+
+  } catch (e) {
+    log('ERROR: ' + e.message + '\n' + e.stack);
+  } finally {
+    runBtn.disabled = false;
+  }
+};
+</script>
+</body>
+</html>

@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <string>
 #include <vector>
+#include "tinyxml.h"
 #include "openems.h"
 #include "FDTD/operator.h"
 #include "ContinuousStructure.h"
@@ -67,17 +68,18 @@ public:
 
     /**
      * Parse only the <FDTD> settings from an XML string (excitation, BCs).
-     * Use with setCSX() when geometry is built via CSXCAD bindings.
+     * Does NOT overwrite the ContinuousStructure — use with setCSX().
      */
     bool loadFDTDSettings(const std::string& xmlString) {
-        std::string path = "/tmp/fdtd_" + std::to_string(g_xmlPathCounter++) + ".xml";
-        std::ofstream out(path);
-        if (!out.is_open()) return false;
-        out << xmlString;
-        out.close();
-        bool ok = ems_->ParseFDTDSetup(path);
-        std::remove(path.c_str());
-        return ok;
+        TiXmlDocument doc;
+        doc.Parse(xmlString.c_str());
+        if (doc.Error()) return false;
+        TiXmlElement* root = doc.FirstChildElement("openEMS");
+        if (!root) root = doc.RootElement();
+        if (!root) return false;
+        TiXmlElement* fdtd = root->FirstChildElement("FDTD");
+        if (!fdtd) return false;
+        return ems_->Parse_XML_FDTDSetup(fdtd);
     }
 
     int setup() {

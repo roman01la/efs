@@ -263,6 +263,13 @@ export class LumpedPort extends Port {
     const dir = this.direction;
     const p = this.priority;
     const s = this.start;
+    const grid = csx.GetGrid();
+
+    // Add port edges as grid lines for proper snapping
+    for (let d = 0; d < 3; d++) {
+      grid.AddDiscLine(d, this.start[d]);
+      grid.AddDiscLine(d, this.stop[d]);
+    }
     const e = this.stop;
 
     // Lumped element or metal short
@@ -487,13 +494,100 @@ export class MSLPort extends Port {
   }
 
   /**
-   * Add MSL port geometry to native ContinuousStructure via XML bridge.
+   * Add MSL port geometry to native ContinuousStructure.
    * @param {Object} csx - native ContinuousStructure
    * @param {Object} Module - WASM module
    */
   addToCSX(csx, Module) {
-    const xml = `<ContinuousStructure><Properties>${this.toXML()}</Properties></ContinuousStructure>`;
-    Module.csxFromXML(csx, xml);
+    const ps = csx.GetParameterSet();
+    const p = this.priority;
+    const grid = csx.GetGrid();
+
+    // Snap feed and probe positions to grid by adding explicit grid lines
+    grid.AddDiscLine(this.propDir, this._feedPos);
+    for (const probe of this._u_probes) {
+      grid.AddDiscLine(this.propDir, probe.start[this.propDir]);
+    }
+    for (const probe of this._i_probes) {
+      grid.AddDiscLine(this.propDir, probe.start[this.propDir]);
+    }
+
+    // Metal MSL plane
+    const mslStart = [...this.start];
+    const mslStop = [...this.stop];
+    mslStop[this.excDir] = mslStart[this.excDir];
+    const mslMetal = Module.CSPropMetal.create(ps);
+    mslMetal.SetName(`${this.metalProp}_msl_${this.number}`);
+    csx.AddProperty(mslMetal);
+    const mslBox = Module.CSPrimBox.create(ps, mslMetal);
+    mslBox.SetStartStop(mslStart[0], mslStart[1], mslStart[2], mslStop[0], mslStop[1], mslStop[2]);
+    mslBox.SetPriority(p);
+
+    // Excitation
+    if (this.excite !== 0) {
+      const excStart = [...this.start];
+      const excStop = [...this.stop];
+      excStart[this.propDir] = this._feedPos;
+      excStop[this.propDir] = this._feedPos;
+      const excVec = [0, 0, 0];
+      excVec[this.excDir] = -1 * this.upsideDown * this.excite;
+      const exc = Module.CSPropExcitation.create(ps, 0);
+      exc.SetName(this._label('excite'));
+      exc.SetExcitType(0);
+      for (let c = 0; c < 3; c++) exc.SetExcitation(excVec[c], c);
+      csx.AddProperty(exc);
+      const excBox = Module.CSPrimBox.create(ps, exc);
+      excBox.SetStartStop(excStart[0], excStart[1], excStart[2], excStop[0], excStop[1], excStop[2]);
+      excBox.SetPriority(p);
+    }
+
+    // Feed resistance
+    if (this.feedR >= 0 && isFinite(this.feedR)) {
+      const rStart = [...this.start];
+      const rStop = [...this.stop];
+      rStop[this.propDir] = rStart[this.propDir];
+      if (this.feedR === 0) {
+        const rMetal = Module.CSPropMetal.create(ps);
+        rMetal.SetName(this._label('resist'));
+        csx.AddProperty(rMetal);
+        const rBox = Module.CSPrimBox.create(ps, rMetal);
+        rBox.SetStartStop(rStart[0], rStart[1], rStart[2], rStop[0], rStop[1], rStop[2]);
+        rBox.SetPriority(p);
+      } else {
+        const le = Module.CSPropLumpedElement.create(ps);
+        le.SetName(this._label('resist'));
+        le.SetResistance(this.feedR);
+        le.SetDirection(this.excDir);
+        le.SetCaps(true);
+        csx.AddProperty(le);
+        const leBox = Module.CSPrimBox.create(ps, le);
+        leBox.SetStartStop(rStart[0], rStart[1], rStart[2], rStop[0], rStop[1], rStop[2]);
+        leBox.SetPriority(p);
+      }
+    }
+
+    // Voltage probes (3)
+    for (const probe of this._u_probes) {
+      const vp = Module.CSPropProbeBox.create(ps);
+      vp.SetName(probe.name);
+      vp.SetProbeType(0);
+      vp.SetWeighting(1);
+      csx.AddProperty(vp);
+      const vBox = Module.CSPrimBox.create(ps, vp);
+      vBox.SetStartStop(probe.start[0], probe.start[1], probe.start[2], probe.stop[0], probe.stop[1], probe.stop[2]);
+    }
+
+    // Current probes (2)
+    for (const probe of this._i_probes) {
+      const ip = Module.CSPropProbeBox.create(ps);
+      ip.SetName(probe.name);
+      ip.SetProbeType(1);
+      ip.SetWeighting(this.direction);
+      ip.SetNormalDir(this.propDir);
+      csx.AddProperty(ip);
+      const iBox = Module.CSPrimBox.create(ps, ip);
+      iBox.SetStartStop(probe.start[0], probe.start[1], probe.start[2], probe.stop[0], probe.stop[1], probe.stop[2]);
+    }
   }
 
   /**
@@ -744,13 +838,59 @@ export class WaveguidePort extends Port {
    */
 
   /**
-   * Add waveguide port geometry to native ContinuousStructure via XML bridge.
+   * Add waveguide port geometry to native ContinuousStructure.
    * @param {Object} csx - native ContinuousStructure
    * @param {Object} Module - WASM module
    */
   addToCSX(csx, Module) {
-    const xml = `<ContinuousStructure><Properties>${this.toXML()}</Properties></ContinuousStructure>`;
-    Module.csxFromXML(csx, xml);
+    const ps = csx.GetParameterSet();
+    const p = this.priority;
+
+    // Excitation with weight functions
+    if (this.excite !== 0) {
+      const eStart = [...this.start];
+      const eStop = [...this.stop];
+      eStop[this.excDir] = eStart[this.excDir];
+      const eVec = [0, 0, 0];
+      eVec[this.ny_P] = 1;
+      eVec[this.ny_PP] = 1;
+      const exc = Module.CSPropExcitation.create(ps, 0);
+      exc.SetName(this._label('excite'));
+      exc.SetExcitType(0);
+      for (let c = 0; c < 3; c++) exc.SetExcitation(eVec[c], c);
+      // Set weight functions for mode-matched excitation
+      for (let c = 0; c < 3; c++) {
+        if (this.E_func[c] && this.E_func[c] !== '0') {
+          try { exc.SetWeightFunction(String(this.E_func[c]), c); } catch(e) {}
+        }
+      }
+      csx.AddProperty(exc);
+      const excBox = Module.CSPrimBox.create(ps, exc);
+      excBox.SetStartStop(eStart[0], eStart[1], eStart[2], eStop[0], eStop[1], eStop[2]);
+      excBox.SetPriority(p);
+    }
+
+    // Voltage probe (Type=10 = mode-matched E-field)
+    const us = this._u_probe_start;
+    const ue = this._u_probe_stop;
+    const vp = Module.CSPropProbeBox.create(ps);
+    vp.SetName(this.U_filenames[0]);
+    vp.SetProbeType(10);
+    csx.AddProperty(vp);
+    const vBox = Module.CSPrimBox.create(ps, vp);
+    vBox.SetStartStop(us[0], us[1], us[2], ue[0], ue[1], ue[2]);
+
+    // Current probe (Type=11 = mode-matched H-field)
+    const is_ = this._i_probe_start;
+    const ie = this._i_probe_stop;
+    const ip = Module.CSPropProbeBox.create(ps);
+    ip.SetName(this.I_filenames[0]);
+    ip.SetProbeType(11);
+    ip.SetWeighting(this.direction);
+    ip.SetNormalDir(this.excDir);
+    csx.AddProperty(ip);
+    const iBox = Module.CSPrimBox.create(ps, ip);
+    iBox.SetStartStop(is_[0], is_[1], is_[2], ie[0], ie[1], ie[2]);
   }
 
   toXML() {
