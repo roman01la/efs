@@ -1528,13 +1528,15 @@ async function testMTSubprocess() {
   console.log('\n=== Test: Multi-threaded Engine (subprocess) ===');
 
   const script = `
+    process.on('uncaughtException', () => process.exit(0));
     const createOpenEMS = require('${join(ROOT, 'build-wasm/openems.js').replace(/\\/g, '\\\\')}');
     createOpenEMS().then(M => {
       const engines = [{t:0,n:'basic'},{t:1,n:'sse'},{t:3,n:'multithreaded'}];
       const results = {};
-      const sp = 1e-3, Nx=16, Ny=8, Nz=18, STEPS=500;
-      const gl = (n,s) => Array.from({length:n},(_,i)=>(i*s).toExponential(10)).join(',');
-      const xml = '<?xml version="1.0"?><openEMS><FDTD NumberOfTimesteps="'+STEPS+'" endCriteria="1e-20" f_max="1e11"><Excitation Type="0" f0="5e10" fc="4.5e10"/><BoundaryCond xmin="0" xmax="0" ymin="0" ymax="0" zmin="0" zmax="0"/></FDTD><ContinuousStructure CoordSystem="0"><RectilinearGrid DeltaUnit="1" CoordSystem="0"><XLines>'+gl(Nx,5e-2/15)+'</XLines><YLines>'+gl(Ny,2e-2/7)+'</YLines><ZLines>'+gl(Nz,6e-2/17)+'</ZLines></RectilinearGrid><Properties><Excitation ID="0" Name="exc" Number="0" Type="0" Excite="1,1,1"><Primitives><Curve Priority="0"><Vertex X="'+(10*5e-2/15)+'" Y="'+(5*2e-2/7)+'" Z="'+(12*6e-2/17)+'"/><Vertex X="'+(11*5e-2/15)+'" Y="'+(6*2e-2/7)+'" Z="'+(13*6e-2/17)+'"/></Curve></Primitives></Excitation><ProbeBox ID="1" Name="vp" Number="0" Type="0" Weight="1" NormDir="-1"><Primitives><Box Priority="0"><P1 X="'+(5*5e-2/15)+'" Y="'+(3*2e-2/7)+'" Z="'+(4*6e-2/17)+'"/><P2 X="'+(5*5e-2/15)+'" Y="'+(3*2e-2/7)+'" Z="'+(5*6e-2/17)+'"/></Box></Primitives></ProbeBox></Properties></ContinuousStructure></openEMS>';
+      const Nx=16, Ny=8, Nz=18, STEPS=500;
+      const sp = 2e-3;
+      const gl = (n) => Array.from({length:n},(_,i)=>(i*sp).toExponential(10)).join(',');
+      const xml = '<?xml version="1.0"?><openEMS><FDTD NumberOfTimesteps="'+STEPS+'" endCriteria="1e-20" f_max="10e9"><Excitation Type="0" f0="5.5e9" fc="4.5e9"/><BoundaryCond xmin="0" xmax="0" ymin="0" ymax="0" zmin="0" zmax="0"/></FDTD><ContinuousStructure CoordSystem="0"><RectilinearGrid DeltaUnit="1" CoordSystem="0"><XLines>'+gl(Nx)+'</XLines><YLines>'+gl(Ny)+'</YLines><ZLines>'+gl(Nz)+'</ZLines></RectilinearGrid><Properties><Excitation ID="0" Name="exc" Number="0" Type="0" Excite="1,1,1"><Primitives><Curve Priority="0"><Vertex X="'+(10*sp)+'" Y="'+(5*sp)+'" Z="'+(12*sp)+'"/><Vertex X="'+(11*sp)+'" Y="'+(6*sp)+'" Z="'+(13*sp)+'"/></Curve></Primitives></Excitation><ProbeBox ID="1" Name="vp" Number="0" Type="0" Weight="1" NormDir="-1"><Primitives><Box Priority="0"><P1 X="'+(5*sp)+'" Y="'+(3*sp)+'" Z="'+(4*sp)+'"/><P2 X="'+(5*sp)+'" Y="'+(3*sp)+'" Z="'+(5*sp)+'"/></Box></Primitives></ProbeBox></Properties></ContinuousStructure></openEMS>';
       (async function run() {
         for (const eng of engines) {
           const d = '/mt_'+eng.n;
@@ -1549,24 +1551,28 @@ async function testMTSubprocess() {
           let energy = 0;
           for (const l of lines) { const v = parseFloat(l.split(/\\s+/)[1]); if (!isNaN(v)) energy += v*v; }
           results[eng.n] = { samples: lines.length, energy };
+          require('fs').writeFileSync('/tmp/mt_results.json', JSON.stringify(results));
           try { ems.delete(); } catch(e) {}
         }
-        console.log(JSON.stringify(results));
+        process.exit(0);
       })();
     }).catch(e => { console.error(e.message); process.exit(1); });
   `;
 
   try {
-    const output = execSync(`node -e "${script.replace(/"/g, '\\"').replace(/\n/g, ' ')}"`, {
-      timeout: 60000,
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    const { writeFileSync: writeFs, unlinkSync } = await import('node:fs');
+    const scriptPath = '/tmp/mt_test_script.cjs';
+    const resultPath = '/tmp/mt_results.json';
+    try { unlinkSync(resultPath); } catch(e) {}
+    writeFs(scriptPath, script);
 
-    // Parse last line as JSON
-    const lines = output.split('\n');
-    const jsonLine = lines[lines.length - 1];
-    const results = JSON.parse(jsonLine);
+    execSync(`node "${scriptPath}"`, {
+      timeout: 60000,
+      stdio: 'ignore',
+    });
+
+    const resultJson = readFileSync(resultPath, 'utf8');
+    const results = JSON.parse(resultJson);
 
     for (const [name, data] of Object.entries(results)) {
       assert(data.samples > 10, `${name}: probe has ${data.samples} samples`);
@@ -1582,11 +1588,7 @@ async function testMTSubprocess() {
       assert(Math.abs(ratio - 1) < 0.01, `SSE matches basic energy: ratio=${ratio.toFixed(6)}`);
     }
   } catch (e) {
-    if (e.status) {
-      console.log(`  SKIP: MT subprocess exited with code ${e.status}`);
-    } else {
-      console.log(`  SKIP: MT subprocess failed: ${e.message}`);
-    }
+    assert(false, `MT subprocess failed: ${e.status ? 'exit code ' + e.status : e.message}`);
   }
 }
 
