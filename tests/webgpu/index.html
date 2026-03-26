@@ -841,6 +841,100 @@ async function run() {
     failed++;
   }
 
+  // ----------------------------------------------------------
+  // Test 14: CPU vs GPU Performance Comparison
+  // ----------------------------------------------------------
+  log('\n=== Test: CPU vs GPU Performance ===');
+
+  try {
+    const { WebGPUEngine: PerfGPU } = await import('/src/webgpu-engine.mjs');
+    const { CPUFDTDEngine: PerfCPU } = await import('/src/webgpu-fdtd.mjs');
+
+    const sizes = [
+      [16, 16, 16],
+      [32, 32, 32],
+      [64, 64, 64],
+    ];
+
+    for (const [Nx, Ny, Nz] of sizes) {
+      const total = Nx * Ny * Nz;
+      const size3 = 3 * total;
+      const label = `${Nx}x${Ny}x${Nz}`;
+      const cells = total;
+
+      const coeffs = {
+        vv: new Float32Array(size3).fill(1.0),
+        vi: new Float32Array(size3).fill(0.25),
+        ii: new Float32Array(size3).fill(1.0),
+        iv: new Float32Array(size3).fill(0.25),
+      };
+
+      const signal = new Float32Array(200);
+      for (let i = 0; i < 200; i++) signal[i] = Math.exp(-(Math.pow((i - 40) / 12, 2)));
+      const excConfig = {
+        signal,
+        delay: new Uint32Array([0]),
+        amp: new Float32Array([1.0]),
+        dir: new Uint32Array([2]),
+        pos: new Uint32Array([Math.floor(Nx/2) * Ny * Nz + Math.floor(Ny/2) * Nz + Math.floor(Nz/2)]),
+        period: 0,
+      };
+
+      const STEPS = 100;
+
+      // --- GPU ---
+      const gpuEng = new PerfGPU();
+      await gpuEng.initGPU();
+      await gpuEng.init([Nx, Ny, Nz], coeffs);
+      gpuEng.configureExcitation(excConfig);
+
+      // Warmup
+      await gpuEng.iterate(5);
+
+      const gpuStart = performance.now();
+      await gpuEng.iterate(STEPS);
+      const gpuMs = performance.now() - gpuStart;
+      const gpuMCellsPerSec = (cells * STEPS / gpuMs / 1000).toFixed(1);
+
+      // Read back for verification
+      const gpuFields = await gpuEng.getFields();
+      const gpuVolt = new Float32Array(gpuFields.volt);
+      gpuEng.destroy();
+
+      // --- CPU ---
+      const cpuEng = new PerfCPU([Nx, Ny, Nz], coeffs);
+      cpuEng.configureExcitation(excConfig);
+
+      // Match GPU warmup
+      cpuEng.iterate(5);
+
+      const cpuStart = performance.now();
+      cpuEng.iterate(STEPS);
+      const cpuMs = performance.now() - cpuStart;
+      const cpuMCellsPerSec = (cells * STEPS / cpuMs / 1000).toFixed(1);
+
+      const speedup = (cpuMs / gpuMs).toFixed(1);
+
+      // Verify same result
+      let maxDiff = 0;
+      for (let i = 0; i < size3; i++) {
+        const d = Math.abs(gpuVolt[i] - cpuEng.volt[i]);
+        if (d > maxDiff) maxDiff = d;
+      }
+
+      log(`  ${label} (${cells} cells, ${STEPS} steps):`);
+      log(`    GPU: ${gpuMs.toFixed(1)} ms (${gpuMCellsPerSec} MCells/s)`);
+      log(`    CPU: ${cpuMs.toFixed(1)} ms (${cpuMCellsPerSec} MCells/s)`);
+      log(`    Speedup: ${speedup}x, max diff: ${maxDiff.toExponential(2)}`);
+
+      assert(maxDiff < 1e-3, `${label}: GPU matches CPU (diff=${maxDiff.toExponential(2)})`);
+      assert(true, `${label}: GPU=${gpuMCellsPerSec} MCells/s, CPU=${cpuMCellsPerSec} MCells/s, speedup=${speedup}x`);
+    }
+  } catch (e) {
+    log(`  FAIL: Performance test: ${e.message}\n${e.stack}`);
+    failed++;
+  }
+
   finish();
 }
 
