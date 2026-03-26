@@ -993,9 +993,30 @@ async function run() {
       assert(true, `${label}: WebGPU=${gpuMC.toFixed(0)}, WASM=${wasmMC.toFixed(0)}, JS=${cpuMC.toFixed(0)} MCells/s`);
     }
 
+    // Load native benchmark results if available
+    let nativeBench = null;
+    try {
+      const resp = await fetch('/tests/fixtures/native_bench.json');
+      if (resp.ok) nativeBench = await resp.json();
+    } catch(e) {}
+
+    if (nativeBench) {
+      log('');
+      log('  Native C++ (same hardware, from tests/bench_native.py):');
+      log('  Grid          | basic        | sse          | multithreaded');
+      log('  --------------|--------------|--------------|---------------');
+      for (const [Nx, Ny, Nz] of sizes) {
+        const label = `${Nx}x${Ny}x${Nz}`;
+        const nb = nativeBench[label];
+        if (nb) {
+          log(`  ${label.padEnd(14)}| ${(nb.basic||0).toFixed(0).padStart(5)} MC/s   | ${(nb.sse||0).toFixed(0).padStart(5)} MC/s   | ${(nb.multithreaded||0).toFixed(0).padStart(5)} MC/s`);
+        }
+      }
+    }
+
     log('');
-    log('  Note: WASM CPU uses the full openEMS engine (basic, no SIMD). JS CPU is a minimal reference.');
-    log('  Native C++ benchmark: ~123 MCells/s (from Phase 1 test on same hardware).');
+    log('  WASM CPU = openEMS basic engine compiled to WebAssembly (no SIMD).');
+    log('  JS CPU = pure JavaScript reference implementation.');
 
   } catch (e) {
     log(`  FAIL: Performance test: ${e.message}\n${e.stack}`);
