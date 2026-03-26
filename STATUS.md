@@ -4,213 +4,179 @@
 
 ## Overview
 
-Porting the openEMS electromagnetic FDTD solver to run entirely client-side in a browser using WebAssembly and WebGPU.
+Porting the openEMS electromagnetic FDTD solver to run entirely client-side in a browser using WebAssembly and WebGPU. Phases 0-4 complete. 599 tests, 0 failures.
+
+## Test Summary
+
+```
+node tests/test_wasm.mjs           # 35 tests  — WASM FDTD + fixtures
+node tests/test_api.mjs            # 252 tests — TS API, ports, visualization
+node tests/test_webgpu.mjs         # 272 tests — CPU FDTD reference, extensions
+node tests/test_webgpu_browser.mjs # 40 tests  — Real GPU: shaders, GPU-vs-CPU comparison
+                                   # 599 total, 0 failures
+```
+
+## GPU vs CPU Numerical Accuracy
+
+After 20 timesteps on 8x8x8 grid with identical coefficients and excitation:
+- Voltage max diff: **2.384e-7** (f32 machine epsilon = 1.19e-7)
+- Current max diff: **1.192e-7**
+- Energy match: GPU=14.647, CPU=14.647
+
+With PML (15 steps, 10x10x10, 2-cell PML at z-max): max diff **2.384e-7**.
+
+GPU and CPU produce identical results within f32 rounding. Per the research doc (Section 9), f32 is correct for FDTD field updates (matches native openEMS `FDTD_FLOAT`). Post-processing (DFT, S-parameters) uses f64 in JavaScript to avoid phase error accumulation.
+
+---
+
+## Phase 4: GPU Extensions — COMPLETE
+
+All FDTD extensions ported as WGSL compute shaders with CPU reference implementations. 17-phase timestep dispatch matching C++ engine_extension.h priorities.
+
+### WGSL Shaders (9 total in `src/shaders/`)
+
+| Shader | Purpose | Dispatch |
+|---|---|---|
+| `update_voltage.wgsl` | E-field update (3 components, boundary shift) | Dense 3D (4,4,4) |
+| `update_current.wgsl` | H-field update (3 components, Nx-1/Ny-1/Nz-1) | Dense 3D (4,4,4) |
+| `excitation.wgsl` | Sparse source injection | 1D (256) |
+| `update_pml.wgsl` | UPML 4-mode (pre/post voltage/current) | Dense 3D (4,4,4) |
+| `lorentz_ade.wgsl` | Lorentz/Drude ADE with hasLorentz flag | Sparse 1D (256) |
+| `tfsf.wgsl` | TFSF plane wave with fractional delay | Sparse 1D (256) |
+| `lumped_rlc.wgsl` | Parallel/series RLC, 3-deep history | Sparse 1D (256) |
+| `mur_abc.wgsl` | Mur ABC, per-point coefficients, 3 entry points | Sparse 1D (256) |
+| `steady_state.wgsl` | Energy accumulation for convergence | Sparse 1D (256) |
+
+### CPU Reference Engine (`src/webgpu-fdtd.mjs`)
+
+`CPUFDTDEngine` with 17-phase step() matching C++ hook priorities:
+```
+PRE-VOLTAGE:  steadyState → PML → Lorentz ADE → Mur save → RLC shift
+CORE VOLTAGE
+POST-VOLTAGE: PML → TFSF → Mur accumulate
+APPLY VOLTAGE: excitation → Mur apply → RLC series
+PRE-CURRENT:  PML → Lorentz ADE current
+CORE CURRENT
+POST-CURRENT: PML → TFSF current
+```
+
+### WebGPU Engine (`src/webgpu-engine.mjs`)
+
+Full GPU dispatch for all extensions. Per-pipeline bind group cache (`_coreBindGroupFor`). PML uses 4 separate params buffers per mode. `dispatchIfActive()` helper. Per-step submission for correct uniform state.
+
+---
 
 ## Phase 3: WebGPU Acceleration — COMPLETE
 
-FDTD update equations implemented as WGSL compute shaders with PML support, CPU reference engine, and WASM-to-GPU bridge. 179 tests pass.
+### Key Components
 
-### WGSL Shaders (`src/shaders/`)
-
-| Shader | Purpose | Workgroup |
+| Component | File | Description |
 |---|---|---|
-| `update_voltage.wgsl` | E-field update (3 components, boundary shift handling) | (4,4,4) |
-| `update_current.wgsl` | H-field update (3 components, Nx-1/Ny-1/Nz-1 bounds) | (4,4,4) |
-| `excitation.wgsl` | Sparse source injection (delay, period, signal lookup) | (256,1,1) |
-| `update_pml.wgsl` | UPML pre/post voltage/current (4 modes via uniform) | (4,4,4) |
+| WebGPUEngine | `webgpu-engine.mjs` | GPU init, buffer management, pipeline creation, dispatch |
+| CPUFDTDEngine | `webgpu-fdtd.mjs` | JS reference matching C++ engine.cpp exactly |
+| WebGPUFDTD | `webgpu-fdtd.mjs` | Hybrid: tries GPU, falls back to CPU |
+| WASMGPUBridge | `wasm-gpu-bridge.mjs` | Extracts coefficients from WASM, configures GPU/CPU engines |
 
-### Engine Classes (`src/`)
+### Embind Coefficient Extraction
 
-| Class | File | Description |
-|---|---|---|
-| `WebGPUEngine` | `webgpu-engine.mjs` | Full GPU engine: buffer management, pipeline creation, batched dispatch (32 cmd buffers/submit), PML support |
-| `CPUFDTDEngine` | `webgpu-fdtd.mjs` | JavaScript reference implementation matching engine.cpp exactly, with PML |
-| `WebGPUFDTD` | `webgpu-fdtd.mjs` | Hybrid: tries WebGPU, falls back to CPU |
-| `WASMGPUBridge` | `wasm-gpu-bridge.mjs` | Transfers coefficients from WASM heap to GPU/CPU engines, validates PML regions |
-
-### Test Coverage (179 tests)
-
-Indexing, boundary conditions, loop bounds, timestep evolution, excitation (delay, periodic, past-signal), PEC boundaries, energy conservation, WGSL syntax validation, PML pre/post updates, PML absorption, bridge configuration, multi-region PML, 10x10x10 stress test, determinism.
+`getGridSize()`, `getVV()`, `getVI()`, `getII()`, `getIV()` exposed via `openEMS_Accessor` helper class (accesses protected `FDTD_Op` without modifying vendor code).
 
 ---
 
 ## Phase 2: TypeScript API & Visualization — COMPLETE
 
-High-level simulation API mirroring the Python openEMS/CSXCAD interface. 177 tests pass.
+### Simulation API (`src/simulation.mjs`)
 
-### API Surface
+Configuration: `setExcitation`, `setBoundaryConditions`, `setGrid`, `smoothGrid`
+Properties: `addMetal`, `addMaterial`, `addProbe`
+Primitives: `addBox`, `addCylinder`, `addCylindricalShell`, `addCurve`, `addSphere`, `addSphericalShell`, `addPolygon`, `addLinPoly`, `addRotPoly`, `addWire`
+Ports: `addLumpedPort`, `addMSLPort`, `addWaveGuidePort`, `addRectWaveGuidePort`
+NF2FF: `createNF2FFBox`
+Output: `toXML()`, `run()`
 
-| Module | File | Exports |
-|---|---|---|
-| Simulation | `simulation.mjs` | `Simulation` class — configure, setExcitation, setBoundaryConditions, setGrid, addMetal, addMaterial, addBox, addCylinder, addCylindricalShell, addCurve, addLumpedPort, addMSLPort, addWaveGuidePort, addRectWaveGuidePort, addProbe, createNF2FFBox, toXML, run |
-| Ports | `ports.mjs` | `Port`, `LumpedPort`, `MSLPort`, `WaveguidePort`, `RectWGPort` — geometry creation, probe naming, calcPort with S-parameter extraction |
-| Analysis | `analysis.mjs` | C0/MUE0/EPS0/Z0, dftTime2Freq, dftMagnitude, complexDivide/Multiply/Conj/Abs, parseProbe, findPeaks, calcSParam |
-| NF2FF | `nf2ff.mjs` | `createNF2FFBox` (6 E/H dump boxes), `NF2FFBox`, `NF2FFResult` |
-| Automesh | `automesh.mjs` | meshHintFromBox, meshCombine, meshEstimateCflTimestep, smoothMeshLines |
-| Types | `types.mjs` | Vec3, BoundaryType, ExcitationType, OpenEMSConfig, PortResult, NF2FFResult |
-
-### Port Types
+### Port Classes (`src/ports.mjs`)
 
 | Port | Probes | Features |
 |---|---|---|
-| LumpedPort | 1 voltage + 1 current | R>0 lumped, R=0 metal short, calcPort S-params |
-| MSLPort | 3 voltage (A/B/C) + 2 current | Beta/ZL extraction, feedShift, measPlaneShift, feedR |
-| WaveguidePort | 1 voltage + 1 current (mode-matched) | E/H weight functions, kc, beta/ZL |
+| LumpedPort | 1V + 1I | R>0 lumped, R=0 metal, calcPort S-params |
+| MSLPort | 3V + 2I | Beta/ZL, feedShift, measPlaneShift, feedR |
+| WaveguidePort | 1V + 1I (mode-matched) | E/H weight functions, kc, beta/ZL |
 | RectWGPort | (extends WaveguidePort) | Auto TE mode functions from a, b, modeName |
+
+### Analysis (`src/analysis.mjs`)
+
+Constants, DFT, complex arithmetic, probe parsing, peak finding, S-parameter computation.
+
+### Visualization Data (`src/visualization.mjs`)
+
+Pure data transforms (no rendering): `prepareSParamData`, `prepareSmithData`, `prepareRadiationPattern`, `prepareImpedanceData`, `prepareTimeDomainData`.
+
+### Automesh (`src/automesh.mjs`)
+
+`meshHintFromBox`, `meshCombine`, `meshEstimateCflTimestep`, `smoothMeshLines`.
+
+### NF2FF (`src/nf2ff.mjs`)
+
+`createNF2FFBox` (6 E/H dump boxes), `NF2FFBox`, `NF2FFResult`. Far-field computation deferred to Phase 5.
 
 ---
 
 ## Phase 1: WASM CPU MVP — COMPLETE
 
-openEMS runs end-to-end in the browser via WebAssembly. 35 tests pass covering cavity resonance, coaxial impedance, and dipole field probes.
+WASM module: `openems.js` (121 KB) + `openems.wasm` (3.2 MB). Runs FDTD simulations in browser/Node.js. 35 tests validate cavity resonance, coax impedance, dipole field probes.
 
-### WASM Module
+## Phase 0: Build Infrastructure — COMPLETE
 
-| File | Size | Description |
-|---|---|---|
-| `build-wasm/openems.js` | 121 KB | Emscripten JS glue (modularized, web+node) |
-| `build-wasm/openems.wasm` | 3.2 MB | WebAssembly binary |
-
-### Embind API (`src/embind_api.cpp`)
-
-| Method | Description |
-|---|---|
-| `configure(engineType, numTimesteps, endCriteria)` | Set engine (0=basic), timesteps, convergence |
-| `loadXML(xmlString)` | Write XML to MEMFS, parse FDTD setup |
-| `setup()` | Initialize operator and engine, returns 0 on success |
-| `run()` | Execute FDTD time-stepping |
-| `readFile(path)` | Read file from MEMFS as string |
-| `listFiles(dir)` | List files in MEMFS directory |
-
-### Test Suite (`tests/test_wasm.mjs`)
-
-**35 tests, 0 failures.**
-
-| Test Group | Tests | What It Validates |
-|---|---|---|
-| DFT Utility | 2 | Sinusoid peak detection, impedance calculation |
-| Cavity Resonator (fixture) | 11 | TM110/TM111 resonances ±0.25% of analytical, peak-to-mode matching |
-| Coaxial Line (fixture) | 1 | Z₀ = 50.49–50.77 Ω within +3%/-1% of analytical 49.94 Ω |
-| Dipole Field Probes (fixture) | 7 | E/H probes above amplitude thresholds, field symmetry |
-| WASM Module | 6 | Module loading, API method availability |
-| WASM Cavity Simulation | 8 | Live XML→FDTD→probe→spectrum validation in WASM |
-
-### Performance
-
-- Basic engine: ~123 MCells/s in WASM (Node.js)
-- Cavity simulation (9,152 cells, 20,000 steps): 1.5 seconds
-
-### Reference Fixtures (`tests/fixtures/`)
-
-| Fixture | Probes | Signal |
-|---|---|---|
-| `cavity/` | ut1z (voltage, 6667 samples) | TM modes at 8.05, 8.44 GHz |
-| `coax/` | ut1 (voltage, 2501), it1 (current, 2501) | Z₀ ≈ 50.6 Ω |
-| `dipole/` | et1, et2 (E-field), ht1, ht2 (H-field), 239 samples each | E max ~6e-3 V/m, H max ~1.9e-6 A/m |
-| `constants.json` | — | C₀, μ₀, ε₀, Z₀ |
+Emscripten cross-compilation of openEMS + CSXCAD + all dependencies (Boost 1.86, HDF5 1.14.6, TinyXML, fparser). CGAL/VTK disabled for WASM. Reference fixtures from native build.
 
 ---
 
-## Phase 0: Build Infrastructure & Reference Data — COMPLETE
-
-### WASM Static Libraries
-
-| Library | Size | Path |
-|---|---|---|
-| libCSXCAD.a | 697 KB | `build-wasm/vendor/CSXCAD/src/libCSXCAD.a` |
-| libopenEMS.a | 1.9 MB | `build-wasm/vendor/openEMS/libopenEMS.a` |
-| libnf2ff.a | 315 KB | `build-wasm/vendor/openEMS/nf2ff/libnf2ff.a` |
-
-### WASM Dependencies (`deps/wasm/lib/`)
-
-| Library | Version |
-|---|---|
-| libboost_{thread,program_options,chrono,date_time,serialization,system}.a | 1.86.0 |
-| libhdf5.a, libhdf5_hl.a | 1.14.6 |
-| libtinyxml.a | 2.6.2 |
-| libfparser.a | 4.5.2 |
-
-### Source Code Modifications
-
-**CSXCAD** (7 files):
-
-| File | Change |
-|---|---|
-| `CMakeLists.txt` | CGAL optional via `DISABLE_CGAL`, VTK optional via `DISABLE_VTK` |
-| `src/CMakeLists.txt` | Polyhedron sources conditional on CGAL, STATIC lib for Emscripten |
-| `src/ContinuousStructure.cpp` | `#ifndef CSXCAD_NO_CGAL` guards on polyhedron includes and factory |
-| `src/CSPrimitives.h` | `#ifndef CSXCAD_NO_CGAL` guards on polyhedron forward declarations and casts |
-| `src/CSTransform.cpp` | `#ifndef NO_VTK` guard on vtkMatrix4x4, inline 4x4 matrix inversion fallback, `std::ostream` fix |
-| `src/CSPropDiscMaterial.cpp` | `#ifndef NO_VTK` guard on VTK includes and CreatePolyDataModel |
-| `src/CSPropDiscMaterial.h` | `#ifndef NO_VTK` guard on vtkPolyData forward decl and method |
-
-**openEMS** (11 files):
-
-| File | Change |
-|---|---|
-| `CMakeLists.txt` | VTK optional, Emscripten flags, STATIC lib, skip binary, CSXCAD subdirectory support |
-| `FDTD/operator.h` | `#ifndef NO_VTK` guard on dump method declarations |
-| `FDTD/operator.cpp` | `#ifndef NO_VTK` guard on VTK includes, dump methods, debug call sites |
-| `FDTD/operator_cylindermultigrid.h/.cpp` | `#ifndef NO_VTK` guard on DumpPEC2File |
-| `FDTD/operator_mpi.h/.cpp` | `#ifndef NO_VTK` guard on dump overrides |
-| `nf2ff/CMakeLists.txt` | STATIC lib for Emscripten, skip nf2ff_bin |
-| `openems.cpp` | `#ifndef NO_VTK` guard on vtkVersion.h and version print |
-| `tools/vtk_file_writer.h` | Full stub class with no-op methods when `NO_VTK` defined |
-| `tools/vtk_file_writer.cpp` | Entire implementation wrapped in `#ifndef NO_VTK` |
-
-**New files:**
-
-| File | Purpose |
-|---|---|
-| `CMakeLists.txt` (root) | Top-level build with WASM target linking all libraries |
-| `src/embind_api.cpp` | Embind wrapper exposing openEMS to JavaScript |
-| `scripts/build-wasm-deps.sh` | Cross-compiles TinyXML, fparser, HDF5, Boost for WASM |
-| `scripts/build-native-deps.sh` | Builds TinyXML, fparser natively |
-| `scripts/build-wasm.sh` | Invokes emcmake/emmake with correct paths |
-| `tests/generate_fixtures.py` | Generates reference fixtures from native openEMS |
-| `tests/test_wasm.mjs` | Node.js test suite (35 tests) |
-
-### Build Commands
-
-```bash
-# Build WASM dependencies (one-time, ~10 min)
-bash scripts/build-wasm-deps.sh
-
-# Build openEMS WASM module
-bash scripts/build-wasm.sh
-
-# Run tests
-node tests/test_wasm.mjs
-
-# Generate reference fixtures (requires native build)
-python3 tests/generate_fixtures.py
-```
-
-### Known Issues
-
-1. **HDF5 WASM build** requires `-DFE_INVALID=0` workaround for Emscripten's incomplete `<fenv.h>`.
-2. **Boost address model**: Worked around with `-DBoost_NO_BOOST_CMAKE=ON`.
-3. **`exit()` calls** (51 across 11 files) not yet replaced with exceptions. Emscripten handles them but the WASM module is destroyed on exit.
-4. **VTK stub**: `Write()` returns false, causing harmless "can't dump to file" warnings.
-5. **XML format**: Radius/ShellWidth are attributes (not child elements), Weight X/Y/Z are attributes on the Weight element. The openEMS XML format is undocumented — learned through C++ source reading.
-
----
-
-## Phases 4-6: Not Started
+## Phases 5-6: Not Started
 
 | Phase | Description | Status |
 |---|---|---|
-| 4 | GPU Extensions (dispersive materials, TFSF, RLC) | Not started |
-| 5 | Multi-threading, NF2FF, Scale | Not started |
-| 6 | Polish & Ecosystem | Not started |
+| 5 | Multi-threading, NF2FF far-field, memory64, cylindrical coords | Not started |
+| 6 | Browser UI, examples, URL sharing, deployment | Not started |
 
-## Documentation
+## Build Commands
 
-| Document | Path |
-|---|---|
-| Research & architecture | `docs/openems-web-port-research.md` |
-| Phase 0-6 plans | `docs/phases/phase-{0..6}-*.md` |
-| openEMS summary | `vendor/openEMS/SUMMARY.md` |
+```bash
+bash scripts/build-wasm-deps.sh    # One-time: cross-compile dependencies (~10 min)
+bash scripts/build-wasm.sh         # Build WASM module (~2 min)
+node tests/test_wasm.mjs           # WASM tests
+node tests/test_api.mjs            # API tests
+node tests/test_webgpu.mjs         # CPU FDTD + extension tests
+node tests/test_webgpu_browser.mjs # Browser WebGPU tests (requires Chrome)
+```
+
+## File Manifest
+
+### Source (20 files)
+```
+src/embind_api.cpp          — Embind wrapper (C++ → JS API)
+src/simulation.mjs          — Simulation class (XML generation, run)
+src/ports.mjs               — Port classes (Lumped, MSL, Waveguide, RectWG)
+src/analysis.mjs            — DFT, S-params, complex math, constants
+src/automesh.mjs            — Mesh generation utilities
+src/nf2ff.mjs               — NF2FF recording box
+src/types.mjs               — TypeScript-style type definitions
+src/visualization.mjs       — Visualization data preparation
+src/webgpu-engine.mjs       — WebGPU engine (buffers, pipelines, dispatch)
+src/webgpu-fdtd.mjs         — CPU reference engine + hybrid fallback
+src/wasm-gpu-bridge.mjs     — WASM coefficient extraction → GPU/CPU engines
+src/shaders/*.wgsl          — 9 WGSL compute shaders
+```
+
+### Tests (6 files + fixtures)
+```
+tests/test_wasm.mjs         — 35 tests (WASM FDTD + physics validation)
+tests/test_api.mjs          — 252 tests (TS API, ports, visualization)
+tests/test_webgpu.mjs       — 272 tests (CPU FDTD, extensions, dispatch order)
+tests/test_webgpu_browser.mjs — Runner for headless Chrome GPU tests
+tests/webgpu/index.html     — 40 browser tests (shader compilation, GPU-vs-CPU)
+tests/generate_fixtures.py  — Reference data generator
+tests/fixtures/             — Cavity, coax, dipole reference data
+```
 
 ## Toolchain
 
@@ -220,7 +186,5 @@ python3 tests/generate_fixtures.py
 | CMake | 4.3.0 |
 | Boost | 1.86.0 |
 | HDF5 | 1.14.6 |
-| TinyXML | 2.6.2 |
-| fparser | 4.5.2 |
-| CGAL | 6.1.1 (native only, disabled for WASM) |
-| VTK | 9.4.2 (native only, disabled for WASM) |
+| Chrome | 146 (headless WebGPU) |
+| Playwright | 1.58.2 |
