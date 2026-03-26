@@ -78,30 +78,54 @@ export class WASMGPUBridge {
      *
      * @param {Object} wasmModule - Emscripten module with OpenEMS bindings
      */
-    configureFromWASM(wasmModule) {
-        // Placeholder: document the expected interface
-        if (!wasmModule || typeof wasmModule.OpenEMS !== 'function') {
+    /**
+     * Configure the bridge from a WASM openEMS instance after SetupFDTD().
+     *
+     * The WASM module must expose an OpenEMS class with:
+     * - getGridSize() -> VectorUInt [Nx, Ny, Nz]
+     * - getVV/getVI/getII/getIV() -> VectorFloat (3*Nx*Ny*Nz coefficient arrays)
+     *
+     * @param {Object} emsInstance - An already-constructed and setup'd OpenEMS instance
+     *   from the WASM module (i.e., after calling loadXML + setup).
+     */
+    configureFromWASM(emsInstance) {
+        if (!emsInstance || typeof emsInstance.getGridSize !== 'function') {
             throw new Error(
-                'WASM module must expose OpenEMS class. ' +
-                'Full WASM->GPU integration requires embind_api.cpp additions ' +
-                '(getGridSize, getVV, getVI, getII, getIV, getExcitationData, getPMLRegions). ' +
-                'Use configure() with plain JS arrays instead.'
+                'WASM instance must expose getGridSize(), getVV(), getVI(), getII(), getIV(). ' +
+                'Pass an OpenEMS instance after calling setup().'
             );
         }
 
-        // Future implementation:
-        // const ems = new wasmModule.OpenEMS();
-        // const gridSize = ems.getGridSize(); // [Nx, Ny, Nz]
-        // const vv = new Float32Array(ems.getVV());
-        // const vi = new Float32Array(ems.getVI());
-        // const ii = new Float32Array(ems.getII());
-        // const iv = new Float32Array(ems.getIV());
-        // const excData = ems.getExcitationData();
-        // const pmlRegions = ems.getPMLRegions();
-        // this.configure({ gridSize, coefficients: { vv, vi, ii, iv }, excitation: excData, pmlRegions });
-        throw new Error(
-            'WASM->GPU bridge not yet implemented. Requires embind_api.cpp additions.'
-        );
+        // Extract grid size from WASM (returns embind vector)
+        const gridSizeVec = emsInstance.getGridSize();
+        if (!gridSizeVec || gridSizeVec.size() < 3) {
+            throw new Error(
+                'getGridSize() returned empty or incomplete result. ' +
+                'Ensure SetupFDTD() has been called before configureFromWASM().'
+            );
+        }
+        const gridSize = [gridSizeVec.get(0), gridSizeVec.get(1), gridSizeVec.get(2)];
+
+        // Extract coefficient arrays from WASM (returns embind vectors)
+        const vvVec = emsInstance.getVV();
+        const viVec = emsInstance.getVI();
+        const iiVec = emsInstance.getII();
+        const ivVec = emsInstance.getIV();
+
+        // Convert embind vectors to Float32Arrays
+        const vv = _embindVectorToFloat32Array(vvVec);
+        const vi = _embindVectorToFloat32Array(viVec);
+        const ii = _embindVectorToFloat32Array(iiVec);
+        const iv = _embindVectorToFloat32Array(ivVec);
+
+        // Clean up embind vectors
+        gridSizeVec.delete();
+        vvVec.delete();
+        viVec.delete();
+        iiVec.delete();
+        ivVec.delete();
+
+        this.configure({ gridSize, coefficients: { vv, vi, ii, iv } });
     }
 
     /**
@@ -203,4 +227,20 @@ export class WASMGPUBridge {
             }
         }
     }
+}
+
+/**
+ * Convert an Emscripten embind vector<float> to a Float32Array.
+ * Embind vectors expose .size() and .get(i) methods.
+ *
+ * @param {Object} vec - embind vector
+ * @returns {Float32Array}
+ */
+function _embindVectorToFloat32Array(vec) {
+    const len = vec.size();
+    const arr = new Float32Array(len);
+    for (let i = 0; i < len; i++) {
+        arr[i] = vec.get(i);
+    }
+    return arr;
 }

@@ -5,6 +5,7 @@
 
 import { LumpedPort, MSLPort, WaveguidePort, RectWGPort } from './ports.mjs';
 import { createNF2FFBox } from './nf2ff.mjs';
+import { smoothMeshLines } from './automesh.mjs';
 
 /**
  * @typedef {import('./types.mjs').Vec3} Vec3
@@ -234,6 +235,30 @@ export class Simulation {
         prop.primitives.push({ type: 'Curve', points: points.map(p => [...p]), priority });
         return prop;
       },
+      addSphere: (center, radius, priority = 0) => {
+        prop.primitives.push({ type: 'Sphere', center: [...center], radius, priority });
+        return prop;
+      },
+      addSphericalShell: (center, radius, shellWidth, priority = 0) => {
+        prop.primitives.push({ type: 'SphericalShell', center: [...center], radius, shellWidth, priority });
+        return prop;
+      },
+      addPolygon: (points, normDir, elevation, priority = 0) => {
+        prop.primitives.push({ type: 'Polygon', points: points.map(p => [...p]), normDir, elevation, priority });
+        return prop;
+      },
+      addLinPoly: (points, normDir, elevation, length, priority = 0) => {
+        prop.primitives.push({ type: 'LinPoly', points: points.map(p => [...p]), normDir, elevation, length, priority });
+        return prop;
+      },
+      addRotPoly: (points, normDir, elevation, angle, priority = 0) => {
+        prop.primitives.push({ type: 'RotPoly', points: points.map(p => [...p]), normDir, elevation, angle, priority });
+        return prop;
+      },
+      addWire: (points, radius, priority = 0) => {
+        prop.primitives.push({ type: 'Wire', points: points.map(p => [...p]), radius, priority });
+        return prop;
+      },
     };
   }
 
@@ -417,6 +442,38 @@ export class Simulation {
         lines.push(`            <Vertex X="${pt[0]}" Y="${pt[1]}" Z="${pt[2]}"/>`);
       }
       lines.push(`          </Curve>`);
+    } else if (prim.type === 'Sphere') {
+      lines.push(`          <Sphere Priority="${prim.priority}" Radius="${prim.radius}">`);
+      lines.push(`            <Center X="${prim.center[0]}" Y="${prim.center[1]}" Z="${prim.center[2]}"/>`);
+      lines.push(`          </Sphere>`);
+    } else if (prim.type === 'SphericalShell') {
+      lines.push(`          <SphericalShell Priority="${prim.priority}" Radius="${prim.radius}" ShellWidth="${prim.shellWidth}">`);
+      lines.push(`            <Center X="${prim.center[0]}" Y="${prim.center[1]}" Z="${prim.center[2]}"/>`);
+      lines.push(`          </SphericalShell>`);
+    } else if (prim.type === 'Polygon') {
+      lines.push(`          <Polygon Priority="${prim.priority}" NormDir="${prim.normDir}" Elevation="${prim.elevation}">`);
+      for (const pt of prim.points) {
+        lines.push(`            <Vertex X="${pt[0]}" Y="${pt[1]}"/>`);
+      }
+      lines.push(`          </Polygon>`);
+    } else if (prim.type === 'LinPoly') {
+      lines.push(`          <LinPoly Priority="${prim.priority}" NormDir="${prim.normDir}" Elevation="${prim.elevation}" Length="${prim.length}">`);
+      for (const pt of prim.points) {
+        lines.push(`            <Vertex X="${pt[0]}" Y="${pt[1]}"/>`);
+      }
+      lines.push(`          </LinPoly>`);
+    } else if (prim.type === 'RotPoly') {
+      lines.push(`          <RotPoly Priority="${prim.priority}" NormDir="${prim.normDir}" Elevation="${prim.elevation}" RotAngle="${prim.angle}">`);
+      for (const pt of prim.points) {
+        lines.push(`            <Vertex X="${pt[0]}" Y="${pt[1]}"/>`);
+      }
+      lines.push(`          </RotPoly>`);
+    } else if (prim.type === 'Wire') {
+      lines.push(`          <Wire Priority="${prim.priority}" WireRadius="${prim.radius}">`);
+      for (const pt of prim.points) {
+        lines.push(`            <Vertex X="${pt[0]}" Y="${pt[1]}" Z="${pt[2]}"/>`);
+      }
+      lines.push(`          </Wire>`);
     }
     return lines.join('\n');
   }
@@ -572,6 +629,29 @@ export class Simulation {
       points: points.map(p => [...p]),
       priority,
     });
+  }
+
+  /**
+   * Smooth the grid so no spacing exceeds maxRes on any axis.
+   * Calls smoothMeshLines from automesh.mjs on each axis.
+   * @param {number|number[]} maxRes - maximum resolution (scalar or [x,y,z])
+   */
+  smoothGrid(maxRes) {
+    const mx = Array.isArray(maxRes) ? maxRes[0] : maxRes;
+    const my = Array.isArray(maxRes) ? maxRes[1] : maxRes;
+    const mz = Array.isArray(maxRes) ? maxRes[2] : maxRes;
+    this._grid.x = smoothMeshLines(this._grid.x, mx);
+    this._grid.y = smoothMeshLines(this._grid.y, my);
+    this._grid.z = smoothMeshLines(this._grid.z, mz);
+  }
+
+  /**
+   * Read simulation from XML string.
+   * Stub for future implementation — documents the API surface.
+   * @param {string} xmlString
+   */
+  readFromXML(xmlString) {
+    throw new Error('Not yet implemented — use toXML() to generate XML');
   }
 
   /**

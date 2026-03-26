@@ -748,10 +748,29 @@ export class WebGPUEngine {
 
             // PML params uniform: 8 x u32 = 32 bytes
             // startPos(3) + mode(1) + numLines(3) + pad(1)
-            const pmlParamsBuffer = this.device.createBuffer({
-                size: 32,
-                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            });
+            // Create one params buffer per mode (0-3) to avoid writeBuffer race:
+            // writeBuffer is a queue operation that executes before the command buffer,
+            // so multiple writeBuffer calls to the same buffer within a single
+            // command encoder would all resolve to the last-written value.
+            const pmlParamsBuffers = [];
+            for (let mode = 0; mode < 4; mode++) {
+                const buf = this.device.createBuffer({
+                    size: 32,
+                    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                });
+                // Pre-write the static fields; mode will be written at dispatch time
+                const data = new Uint32Array(8);
+                data[0] = region.startPos[0];
+                data[1] = region.startPos[1];
+                data[2] = region.startPos[2];
+                data[3] = mode;
+                data[4] = region.numLines[0];
+                data[5] = region.numLines[1];
+                data[6] = region.numLines[2];
+                data[7] = 0; // pad
+                this.device.queue.writeBuffer(buf, 0, data);
+                pmlParamsBuffers.push(buf);
+            }
 
             const voltFluxBuffer = this.device.createBuffer({
                 size: fluxSize,
@@ -769,31 +788,33 @@ export class WebGPUEngine {
             const iifoBuffer = this._createAndUploadBuffer(region.iifo, GPUBufferUsage.STORAGE);
             const iifnBuffer = this._createAndUploadBuffer(region.iifn, GPUBufferUsage.STORAGE);
 
-            // Create PML bind group
-            const bindGroup = this.device.createBindGroup({
-                layout: this.pmlPipeline.getBindGroupLayout(3),
-                entries: [
-                    { binding: 0, resource: { buffer: pmlParamsBuffer } },
-                    { binding: 1, resource: { buffer: voltFluxBuffer } },
-                    { binding: 2, resource: { buffer: currFluxBuffer } },
-                    { binding: 3, resource: { buffer: vvBuffer } },
-                    { binding: 4, resource: { buffer: vvfoBuffer } },
-                    { binding: 5, resource: { buffer: vvfnBuffer } },
-                    { binding: 6, resource: { buffer: iiBuffer } },
-                    { binding: 7, resource: { buffer: iifoBuffer } },
-                    { binding: 8, resource: { buffer: iifnBuffer } },
-                ],
-            });
+            // Create one PML bind group per mode (each references its own params buffer)
+            const bindGroups = pmlParamsBuffers.map(paramsBuf =>
+                this.device.createBindGroup({
+                    layout: this.pmlPipeline.getBindGroupLayout(3),
+                    entries: [
+                        { binding: 0, resource: { buffer: paramsBuf } },
+                        { binding: 1, resource: { buffer: voltFluxBuffer } },
+                        { binding: 2, resource: { buffer: currFluxBuffer } },
+                        { binding: 3, resource: { buffer: vvBuffer } },
+                        { binding: 4, resource: { buffer: vvfoBuffer } },
+                        { binding: 5, resource: { buffer: vvfnBuffer } },
+                        { binding: 6, resource: { buffer: iiBuffer } },
+                        { binding: 7, resource: { buffer: iifoBuffer } },
+                        { binding: 8, resource: { buffer: iifnBuffer } },
+                    ],
+                })
+            );
 
             const [wgX, wgY, wgZ] = this.WG_SIZE_3D;
             return {
                 startPos: region.startPos,
                 numLines: region.numLines,
-                pmlParamsBuffer,
+                pmlParamsBuffers,
                 voltFluxBuffer,
                 currFluxBuffer,
                 buffers: [vvBuffer, vvfoBuffer, vvfnBuffer, iiBuffer, iifoBuffer, iifnBuffer],
-                bindGroup,
+                bindGroups,
                 dispatch: [
                     Math.ceil(nx / wgX),
                     Math.ceil(ny / wgY),
@@ -814,22 +835,15 @@ export class WebGPUEngine {
         if (!this.pmlConfigured) return;
 
         for (const region of this.pmlRegions) {
-            // Update PML params uniform with current mode
-            const data = new Uint32Array(8);
-            data[0] = region.startPos[0];
-            data[1] = region.startPos[1];
-            data[2] = region.startPos[2];
-            data[3] = mode;
-            data[4] = region.numLines[0];
-            data[5] = region.numLines[1];
-            data[6] = region.numLines[2];
-            data[7] = 0; // pad
-            this.device.queue.writeBuffer(region.pmlParamsBuffer, 0, data);
-
+            // Use the pre-created bind group for this mode.
+            // Each mode has its own params buffer with the mode value baked in,
+            // avoiding the writeBuffer race condition where multiple writeBuffer
+            // calls to the same buffer within a single command encoder all
+            // resolve to the last-written value.
             const pass = encoder.beginComputePass();
             pass.setPipeline(this.pmlPipeline);
             pass.setBindGroup(0, this._coreBindGroupFor(this.pmlPipeline));
-            pass.setBindGroup(3, region.bindGroup);
+            pass.setBindGroup(3, region.bindGroups[mode]);
             pass.dispatchWorkgroups(...region.dispatch);
             pass.end();
         }
@@ -1594,6 +1608,30 @@ export class WebGPUEngine {
             this.device.queue.submit([enc.finish()]);
         }
         return enc;
+    }
+
+    /**
+     * Dispatch a compute pass if the pipeline and bind groups are active.
+     * This is a convenience helper that avoids boilerplate in iterate().
+     *
+     * @param {GPUCommandEncoder} encoder
+     * @param {GPUComputePipeline|null} pipeline - the compute pipeline (null = skip)
+     * @param {Array<GPUBindGroup|null>} bindGroups - bind groups indexed by group slot
+     * @param {number[]} dispatchSize - workgroup dispatch dimensions [x, y?, z?]
+     */
+    dispatchIfActive(encoder, pipeline, bindGroups, dispatchSize) {
+        if (!pipeline) return;
+        for (const bg of bindGroups) {
+            if (!bg) return;
+        }
+
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(pipeline);
+        for (let i = 0; i < bindGroups.length; i++) {
+            pass.setBindGroup(i, bindGroups[i]);
+        }
+        pass.dispatchWorkgroups(...dispatchSize);
+        pass.end();
     }
 
     /**

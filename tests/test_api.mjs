@@ -15,6 +15,7 @@ import { Simulation } from '../src/simulation.mjs';
 import { LumpedPort, MSLPort, WaveguidePort, RectWGPort } from '../src/ports.mjs';
 import { createNF2FFBox, NF2FFBox, NF2FFResult } from '../src/nf2ff.mjs';
 import { meshHintFromBox, meshCombine, meshEstimateCflTimestep, smoothMeshLines } from '../src/automesh.mjs';
+import { prepareSParamData, prepareSmithData, prepareRadiationPattern, prepareImpedanceData, prepareTimeDomainData } from '../src/visualization.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -1164,6 +1165,350 @@ function testNF2FFResult() {
 }
 
 // -----------------------------------------------------------------------
+// Test 29: Sphere primitive XML
+// -----------------------------------------------------------------------
+function testSphereXML() {
+  console.log('\n=== Test: Sphere Primitive ===');
+
+  const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+  sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+  sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
+
+  const metal = sim.addMetal('ball');
+  metal.addSphere([0.5, 0.5, 0.5], 0.25, 10);
+
+  const xml = sim.toXML();
+  assert(xml.includes('<Sphere Priority="10" Radius="0.25"'), 'XML has Sphere with Priority and Radius');
+  assert(xml.includes('<Center X="0.5" Y="0.5" Z="0.5"/>'), 'Sphere has Center element');
+  assert(xml.includes('</Sphere>'), 'Sphere has closing tag');
+}
+
+// -----------------------------------------------------------------------
+// Test 30: SphericalShell primitive XML
+// -----------------------------------------------------------------------
+function testSphericalShellXML() {
+  console.log('\n=== Test: SphericalShell Primitive ===');
+
+  const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+  sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+  sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
+
+  const metal = sim.addMetal('shell');
+  metal.addSphericalShell([0, 0, 0], 1.0, 0.05, 8);
+
+  const xml = sim.toXML();
+  assert(xml.includes('<SphericalShell Priority="8" Radius="1" ShellWidth="0.05"'), 'XML has SphericalShell with attributes');
+  assert(xml.includes('<Center X="0" Y="0" Z="0"/>'), 'SphericalShell has Center');
+  assert(xml.includes('</SphericalShell>'), 'SphericalShell has closing tag');
+}
+
+// -----------------------------------------------------------------------
+// Test 31: Polygon primitive XML
+// -----------------------------------------------------------------------
+function testPolygonXML() {
+  console.log('\n=== Test: Polygon Primitive ===');
+
+  const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+  sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+  sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
+
+  const metal = sim.addMetal('patch');
+  metal.addPolygon([[0, 0], [1, 0], [1, 1], [0, 1]], 2, 0.5, 10);
+
+  const xml = sim.toXML();
+  assert(xml.includes('<Polygon Priority="10" NormDir="2" Elevation="0.5"'), 'XML has Polygon with attributes');
+  assert(xml.includes('<Vertex X="0" Y="0"/>'), 'Polygon has 2D Vertex');
+  assert(xml.includes('</Polygon>'), 'Polygon has closing tag');
+
+  // Count vertices
+  const vertexCount = (xml.match(/<Vertex X=/g) || []).length;
+  assert(vertexCount === 4, `Polygon has 4 vertices (found ${vertexCount})`);
+}
+
+// -----------------------------------------------------------------------
+// Test 32: LinPoly primitive XML
+// -----------------------------------------------------------------------
+function testLinPolyXML() {
+  console.log('\n=== Test: LinPoly Primitive ===');
+
+  const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+  sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+  sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
+
+  const metal = sim.addMetal('extrusion');
+  metal.addLinPoly([[0, 0], [1, 0], [0.5, 1]], 2, 0, 0.5, 5);
+
+  const xml = sim.toXML();
+  assert(xml.includes('<LinPoly Priority="5" NormDir="2" Elevation="0" Length="0.5"'), 'XML has LinPoly with attributes');
+  assert(xml.includes('</LinPoly>'), 'LinPoly has closing tag');
+
+  const vertexCount = (xml.match(/<Vertex X=/g) || []).length;
+  assert(vertexCount === 3, `LinPoly has 3 vertices (found ${vertexCount})`);
+}
+
+// -----------------------------------------------------------------------
+// Test 33: RotPoly primitive XML
+// -----------------------------------------------------------------------
+function testRotPolyXML() {
+  console.log('\n=== Test: RotPoly Primitive ===');
+
+  const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+  sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+  sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
+
+  const metal = sim.addMetal('revolved');
+  metal.addRotPoly([[0.5, 0], [1, 0], [1, 1], [0.5, 1]], 2, 0, Math.PI, 7);
+
+  const xml = sim.toXML();
+  assert(xml.includes('<RotPoly Priority="7" NormDir="2" Elevation="0"'), 'XML has RotPoly with attributes');
+  assert(xml.includes(`RotAngle="${Math.PI}"`), 'RotPoly has RotAngle');
+  assert(xml.includes('</RotPoly>'), 'RotPoly has closing tag');
+
+  const vertexCount = (xml.match(/<Vertex X=/g) || []).length;
+  assert(vertexCount === 4, `RotPoly has 4 vertices (found ${vertexCount})`);
+}
+
+// -----------------------------------------------------------------------
+// Test 34: Wire primitive XML
+// -----------------------------------------------------------------------
+function testWireXML() {
+  console.log('\n=== Test: Wire Primitive ===');
+
+  const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+  sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+  sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
+
+  const metal = sim.addMetal('antenna_wire');
+  metal.addWire([[0, 0, 0], [0, 0, 0.5], [0.5, 0, 0.5]], 0.001, 10);
+
+  const xml = sim.toXML();
+  assert(xml.includes('<Wire Priority="10" WireRadius="0.001"'), 'XML has Wire with WireRadius');
+  assert(xml.includes('</Wire>'), 'Wire has closing tag');
+
+  // Wire uses 3D vertices
+  const vertexCount = (xml.match(/<Vertex X=/g) || []).length;
+  assert(vertexCount === 3, `Wire has 3 vertices (found ${vertexCount})`);
+  assert(xml.includes('Z="0.5"'), 'Wire vertex has Z coordinate');
+}
+
+// -----------------------------------------------------------------------
+// Test 35: smoothGrid method
+// -----------------------------------------------------------------------
+function testSmoothGrid() {
+  console.log('\n=== Test: smoothGrid ===');
+
+  const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+  sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+  sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  sim.setGrid(1, [0, 10, 100], [0, 5, 50], [0, 1, 2]);
+
+  // Before smoothing
+  const xBefore = sim._grid.x.length;
+  const yBefore = sim._grid.y.length;
+  const zBefore = sim._grid.z.length;
+
+  sim.smoothGrid(5);
+
+  assert(sim._grid.x.length > xBefore, `smoothGrid added x lines (${xBefore} -> ${sim._grid.x.length})`);
+  assert(sim._grid.y.length > yBefore, `smoothGrid added y lines (${yBefore} -> ${sim._grid.y.length})`);
+  assert(sim._grid.z.length === zBefore, `smoothGrid left z unchanged (gap=1 <= maxRes=5)`);
+
+  // Check all gaps <= maxRes
+  for (let i = 1; i < sim._grid.x.length; i++) {
+    const gap = sim._grid.x[i] - sim._grid.x[i - 1];
+    assert(gap <= 5 + 1e-10, `x gap ${gap} <= 5`);
+  }
+
+  // Test with per-axis maxRes
+  const sim2 = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+  sim2.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+  sim2.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  sim2.setGrid(1, [0, 100], [0, 100], [0, 100]);
+  sim2.smoothGrid([10, 20, 50]);
+
+  assert(sim2._grid.x.length > sim2._grid.y.length, 'Per-axis: x has more lines than y (finer res)');
+  assert(sim2._grid.y.length > sim2._grid.z.length, 'Per-axis: y has more lines than z (finer res)');
+}
+
+// -----------------------------------------------------------------------
+// Test 36: readFromXML stub throws
+// -----------------------------------------------------------------------
+function testReadFromXMLStub() {
+  console.log('\n=== Test: readFromXML Stub ===');
+
+  const sim = new Simulation();
+  let threw = false;
+  let msg = '';
+  try {
+    sim.readFromXML('<openEMS/>');
+  } catch (e) {
+    threw = true;
+    msg = e.message;
+  }
+  assert(threw, 'readFromXML throws');
+  assert(msg.includes('Not yet implemented'), `readFromXML error message: "${msg}"`);
+}
+
+// -----------------------------------------------------------------------
+// Test 37: Visualization - prepareSParamData
+// -----------------------------------------------------------------------
+function testPrepareSParamData() {
+  console.log('\n=== Test: prepareSParamData ===');
+
+  const n = 10;
+  const freq = new Float64Array(n);
+  for (let i = 0; i < n; i++) freq[i] = (i + 1) * 1e9;
+
+  // Mock port: perfect reflection (uf_ref = uf_inc) => S11 = 0 dB
+  const port = {
+    uf_ref_re: new Float64Array(n).fill(1),
+    uf_ref_im: new Float64Array(n).fill(0),
+    uf_inc_re: new Float64Array(n).fill(1),
+    uf_inc_im: new Float64Array(n).fill(0),
+  };
+
+  const result = prepareSParamData([port], freq);
+  assert(result.freq.length === n, 'prepareSParamData has freq array');
+  assert(result.s11_dB !== undefined, 'prepareSParamData has s11_dB');
+  assert(Math.abs(result.s11_dB[0] - 0) < 0.01, `S11 = ${result.s11_dB[0].toFixed(2)} dB (expected 0 dB for perfect reflection)`);
+
+  // Mock port: no reflection => S11 << 0 dB
+  const port2 = {
+    uf_ref_re: new Float64Array(n).fill(1e-10),
+    uf_ref_im: new Float64Array(n).fill(0),
+    uf_inc_re: new Float64Array(n).fill(1),
+    uf_inc_im: new Float64Array(n).fill(0),
+  };
+  const result2 = prepareSParamData([port2], freq);
+  assert(result2.s11_dB[0] < -100, `S11 = ${result2.s11_dB[0].toFixed(1)} dB (expected << 0 dB)`);
+}
+
+// -----------------------------------------------------------------------
+// Test 38: Visualization - prepareSmithData
+// -----------------------------------------------------------------------
+function testPrepareSmithData() {
+  console.log('\n=== Test: prepareSmithData ===');
+
+  const n = 5;
+  const freq = new Float64Array(n);
+  for (let i = 0; i < n; i++) freq[i] = (i + 1) * 1e9;
+
+  const port = {
+    uf_ref_re: new Float64Array([0.5, 0.3, 0.1, 0, -0.1]),
+    uf_ref_im: new Float64Array([0, 0.1, 0.2, 0, -0.2]),
+    uf_inc_re: new Float64Array(n).fill(1),
+    uf_inc_im: new Float64Array(n).fill(0),
+  };
+
+  const result = prepareSmithData(port, freq);
+  assert(result.gamma_re.length === n, 'Smith data has gamma_re');
+  assert(result.gamma_im.length === n, 'Smith data has gamma_im');
+  assert(result.freq.length === n, 'Smith data has freq');
+  assert(Math.abs(result.gamma_re[0] - 0.5) < 1e-10, 'gamma_re[0] = 0.5');
+  assert(Math.abs(result.gamma_im[1] - 0.1) < 1e-10, 'gamma_im[1] = 0.1');
+}
+
+// -----------------------------------------------------------------------
+// Test 39: Visualization - prepareRadiationPattern
+// -----------------------------------------------------------------------
+function testPrepareRadiationPattern() {
+  console.log('\n=== Test: prepareRadiationPattern ===');
+
+  const nTheta = 5;
+  const nPhi = 4;
+  const theta = new Float64Array(nTheta);
+  const phi = new Float64Array(nPhi);
+  for (let i = 0; i < nTheta; i++) theta[i] = i * Math.PI / (nTheta - 1);
+  for (let i = 0; i < nPhi; i++) phi[i] = i * Math.PI / 2;
+
+  // E_norm: one value per (theta, phi) pair
+  const E_norm = new Float64Array(nTheta * nPhi);
+  for (let t = 0; t < nTheta; t++) {
+    for (let p = 0; p < nPhi; p++) {
+      E_norm[t * nPhi + p] = Math.sin(theta[t]); // dipole-like pattern
+    }
+  }
+
+  const nf2ffResult = {
+    theta, phi,
+    E_norm: [E_norm],
+  };
+
+  // Phi cut at phi=0
+  const phiCut = prepareRadiationPattern(nf2ffResult, 'phi', 0);
+  assert(phiCut.angles.length === nTheta, 'Phi cut has nTheta angles');
+  assert(phiCut.pattern_dB.length === nTheta, 'Phi cut has nTheta pattern values');
+  assert(phiCut.pattern_dB[0] < -10, 'Pattern at theta=0 is low (end-fire null)');
+
+  // Theta cut at theta=pi/2
+  const thetaCut = prepareRadiationPattern(nf2ffResult, 'theta', Math.PI / 2);
+  assert(thetaCut.angles.length === nPhi, 'Theta cut has nPhi angles');
+  assert(thetaCut.pattern_dB.length === nPhi, 'Theta cut has nPhi pattern values');
+}
+
+// -----------------------------------------------------------------------
+// Test 40: Visualization - prepareImpedanceData
+// -----------------------------------------------------------------------
+function testPrepareImpedanceData() {
+  console.log('\n=== Test: prepareImpedanceData ===');
+
+  const n = 5;
+  const freq = new Float64Array(n);
+  for (let i = 0; i < n; i++) freq[i] = (i + 1) * 1e9;
+
+  // gamma = 0 => Z = Zref = 50 Ohm, VSWR = 1
+  const port = {
+    uf_ref_re: new Float64Array(n).fill(0),
+    uf_ref_im: new Float64Array(n).fill(0),
+    uf_inc_re: new Float64Array(n).fill(1),
+    uf_inc_im: new Float64Array(n).fill(0),
+    Z_ref: 50,
+  };
+
+  const result = prepareImpedanceData(port, freq);
+  assert(result.freq.length === n, 'Impedance data has freq');
+  assert(result.z_re.length === n, 'Impedance data has z_re');
+  assert(result.z_im.length === n, 'Impedance data has z_im');
+  assert(result.vswr.length === n, 'Impedance data has vswr');
+  assert(Math.abs(result.z_re[0] - 50) < 0.01, `z_re = ${result.z_re[0].toFixed(2)} (expected 50)`);
+  assert(Math.abs(result.z_im[0]) < 0.01, `z_im = ${result.z_im[0].toFixed(4)} (expected 0)`);
+  assert(Math.abs(result.vswr[0] - 1) < 0.01, `VSWR = ${result.vswr[0].toFixed(4)} (expected 1.0)`);
+}
+
+// -----------------------------------------------------------------------
+// Test 41: Visualization - prepareTimeDomainData
+// -----------------------------------------------------------------------
+function testPrepareTimeDomainData() {
+  console.log('\n=== Test: prepareTimeDomainData ===');
+
+  const probeData = {
+    time: new Float64Array([0, 1e-9, 2e-9, 3e-9]),
+    values: new Float64Array([0, 0.5, 1.0, 0.5]),
+  };
+
+  // ns conversion
+  const result = prepareTimeDomainData(probeData, 'ns', 'voltage');
+  assert(result.time.length === 4, 'Time domain data has 4 samples');
+  assert(Math.abs(result.time[1] - 1.0) < 1e-10, `time[1] = ${result.time[1]} ns (expected 1.0)`);
+  assert(result.values[2] === 1.0, 'values preserved');
+  assert(result.label === 'voltage', 'label preserved');
+
+  // us conversion
+  const result2 = prepareTimeDomainData(probeData, 'us');
+  assert(Math.abs(result2.time[1] - 0.001) < 1e-10, `time[1] = ${result2.time[1]} us (expected 0.001)`);
+
+  // default (seconds)
+  const result3 = prepareTimeDomainData(probeData);
+  assert(result3.time[1] === 1e-9, 'Default unit is seconds');
+}
+
+// -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
 async function main() {
@@ -1198,6 +1543,25 @@ async function main() {
   testCurveXML();
   testSimWaveguidePort();
   testNF2FFResult();
+
+  // Phase 2 new primitives
+  testSphereXML();
+  testSphericalShellXML();
+  testPolygonXML();
+  testLinPolyXML();
+  testRotPolyXML();
+  testWireXML();
+
+  // Phase 2 grid and XML
+  testSmoothGrid();
+  testReadFromXMLStub();
+
+  // Phase 2 visualization data
+  testPrepareSParamData();
+  testPrepareSmithData();
+  testPrepareRadiationPattern();
+  testPrepareImpedanceData();
+  testPrepareTimeDomainData();
 
   // WASM integration tests
   await testWasmCavityViaAPI();

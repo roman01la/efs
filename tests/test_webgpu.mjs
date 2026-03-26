@@ -9,6 +9,7 @@
 
 import { CPUFDTDEngine } from '../src/webgpu-fdtd.mjs';
 import {
+    WebGPUEngine,
     UPDATE_VOLTAGE_WGSL, UPDATE_CURRENT_WGSL, UPDATE_PML_WGSL, EXCITATION_WGSL,
     LORENTZ_ADE_WGSL, TFSF_WGSL, LUMPED_RLC_WGSL, MUR_ABC_WGSL, STEADY_STATE_WGSL,
 } from '../src/webgpu-engine.mjs';
@@ -83,6 +84,32 @@ function createFreeSpaceCoefficients(Nx, Ny, Nz) {
  */
 function idx(n, x, y, z, Nx, Ny, Nz) {
     return n * Nx * Ny * Nz + x * Ny * Nz + y * Nz + z;
+}
+
+/**
+ * Create a mock WASM OpenEMS instance that mimics the embind interface.
+ * Returns an object with getGridSize(), getVV(), getVI(), getII(), getIV()
+ * that return embind-like vector objects with .size(), .get(i), .delete().
+ */
+function createMockWASMInstance(Nx, Ny, Nz) {
+    const total = 3 * Nx * Ny * Nz;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+
+    function makeEmbindVector(arr) {
+        return {
+            size() { return arr.length; },
+            get(i) { return arr[i]; },
+            delete() { /* no-op for mock */ },
+        };
+    }
+
+    return {
+        getGridSize() { return makeEmbindVector(new Uint32Array([Nx, Ny, Nz])); },
+        getVV() { return makeEmbindVector(coeffs.vv); },
+        getVI() { return makeEmbindVector(coeffs.vi); },
+        getII() { return makeEmbindVector(coeffs.ii); },
+        getIV() { return makeEmbindVector(coeffs.iv); },
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -1451,15 +1478,15 @@ section('WASM-GPU Bridge — PML Validation');
 }
 
 // ---------------------------------------------------------------------------
-// Test 28: WASM-GPU Bridge — configureFromWASM placeholder
+// Test 28: WASM-GPU Bridge — configureFromWASM validation
 // ---------------------------------------------------------------------------
 
-section('WASM-GPU Bridge — WASM Placeholder');
+section('WASM-GPU Bridge — WASM configureFromWASM');
 
 {
     const bridge = new WASMGPUBridge();
 
-    // Should throw with helpful message about missing embind methods
+    // Should throw with helpful message when no getGridSize method
     let threw = false;
     let message = '';
     try {
@@ -1468,9 +1495,38 @@ section('WASM-GPU Bridge — WASM Placeholder');
         threw = true;
         message = e.message;
     }
-    assert(threw, 'Bridge.configureFromWASM throws for incomplete WASM module');
-    assert(message.includes('embind_api.cpp'),
-        'Error message mentions embind_api.cpp requirements');
+    assert(threw, 'Bridge.configureFromWASM throws for incomplete WASM instance');
+    assert(message.includes('getGridSize'),
+        'Error message mentions getGridSize requirement');
+
+    // Test with a mock WASM instance that mimics embind interface
+    const mockEms = createMockWASMInstance(4, 3, 3);
+    const bridge2 = new WASMGPUBridge();
+    bridge2.configureFromWASM(mockEms);
+
+    const config = bridge2.getConfig();
+    assert(config !== null, 'configureFromWASM sets config');
+    assert(config.gridSize[0] === 4 && config.gridSize[1] === 3 && config.gridSize[2] === 3,
+        'configureFromWASM extracts correct grid size');
+    assert(config.coefficients.vv.length === 3 * 4 * 3 * 3,
+        'configureFromWASM extracts vv with correct length');
+    assert(config.coefficients.vi.length === 3 * 4 * 3 * 3,
+        'configureFromWASM extracts vi with correct length');
+    assert(config.coefficients.ii.length === 3 * 4 * 3 * 3,
+        'configureFromWASM extracts ii with correct length');
+    assert(config.coefficients.iv.length === 3 * 4 * 3 * 3,
+        'configureFromWASM extracts iv with correct length');
+
+    // Verify values (mock fills with 1.0 for vv/ii, 0.3 for vi/iv)
+    assert(config.coefficients.vv[0] === 1.0, 'configureFromWASM vv[0] = 1.0');
+    assertApprox(config.coefficients.vi[0], 0.3, 1e-6, 'configureFromWASM vi[0] ~ 0.3');
+
+    // Verify CPU engine can be created from WASM-extracted config
+    const engine = bridge2.createCPUEngine();
+    assert(engine.Nx === 4 && engine.Ny === 3 && engine.Nz === 3,
+        'CPU engine from WASM config has correct grid dimensions');
+    engine.iterate(5);
+    assert(engine.numTS === 5, 'CPU engine from WASM config iterates correctly');
 }
 
 // ---------------------------------------------------------------------------
@@ -2473,6 +2529,79 @@ section('New Shader Source Structure');
     assert(STEADY_STATE_WGSL.includes('SSParams'), 'SS WGSL has SSParams struct');
     assert(STEADY_STATE_WGSL.includes('energy_period1'), 'SS WGSL has period1 buffer');
     assert(STEADY_STATE_WGSL.includes('energy_period2'), 'SS WGSL has period2 buffer');
+}
+
+// ---------------------------------------------------------------------------
+// Test: WebGPUEngine.dispatchIfActive exists as a method
+// ---------------------------------------------------------------------------
+
+section('WebGPUEngine dispatchIfActive Helper');
+
+{
+    assert(typeof WebGPUEngine.prototype.dispatchIfActive === 'function',
+        'WebGPUEngine has dispatchIfActive method');
+
+    // Verify the method signature accepts 4 args
+    assert(WebGPUEngine.prototype.dispatchIfActive.length === 4,
+        'dispatchIfActive accepts 4 parameters (encoder, pipeline, bindGroups, dispatchSize)');
+}
+
+// ---------------------------------------------------------------------------
+// Test: configureFromWASM with mock — empty grid error
+// ---------------------------------------------------------------------------
+
+section('WASM-GPU Bridge — configureFromWASM Empty Grid');
+
+{
+    const bridge = new WASMGPUBridge();
+
+    // Mock that returns empty grid size
+    const emptyMock = {
+        getGridSize() {
+            return { size() { return 0; }, get() { return 0; }, delete() {} };
+        },
+    };
+
+    let threw = false;
+    try {
+        bridge.configureFromWASM(emptyMock);
+    } catch (e) {
+        threw = true;
+    }
+    assert(threw, 'configureFromWASM throws on empty grid size');
+}
+
+// ---------------------------------------------------------------------------
+// Test: configureFromWASM creates working engine pipeline
+// ---------------------------------------------------------------------------
+
+section('WASM-GPU Bridge — configureFromWASM Full Pipeline');
+
+{
+    const mockEms = createMockWASMInstance(6, 4, 4);
+    const bridge = new WASMGPUBridge();
+    bridge.configureFromWASM(mockEms);
+
+    const engine = bridge.createCPUEngine();
+
+    // Inject a pulse and run
+    engine.volt[idx(0, 3, 2, 2, 6, 4, 4)] = 1.0;
+    engine.iterate(10);
+
+    // Verify fields evolved (not all zero)
+    let maxVolt = 0;
+    for (let i = 0; i < engine.volt.length; i++) {
+        maxVolt = Math.max(maxVolt, Math.abs(engine.volt[i]));
+    }
+    assert(maxVolt > 0, 'WASM-configured engine evolves fields after pulse injection');
+    assert(engine.numTS === 10, 'WASM-configured engine ran 10 timesteps');
+
+    // Verify all fields are finite
+    let allFinite = true;
+    for (let i = 0; i < engine.volt.length; i++) {
+        if (!isFinite(engine.volt[i])) { allFinite = false; break; }
+    }
+    assert(allFinite, 'WASM-configured engine: all fields finite');
 }
 
 // ---------------------------------------------------------------------------
