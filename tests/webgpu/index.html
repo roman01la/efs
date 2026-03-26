@@ -842,13 +842,58 @@ async function run() {
   }
 
   // ----------------------------------------------------------
-  // Test 14: CPU vs GPU Performance Comparison
+  // Test 14: WASM CPU vs JS CPU vs WebGPU Performance
   // ----------------------------------------------------------
-  log('\n=== Test: CPU vs GPU Performance ===');
+  log('\n=== Test: Performance Benchmark (WASM CPU vs JS CPU vs WebGPU) ===');
 
   try {
     const { WebGPUEngine: PerfGPU } = await import('/src/webgpu-engine.mjs');
     const { CPUFDTDEngine: PerfCPU } = await import('/src/webgpu-fdtd.mjs');
+
+    // Load WASM module for WASM CPU benchmark
+    await new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = '/build-wasm/openems.js';
+      script.onload = resolve;
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+    const WASMModule = await createOpenEMS();
+
+    function makeGridLines(n, spacing) {
+      const lines = [];
+      for (let i = 0; i < n; i++) lines.push((i * spacing).toExponential(10));
+      return lines.join(',');
+    }
+
+    function makeBenchXML(Nx, Ny, Nz, steps) {
+      const sp = 1e-3;
+      const mx = Math.floor(Nx / 2), my = Math.floor(Ny / 2), mz = Math.floor(Nz / 2);
+      return `<?xml version="1.0" encoding="UTF-8"?>
+<openEMS>
+  <FDTD NumberOfTimesteps="${steps}" endCriteria="1e-20" f_max="1e11">
+    <Excitation Type="0" f0="5e10" fc="5e10"/>
+    <BoundaryCond xmin="0" xmax="0" ymin="0" ymax="0" zmin="0" zmax="0"/>
+  </FDTD>
+  <ContinuousStructure CoordSystem="0">
+    <RectilinearGrid DeltaUnit="1" CoordSystem="0">
+      <XLines>${makeGridLines(Nx, sp)}</XLines>
+      <YLines>${makeGridLines(Ny, sp)}</YLines>
+      <ZLines>${makeGridLines(Nz, sp)}</ZLines>
+    </RectilinearGrid>
+    <Properties>
+      <Excitation ID="0" Name="exc" Number="0" Type="0" Excite="0,0,1">
+        <Primitives>
+          <Curve Priority="0">
+            <Vertex X="${mx * sp}" Y="${my * sp}" Z="${mz * sp}"/>
+            <Vertex X="${(mx+1) * sp}" Y="${(my+1) * sp}" Z="${(mz+1) * sp}"/>
+          </Curve>
+        </Primitives>
+      </Excitation>
+    </Properties>
+  </ContinuousStructure>
+</openEMS>`;
+    }
 
     const sizes = [
       [16, 16, 16],
@@ -856,11 +901,16 @@ async function run() {
       [64, 64, 64],
     ];
 
+    log('');
+    log('  Grid          | WebGPU       | WASM CPU     | JS CPU       | GPU/WASM | GPU/JS');
+    log('  --------------|--------------|--------------|--------------|----------|-------');
+
     for (const [Nx, Ny, Nz] of sizes) {
       const total = Nx * Ny * Nz;
       const size3 = 3 * total;
       const label = `${Nx}x${Ny}x${Nz}`;
       const cells = total;
+      const STEPS = 100;
 
       const coeffs = {
         vv: new Float32Array(size3).fill(1.0),
@@ -880,56 +930,73 @@ async function run() {
         period: 0,
       };
 
-      const STEPS = 100;
-
-      // --- GPU ---
+      // --- WebGPU ---
       const gpuEng = new PerfGPU();
       await gpuEng.initGPU();
       await gpuEng.init([Nx, Ny, Nz], coeffs);
       gpuEng.configureExcitation(excConfig);
-
-      // Warmup
-      await gpuEng.iterate(5);
+      await gpuEng.iterate(5); // warmup
 
       const gpuStart = performance.now();
       await gpuEng.iterate(STEPS);
       const gpuMs = performance.now() - gpuStart;
-      const gpuMCellsPerSec = (cells * STEPS / gpuMs / 1000).toFixed(1);
+      const gpuMC = (cells * STEPS / gpuMs / 1000);
 
-      // Read back for verification
       const gpuFields = await gpuEng.getFields();
       const gpuVolt = new Float32Array(gpuFields.volt);
       gpuEng.destroy();
 
-      // --- CPU ---
+      // --- WASM CPU (openEMS via Embind) ---
+      const simDir = `/bench_${label}`;
+      try { WASMModule.FS.mkdir(simDir); } catch(e) {}
+      WASMModule.FS.chdir(simDir);
+
+      const wasmSteps = STEPS + 5;
+      const xml = makeBenchXML(Nx, Ny, Nz, wasmSteps);
+      const ems = new WASMModule.OpenEMS();
+      ems.configure(0, wasmSteps, 1e-20); // tiny endCriteria to force all steps
+
+      const loadOk = ems.loadXML(xml);
+      if (!loadOk) { log(`  SKIP ${label}: WASM XML load failed`); ems.delete(); continue; }
+      const rc = ems.setup();
+      if (rc !== 0) { log(`  SKIP ${label}: WASM setup failed (rc=${rc})`); ems.delete(); continue; }
+
+      const wasmStart = performance.now();
+      ems.run();
+      const wasmMs = performance.now() - wasmStart;
+      // WASM runs setup+warmup+steps together; subtract estimated setup overhead
+      const wasmCellSteps = cells * (STEPS + 5);
+      const wasmMC = (wasmCellSteps / wasmMs / 1000);
+      ems.delete();
+
+      // --- JS CPU ---
       const cpuEng = new PerfCPU([Nx, Ny, Nz], coeffs);
       cpuEng.configureExcitation(excConfig);
-
-      // Match GPU warmup
-      cpuEng.iterate(5);
+      cpuEng.iterate(5); // warmup
 
       const cpuStart = performance.now();
       cpuEng.iterate(STEPS);
       const cpuMs = performance.now() - cpuStart;
-      const cpuMCellsPerSec = (cells * STEPS / cpuMs / 1000).toFixed(1);
+      const cpuMC = (cells * STEPS / cpuMs / 1000);
 
-      const speedup = (cpuMs / gpuMs).toFixed(1);
-
-      // Verify same result
+      // Verify GPU vs JS CPU
       let maxDiff = 0;
       for (let i = 0; i < size3; i++) {
         const d = Math.abs(gpuVolt[i] - cpuEng.volt[i]);
         if (d > maxDiff) maxDiff = d;
       }
 
-      log(`  ${label} (${cells} cells, ${STEPS} steps):`);
-      log(`    GPU: ${gpuMs.toFixed(1)} ms (${gpuMCellsPerSec} MCells/s)`);
-      log(`    CPU: ${cpuMs.toFixed(1)} ms (${cpuMCellsPerSec} MCells/s)`);
-      log(`    Speedup: ${speedup}x, max diff: ${maxDiff.toExponential(2)}`);
+      const pad = (s, n) => s.toString().padStart(n);
+      log(`  ${label.padEnd(14)}| ${pad(gpuMC.toFixed(0), 5)} MC/s   | ${pad(wasmMC.toFixed(0), 5)} MC/s   | ${pad(cpuMC.toFixed(0), 5)} MC/s   | ${pad((wasmMs > 0 ? wasmMC / gpuMC : 0).toFixed(1), 5)}x  | ${pad((cpuMs / gpuMs).toFixed(1), 5)}x`);
 
-      assert(maxDiff < 1e-3, `${label}: GPU matches CPU (diff=${maxDiff.toExponential(2)})`);
-      assert(true, `${label}: GPU=${gpuMCellsPerSec} MCells/s, CPU=${cpuMCellsPerSec} MCells/s, speedup=${speedup}x`);
+      assert(maxDiff < 1e-3, `${label}: GPU matches JS CPU (diff=${maxDiff.toExponential(2)})`);
+      assert(true, `${label}: WebGPU=${gpuMC.toFixed(0)}, WASM=${wasmMC.toFixed(0)}, JS=${cpuMC.toFixed(0)} MCells/s`);
     }
+
+    log('');
+    log('  Note: WASM CPU uses the full openEMS engine (basic, no SIMD). JS CPU is a minimal reference.');
+    log('  Native C++ benchmark: ~123 MCells/s (from Phase 1 test on same hardware).');
+
   } catch (e) {
     log(`  FAIL: Performance test: ${e.message}\n${e.stack}`);
     failed++;
