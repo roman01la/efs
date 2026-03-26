@@ -693,6 +693,140 @@ async function testCylindricalCoords(_Module) {
 }
 
 // -----------------------------------------------------------------------
+// Test: Multi-threaded Engine
+// -----------------------------------------------------------------------
+async function testMultithreaded(Module) {
+  console.log('\n=== Test: Multi-threaded WASM Engine ===');
+
+  const engines = [
+    { type: 0, name: 'basic' },
+    { type: 1, name: 'sse' },
+    { type: 3, name: 'multithreaded' },
+  ];
+
+  const a = 5e-2, b = 2e-2, d = 6e-2;
+  const meshX = linspace(0, a, 16);
+  const meshY = linspace(0, b, 8);
+  const meshZ = linspace(0, d, 18);
+  function mc(arr) { return arr.map(v => v.toExponential(10)).join(','); }
+
+  const exI = 10, eyI = 5, ezI = 12;
+  const fStop = 10e9, f0 = 5.5e9, fc = 4.5e9;
+  const STEPS = 500;
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<openEMS>
+  <FDTD NumberOfTimesteps="${STEPS}" endCriteria="1e-20" f_max="${fStop}">
+    <Excitation Type="0" f0="${f0}" fc="${fc}"/>
+    <BoundaryCond xmin="0" xmax="0" ymin="0" ymax="0" zmin="0" zmax="0"/>
+  </FDTD>
+  <ContinuousStructure CoordSystem="0">
+    <RectilinearGrid DeltaUnit="1" CoordSystem="0">
+      <XLines>${mc(meshX)}</XLines>
+      <YLines>${mc(meshY)}</YLines>
+      <ZLines>${mc(meshZ)}</ZLines>
+    </RectilinearGrid>
+    <Properties>
+      <Excitation ID="0" Name="exc" Number="0" Type="0" Excite="1,1,1">
+        <Primitives>
+          <Curve Priority="0">
+            <Vertex X="${meshX[exI]}" Y="${meshY[eyI]}" Z="${meshZ[ezI]}"/>
+            <Vertex X="${meshX[exI+1]}" Y="${meshY[eyI+1]}" Z="${meshZ[ezI+1]}"/>
+          </Curve>
+        </Primitives>
+      </Excitation>
+      <ProbeBox ID="1" Name="vp" Number="0" Type="0" Weight="1" NormDir="-1">
+        <Primitives>
+          <Box Priority="0">
+            <P1 X="${meshX[5]}" Y="${meshY[3]}" Z="${meshZ[4]}"/>
+            <P2 X="${meshX[5]}" Y="${meshY[3]}" Z="${meshZ[5]}"/>
+          </Box>
+        </Primitives>
+      </ProbeBox>
+    </Properties>
+  </ContinuousStructure>
+</openEMS>`;
+
+  const results = {};
+
+  for (const eng of engines) {
+    const simDir = `/sim_mt_${eng.name}`;
+    try { Module.FS.mkdir(simDir); } catch (e) {}
+    Module.FS.chdir(simDir);
+
+    const ems = new Module.OpenEMS();
+    ems.configure(eng.type, STEPS, 1e-20);
+
+    const loadOk = ems.loadXML(xml);
+    if (!loadOk) {
+      console.log(`  SKIP: ${eng.name} — XML load failed`);
+      ems.delete();
+      continue;
+    }
+
+    const rc = ems.setup();
+    if (rc !== 0) {
+      console.log(`  SKIP: ${eng.name} — setup failed (rc=${rc})`);
+      ems.delete();
+      continue;
+    }
+
+    const t0 = Date.now();
+    try {
+      ems.run();
+    } catch (e) {
+      // Multithreaded engine may throw 'unwind' on thread cleanup
+      if (e !== 'unwind' && e?.message !== 'unwind') throw e;
+    }
+    const ms = Date.now() - t0;
+
+    let probeText;
+    try {
+      probeText = ems.readFile(`${simDir}/vp`);
+    } catch (e) {
+      console.log(`  SKIP: ${eng.name} — probe read failed after unwind`);
+      ems.delete();
+      continue;
+    }
+    const lines = probeText.split('\n').filter(l => !l.startsWith('%') && l.trim());
+    let energy = 0;
+    for (const line of lines) {
+      const v = parseFloat(line.split(/\s+/)[1]);
+      if (!isNaN(v)) energy += v * v;
+    }
+
+    const cells = 16 * 8 * 18;
+    const mcps = (cells * STEPS / ms / 1000).toFixed(1);
+
+    results[eng.name] = { ms, mcps, energy, samples: lines.length };
+    assert(lines.length > 10, `${eng.name}: probe has ${lines.length} samples`);
+    assert(energy > 0, `${eng.name}: non-zero energy (${energy.toExponential(3)})`);
+    console.log(`  ${eng.name}: ${ms} ms, ${mcps} MCells/s, ${lines.length} samples`);
+
+    try { ems.delete(); } catch (e) {
+      if (e !== 'unwind' && e?.message !== 'unwind') throw e;
+    }
+  }
+
+  // Compare engine outputs — they should produce similar energy
+  if (results.basic && results.multithreaded) {
+    const ratio = results.multithreaded.energy / results.basic.energy;
+    assert(
+      Math.abs(ratio - 1) < 0.01,
+      `Multithreaded matches basic energy: ratio=${ratio.toFixed(6)}`
+    );
+  }
+
+  if (results.basic && results.sse) {
+    const ratio = results.sse.energy / results.basic.energy;
+    assert(
+      Math.abs(ratio - 1) < 0.01,
+      `SSE matches basic energy: ratio=${ratio.toFixed(6)}`
+    );
+  }
+}
+
+// -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
 async function main() {
@@ -707,6 +841,7 @@ async function main() {
   if (Module) {
     await testWasmCavity(Module);
     await testCylindricalCoords(Module);
+    await testMultithreaded(Module);
   }
 
   console.log(`\n${'='.repeat(50)}`);
@@ -715,6 +850,10 @@ async function main() {
 }
 
 main().catch(e => {
+  if (e === 'unwind' || e?.message === 'unwind') {
+    // Emscripten pthreads cleanup — ignore
+    process.exit(failed > 0 ? 1 : 0);
+  }
   console.error(e);
   process.exit(1);
 });

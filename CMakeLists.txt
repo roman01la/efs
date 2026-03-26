@@ -49,5 +49,8 @@ if (EMSCRIPTEN)
     "-sSTACK_SIZE=2097152"
     "-sNO_EXIT_RUNTIME=0"
     "-sENVIRONMENT=web,node"
+    "-pthread"
+    "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency||4"
+    "-sDEFAULT_PTHREAD_STACK_SIZE=2097152"
   )
 endif()
