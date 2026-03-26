@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>openEMS WebGPU Tests</title></head>
+<body>
+<pre id="output"></pre>
+<script type="module">
+
+const log = (msg) => {
+  document.getElementById('output').textContent += msg + '\n';
+  console.log(msg);
+};
+
+let passed = 0, failed = 0;
+
+function assert(cond, msg) {
+  if (!cond) { log(`  FAIL: ${msg}`); failed++; return false; }
+  log(`  PASS: ${msg}`); passed++; return true;
+}
+
+function assertApprox(actual, expected, tol, msg) {
+  const diff = Math.abs(actual - expected);
+  const ok = diff <= tol;
+  if (!ok) { log(`  FAIL: ${msg} (got ${actual}, expected ${expected}, diff=${diff})`); failed++; return false; }
+  log(`  PASS: ${msg}`); passed++; return true;
+}
+
+async function run() {
+  log('openEMS WebGPU Browser Tests\n');
+
+  // ----------------------------------------------------------
+  // Test 1: WebGPU availability
+  // ----------------------------------------------------------
+  log('=== Test: WebGPU Availability ===');
+  if (!navigator.gpu) {
+    log('  FAIL: WebGPU not available in this browser');
+    failed++;
+    finish();
+    return;
+  }
+  assert(true, 'navigator.gpu exists');
+
+  const adapter = await navigator.gpu.requestAdapter();
+  assert(adapter !== null, 'GPU adapter obtained');
+  if (!adapter) { finish(); return; }
+
+  const device = await adapter.requestDevice();
+  assert(device !== null, 'GPU device obtained');
+
+  log(`  INFO: adapter=${adapter.info?.device || 'unknown'}`);
+
+  // ----------------------------------------------------------
+  // Test 2: Voltage update shader compilation
+  // ----------------------------------------------------------
+  log('\n=== Test: Voltage Shader Compilation ===');
+
+  const voltageWGSL = await (await fetch('/src/shaders/update_voltage.wgsl')).text();
+  assert(voltageWGSL.length > 100, `Voltage shader loaded (${voltageWGSL.length} chars)`);
+
+  let voltageModule;
+  try {
+    voltageModule = device.createShaderModule({ code: voltageWGSL });
+    const info = await voltageModule.getCompilationInfo();
+    const errors = info.messages.filter(m => m.type === 'error');
+    assert(errors.length === 0, `Voltage shader compiled (${errors.length} errors)`);
+    if (errors.length > 0) errors.forEach(e => log(`    ${e.message}`));
+  } catch (e) {
+    log(`  FAIL: Voltage shader compilation threw: ${e.message}`);
+    failed++;
+  }
+
+  // ----------------------------------------------------------
+  // Test 3: Current update shader compilation
+  // ----------------------------------------------------------
+  log('\n=== Test: Current Shader Compilation ===');
+
+  const currentWGSL = await (await fetch('/src/shaders/update_current.wgsl')).text();
+  let currentModule;
+  try {
+    currentModule = device.createShaderModule({ code: currentWGSL });
+    const info = await currentModule.getCompilationInfo();
+    const errors = info.messages.filter(m => m.type === 'error');
+    assert(errors.length === 0, `Current shader compiled (${errors.length} errors)`);
+  } catch (e) {
+    log(`  FAIL: Current shader compilation threw: ${e.message}`);
+    failed++;
+  }
+
+  // ----------------------------------------------------------
+  // Test 4: Excitation shader compilation
+  // ----------------------------------------------------------
+  log('\n=== Test: Excitation Shader Compilation ===');
+
+  const excWGSL = await (await fetch('/src/shaders/excitation.wgsl')).text();
+  let excModule;
+  try {
+    excModule = device.createShaderModule({ code: excWGSL });
+    const info = await excModule.getCompilationInfo();
+    const errors = info.messages.filter(m => m.type === 'error');
+    assert(errors.length === 0, `Excitation shader compiled (${errors.length} errors)`);
+  } catch (e) {
+    log(`  FAIL: Excitation shader compilation threw: ${e.message}`);
+    failed++;
+  }
+
+  // ----------------------------------------------------------
+  // Test 5: PML shader compilation
+  // ----------------------------------------------------------
+  log('\n=== Test: PML Shader Compilation ===');
+
+  const pmlWGSL = await (await fetch('/src/shaders/update_pml.wgsl')).text();
+  let pmlModule;
+  try {
+    pmlModule = device.createShaderModule({ code: pmlWGSL });
+    const info = await pmlModule.getCompilationInfo();
+    const errors = info.messages.filter(m => m.type === 'error');
+    assert(errors.length === 0, `PML shader compiled (${errors.length} errors)`);
+  } catch (e) {
+    log(`  FAIL: PML shader compilation threw: ${e.message}`);
+    failed++;
+  }
+
+  // ----------------------------------------------------------
+  // Test 6: Full voltage update pipeline + dispatch
+  // ----------------------------------------------------------
+  log('\n=== Test: Voltage Update Compute Pipeline ===');
+
+  try {
+    const Nx = 8, Ny = 8, Nz = 8;
+    const totalCells = Nx * Ny * Nz;
+    const bufSize = 3 * totalCells * 4; // 3 components, f32
+
+    const voltBuffer = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const currBuffer = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const vvBuffer = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    const viBuffer = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+
+    // Initialize vv=1.0 (no damping), vi=0.5
+    const ones = new Float32Array(3 * totalCells).fill(1.0);
+    const halves = new Float32Array(3 * totalCells).fill(0.5);
+    device.queue.writeBuffer(vvBuffer, 0, ones);
+    device.queue.writeBuffer(viBuffer, 0, halves);
+
+    // Set a known current pattern
+    const currData = new Float32Array(3 * totalCells);
+    for (let i = 0; i < currData.length; i++) currData[i] = Math.sin(i * 0.1);
+    device.queue.writeBuffer(currBuffer, 0, currData);
+
+    // Params uniform: numLines(vec3u32) + numTS(u32) + shift(vec3i32) + pad(u32) = 32 bytes
+    const paramsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const paramsData = new ArrayBuffer(32);
+    new Uint32Array(paramsData, 0, 4).set([Nx, Ny, Nz, 0]);
+    new Int32Array(paramsData, 16, 4).set([1, 1, 1, 0]);
+    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+
+    const pipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: voltageModule, entryPoint: 'update_voltages' },
+    });
+
+    const bindGroup0 = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: voltBuffer } },
+        { binding: 1, resource: { buffer: currBuffer } },
+        { binding: 2, resource: { buffer: paramsBuffer } },
+      ],
+    });
+    const bindGroup1 = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(1),
+      entries: [
+        { binding: 0, resource: { buffer: vvBuffer } },
+        { binding: 1, resource: { buffer: viBuffer } },
+      ],
+    });
+
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup0);
+    pass.setBindGroup(1, bindGroup1);
+    pass.dispatchWorkgroups(Math.ceil(Nx / 4), Math.ceil(Ny / 4), Math.ceil(Nz / 4));
+    pass.end();
+
+    // Readback
+    const readback = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    encoder.copyBufferToBuffer(voltBuffer, 0, readback, 0, bufSize);
+    device.queue.submit([encoder.finish()]);
+
+    await readback.mapAsync(GPUMapMode.READ);
+    const result = new Float32Array(readback.getMappedRange().slice(0));
+    readback.unmap();
+
+    assert(result.length === 3 * totalCells, `Output size correct (${result.length})`);
+
+    let hasNonZero = false;
+    let hasNaN = false;
+    for (let i = 0; i < result.length; i++) {
+      if (result[i] !== 0) hasNonZero = true;
+      if (isNaN(result[i])) hasNaN = true;
+    }
+    assert(hasNonZero, 'Voltage update produced non-zero results');
+    assert(!hasNaN, 'No NaN in voltage output');
+
+    // Verify against CPU reference
+    const cpuVolt = new Float32Array(3 * totalCells);
+    const idx = (n, x, y, z) => n * Nx * Ny * Nz + x * Ny * Nz + y * Nz + z;
+
+    for (let x = 0; x < Nx; x++) {
+      const shiftX = x > 0 ? 1 : 0;
+      for (let y = 0; y < Ny; y++) {
+        const shiftY = y > 0 ? 1 : 0;
+        for (let z = 0; z < Nz; z++) {
+          const shiftZ = z > 0 ? 1 : 0;
+
+          const exIdx = idx(0, x, y, z);
+          cpuVolt[exIdx] = ones[exIdx] * 0 + halves[exIdx] * (
+            currData[idx(2, x, y, z)] - currData[idx(2, x, y - shiftY, z)]
+            - currData[idx(1, x, y, z)] + currData[idx(1, x, y, z - shiftZ)]
+          );
+
+          const eyIdx = idx(1, x, y, z);
+          cpuVolt[eyIdx] = ones[eyIdx] * 0 + halves[eyIdx] * (
+            currData[idx(0, x, y, z)] - currData[idx(0, x, y, z - shiftZ)]
+            - currData[idx(2, x, y, z)] + currData[idx(2, x - shiftX, y, z)]
+          );
+
+          const ezIdx = idx(2, x, y, z);
+          cpuVolt[ezIdx] = ones[ezIdx] * 0 + halves[ezIdx] * (
+            currData[idx(1, x, y, z)] - currData[idx(1, x - shiftX, y, z)]
+            - currData[idx(0, x, y, z)] + currData[idx(0, x, y - shiftY, z)]
+          );
+        }
+      }
+    }
+
+    let maxDiff = 0;
+    for (let i = 0; i < result.length; i++) {
+      const d = Math.abs(result[i] - cpuVolt[i]);
+      if (d > maxDiff) maxDiff = d;
+    }
+    assert(maxDiff < 1e-5, `GPU matches CPU reference (max diff=${maxDiff.toExponential(3)})`);
+
+    voltBuffer.destroy(); currBuffer.destroy(); vvBuffer.destroy(); viBuffer.destroy();
+    paramsBuffer.destroy(); readback.destroy();
+    assert(true, 'Pipeline created and dispatched successfully');
+  } catch (e) {
+    log(`  FAIL: Pipeline test threw: ${e.message}`);
+    failed++;
+  }
+
+  // ----------------------------------------------------------
+  // Test 7: WASM module loading in browser
+  // ----------------------------------------------------------
+  log('\n=== Test: WASM Module in Browser ===');
+
+  try {
+    await new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = '/build-wasm/openems.js';
+      script.onload = resolve;
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+    assert(typeof createOpenEMS === 'function', 'WASM module factory loaded');
+
+    const Module = await createOpenEMS();
+    assert(Module !== null, 'WASM module initialized');
+    assert(typeof Module.OpenEMS === 'function', 'OpenEMS class available');
+
+    const ems = new Module.OpenEMS();
+    assert(typeof ems.configure === 'function', 'configure method exists');
+    assert(typeof ems.run === 'function', 'run method exists');
+    ems.delete();
+    assert(true, 'WASM module works in browser');
+  } catch (e) {
+    log(`  FAIL: WASM loading error: ${e.message}`);
+    failed++;
+  }
+
+  finish();
+}
+
+function finish() {
+  log(`\n${'='.repeat(50)}`);
+  log(`Results: ${passed} passed, ${failed} failed`);
+  window.__TEST_RESULTS__ = { passed, failed, done: true };
+}
+
+run().catch(e => {
+  log(`FATAL: ${e.message}\n${e.stack}`);
+  window.__TEST_RESULTS__ = { passed, failed: failed + 1, done: true };
+});
+
+</script>
+</body>
+</html>
