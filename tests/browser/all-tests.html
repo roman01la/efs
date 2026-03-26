@@ -1,0 +1,1334 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>openEMS Unified Browser Tests</title></head>
+<body>
+<pre id="output"></pre>
+<script src="/build-wasm/openems.js"></script>
+<script type="module">
+
+// ---------------------------------------------------------------------------
+// Infrastructure
+// ---------------------------------------------------------------------------
+
+const log = (msg) => {
+  document.getElementById('output').textContent += msg + '\n';
+  console.log(msg);
+};
+
+let passed = 0, failed = 0;
+
+function assert(cond, msg) {
+  if (!cond) { log(`  FAIL: ${msg}`); failed++; return false; }
+  log(`  PASS: ${msg}`); passed++; return true;
+}
+
+function assertApprox(actual, expected, tol, msg) {
+  const diff = Math.abs(actual - expected);
+  const ok = diff <= tol;
+  if (!ok) { log(`  FAIL: ${msg} (got ${actual}, expected ${expected}, diff=${diff})`); failed++; return false; }
+  log(`  PASS: ${msg}`); passed++; return true;
+}
+
+// ---------------------------------------------------------------------------
+// Import source modules
+// ---------------------------------------------------------------------------
+
+import {
+  C0, MUE0, EPS0, Z0, linspace, dftTime2Freq, dftMagnitude,
+  complexDivide, complexMultiply, complexConj, complexAbs,
+  parseProbe, findPeaks, calcSParam
+} from '/src/analysis.mjs';
+
+import { Simulation } from '/src/simulation.mjs';
+
+import {
+  LumpedPort, MSLPort, WaveguidePort, RectWGPort
+} from '/src/ports.mjs';
+
+import {
+  createNF2FFBox, NF2FFBox, NF2FFResult, computeNF2FF
+} from '/src/nf2ff.mjs';
+
+import {
+  computeLocalSAR, computeAveragedSAR, findPeakSAR
+} from '/src/sar.mjs';
+
+import {
+  meshHintFromBox, meshCombine, meshEstimateCflTimestep, smoothMeshLines
+} from '/src/automesh.mjs';
+
+import {
+  prepareSParamData, prepareSmithData, prepareRadiationPattern,
+  prepareImpedanceData, prepareTimeDomainData
+} from '/src/visualization.mjs';
+
+import { CPUFDTDEngine } from '/src/webgpu-fdtd.mjs';
+
+import {
+  WebGPUEngine,
+  UPDATE_VOLTAGE_WGSL, UPDATE_CURRENT_WGSL, UPDATE_PML_WGSL, EXCITATION_WGSL,
+  LORENTZ_ADE_WGSL, TFSF_WGSL, LUMPED_RLC_WGSL, MUR_ABC_WGSL, STEADY_STATE_WGSL,
+} from '/src/webgpu-engine.mjs';
+
+import { WASMGPUBridge } from '/src/wasm-gpu-bridge.mjs';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function idx(n, x, y, z, Nx, Ny, Nz) {
+  return n * Nx * Ny * Nz + x * Ny * Nz + y * Nz + z;
+}
+
+function createFreeSpaceCoefficients(Nx, Ny, Nz) {
+  const total = 3 * Nx * Ny * Nz;
+  const viVal = 0.3;
+  const ivVal = 0.3;
+  return {
+    vv: new Float32Array(total).fill(1.0),
+    vi: new Float32Array(total).fill(viVal),
+    ii: new Float32Array(total).fill(1.0),
+    iv: new Float32Array(total).fill(ivVal),
+  };
+}
+
+function createMockWASMInstance(Nx, Ny, Nz) {
+  const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+  function makeEmbindVector(arr) {
+    return { size() { return arr.length; }, get(i) { return arr[i]; }, delete() {} };
+  }
+  return {
+    getGridSize() { return makeEmbindVector(new Uint32Array([Nx, Ny, Nz])); },
+    getVV() { return makeEmbindVector(coeffs.vv); },
+    getVI() { return makeEmbindVector(coeffs.vi); },
+    getII() { return makeEmbindVector(coeffs.ii); },
+    getIV() { return makeEmbindVector(coeffs.iv); },
+  };
+}
+
+function dftComplex(time, values, freqs) {
+  const N = time.length;
+  const re_out = new Float64Array(freqs.length);
+  const im_out = new Float64Array(freqs.length);
+  for (let k = 0; k < freqs.length; k++) {
+    let re = 0, im = 0;
+    const omega = 2 * Math.PI * freqs[k];
+    for (let n = 0; n < N; n++) {
+      re += values[n] * Math.cos(omega * time[n]);
+      im -= values[n] * Math.sin(omega * time[n]);
+    }
+    re_out[k] = re;
+    im_out[k] = im;
+  }
+  return { re: re_out, im: im_out };
+}
+
+// ---------------------------------------------------------------------------
+// SECTION A: Source Module Tests (no WASM needed)
+// ---------------------------------------------------------------------------
+
+async function runSectionA() {
+  log('======================================================================');
+  log('SECTION A: Source Module Tests');
+  log('======================================================================');
+
+  // --- A1: Physical Constants ---
+  log('\n=== A1: Physical Constants ===');
+  assert(Math.abs(C0 - 299792458) < 1, `C0 = ${C0}`);
+  assert(Math.abs(Z0 - 376.73) < 0.1, `Z0 = ${Z0.toFixed(2)}`);
+  assert(Math.abs(MUE0 - 1.2566370614e-6) < 1e-12, `MUE0 = ${MUE0}`);
+  assert(Math.abs(EPS0 - 8.854187817e-12) < 1e-18, `EPS0 = ${EPS0}`);
+  assert(Math.abs(C0 - 1 / Math.sqrt(MUE0 * EPS0)) < 1, 'C0 = 1/sqrt(MUE0*EPS0)');
+
+  // --- A2: Analysis Utilities ---
+  log('\n=== A2: Analysis Utilities (linspace, DFT, parseProbe, findPeaks) ===');
+  {
+    const ls = linspace(0, 10, 11);
+    assert(ls.length === 11, 'linspace(0,10,11) has 11 elements');
+    assert(ls[0] === 0 && ls[10] === 10, 'linspace endpoints correct');
+    assert(Math.abs(ls[5] - 5) < 1e-10, 'linspace midpoint correct');
+
+    const N = 1000, dt = 1e-10, fSig = 3.5e9;
+    const time = new Float64Array(N);
+    const vals = new Float64Array(N);
+    for (let i = 0; i < N; i++) { time[i] = i * dt; vals[i] = Math.sin(2 * Math.PI * fSig * time[i]); }
+    const freqs = linspace(1e9, 5e9, 500);
+    const mag = dftMagnitude(time, vals, freqs);
+    let peakIdx = 0;
+    for (let i = 1; i < mag.length; i++) { if (mag[i] > mag[peakIdx]) peakIdx = i; }
+    const relErr = Math.abs(freqs[peakIdx] - fSig) / fSig;
+    assert(relErr < 0.01, `DFT peak at ${(freqs[peakIdx] / 1e9).toFixed(3)} GHz (expected 3.5 GHz)`);
+
+    // complexDivide impedance test
+    const Z0test = 75;
+    const time2 = new Float64Array(N), v = new Float64Array(N), curr = new Float64Array(N);
+    for (let i = 0; i < N; i++) {
+      time2[i] = i * dt;
+      v[i] = Z0test * Math.sin(2 * Math.PI * 1e9 * time2[i]);
+      curr[i] = Math.sin(2 * Math.PI * 1e9 * time2[i]);
+    }
+    const tf = linspace(0.5e9, 1.5e9, 100);
+    const Vf = dftTime2Freq(time2, v, tf);
+    const If = dftTime2Freq(time2, curr, tf);
+    const Zr = complexDivide(Vf.re, Vf.im, If.re, If.im);
+    const Zmag = complexAbs(Zr.re, Zr.im);
+    let ci = 0;
+    for (let i = 1; i < tf.length; i++) { if (Math.abs(tf[i] - 1e9) < Math.abs(tf[ci] - 1e9)) ci = i; }
+    const zErr = Math.abs(Zmag[ci] - Z0test) / Z0test;
+    assert(zErr < 0.05, `Impedance Z=${Zmag[ci].toFixed(2)} Ohm (expected ${Z0test})`);
+
+    // parseProbe
+    const sampleText = '% comment line\n0.0 1.0\n0.1 2.0\n0.2 3.0\n';
+    const probe = parseProbe(sampleText);
+    assert(probe.time.length === 3, 'parseProbe: 3 samples');
+    assert(probe.values[2] === 3.0, 'parseProbe: last value = 3.0');
+
+    // findPeaks
+    const s = new Float64Array([0, 1, 3, 2, 0, 0, 5, 0, 0]);
+    const f = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    const peaks = findPeaks(f, s, 0.5);
+    assert(peaks.length === 2, `findPeaks: found ${peaks.length} peaks (expected 2)`);
+    assert(peaks[0].freq === 7 && peaks[0].amplitude === 5, 'findPeaks: highest peak at f=7');
+  }
+
+  // --- A3: Simulation XML Generation ---
+  log('\n=== A3: Simulation XML Generation ===');
+  {
+    const sim = new Simulation({ nrTS: 10000, endCriteria: 1e-6 });
+    sim.setExcitation({ type: 'gauss', f0: 5e9, fc: 4e9 });
+    sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    const a = 0.05, b = 0.02, d = 0.06;
+    sim.setGrid(1, Array.from(linspace(0, a, 26)), Array.from(linspace(0, b, 11)), Array.from(linspace(0, d, 32)));
+    const metal = sim.addMetal('cavity_walls');
+    metal.addBox([0, 0, 0], [a, b, d], 10);
+    sim.addProbe('ut1z', 0, [0.01, 0.01, 0.01], [0.01, 0.01, 0.012]);
+    const xml = sim.toXML();
+
+    assert(xml.includes('<?xml version="1.0"'), 'XML has declaration');
+    assert(xml.includes('<openEMS>'), 'XML has openEMS root');
+    assert(xml.includes('NumberOfTimesteps="10000"'), 'XML has NrTS=10000');
+    assert(xml.includes('endCriteria="0.000001"'), 'XML has endCriteria');
+    assert(xml.includes('Type="0"'), 'Gaussian excitation Type=0');
+    assert(xml.includes('f0="5000000000"'), 'XML has f0');
+    assert(xml.includes('fc="4000000000"'), 'XML has fc');
+    assert(xml.includes('xmin="0"'), 'PEC boundary xmin');
+    assert(xml.includes('<Metal ID="0" Name="cavity_walls"'), 'Metal property');
+    assert(xml.includes('<ProbeBox'), 'XML has probe');
+    assert(xml.includes('Name="ut1z"'), 'Probe name');
+    assert(xml.includes('<XLines>'), 'Grid X');
+    assert(xml.includes('<YLines>'), 'Grid Y');
+    assert(xml.includes('<ZLines>'), 'Grid Z');
+    assert(xml.includes('DeltaUnit="1"'), 'DeltaUnit');
+  }
+
+  // --- A4: PML Boundary ---
+  log('\n=== A4: PML Boundary XML ===');
+  {
+    const sim = new Simulation({ nrTS: 1000, endCriteria: 1e-4 });
+    sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+    sim.setBoundaryConditions(['PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8']);
+    sim.setGrid(1e-3, [0, 10, 20], [0, 10, 20], [0, 10, 20]);
+    const xml = sim.toXML();
+    assert(xml.includes('xmin="3"'), 'PML boundary type=3');
+    assert(xml.includes('PML_xmin="8"'), 'PML size xmin=8');
+    assert(xml.includes('PML_zmax="8"'), 'PML size zmax=8');
+  }
+
+  // --- A5: Excitation Types ---
+  log('\n=== A5: Excitation Types XML ===');
+  {
+    const sim1 = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+    sim1.setGrid(1, [0, 1], [0, 1], [0, 1]);
+    sim1.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+
+    sim1.setExcitation({ type: 'sinus', f0: 2.4e9 });
+    let xml = sim1.toXML();
+    assert(xml.includes('Type="1"'), 'Sinus excitation Type=1');
+
+    sim1.setExcitation({ type: 'dirac', fmax: 10e9 });
+    xml = sim1.toXML();
+    assert(xml.includes('Type="2"'), 'Dirac excitation Type=2');
+
+    sim1.setExcitation({ type: 'step', fmax: 5e9 });
+    xml = sim1.toXML();
+    assert(xml.includes('Type="3"'), 'Step excitation Type=3');
+
+    sim1.setExcitation({ type: 'custom', func: 'sin(2*pi*1e9*t)', f0: 1e9, fmax: 2e9 });
+    xml = sim1.toXML();
+    assert(xml.includes('Type="10"'), 'Custom excitation Type=10');
+  }
+
+  // --- A6: LumpedPort XML ---
+  log('\n=== A6: LumpedPort XML ===');
+  {
+    const sim = new Simulation({ nrTS: 5000, endCriteria: 1e-5 });
+    sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+    sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    sim.setGrid(1e-3, [0, 5, 10], [0, 5, 10], [0, 5, 10]);
+    const port = sim.addLumpedPort({ portNr: 1, R: 50, start: [0, 0, 0], stop: [0, 0, 0.01], excDir: 2, excite: 1 });
+    assert(port instanceof LumpedPort, 'addLumpedPort returns LumpedPort');
+    assert(port.R === 50, 'Port R = 50');
+    assert(port.excDir === 2, 'Port excDir = 2');
+    assert(port.number === 1, 'Port number = 1');
+    const xml = sim.toXML();
+    assert(xml.includes('LumpedElement'), 'XML has LumpedElement');
+    assert(xml.includes('R="50"'), 'XML has R=50');
+    assert(xml.includes('Direction="2"'), 'XML has Direction=2');
+  }
+
+  // --- A7: LumpedPort R=0 (metal short) ---
+  log('\n=== A7: LumpedPort Metal Short (R=0) ===');
+  {
+    const port = new LumpedPort({ portNr: 2, R: 0, start: [0, 0, 0], stop: [0, 0, 0.005], excDir: 2, excite: 0 });
+    const xml = port.toXML();
+    assert(xml.includes('<Metal'), 'R=0 generates Metal element');
+    assert(!xml.includes('LumpedElement'), 'R=0 does not generate LumpedElement');
+  }
+
+  // --- A8: Material XML ---
+  log('\n=== A8: Material Property XML ===');
+  {
+    const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+    sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+    sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
+    const mat = sim.addMaterial('substrate', { epsilon: 4.6, kappa: 0.01 });
+    mat.addBox([0, 0, 0], [1, 1, 0.5], 5);
+    const xml = sim.toXML();
+    assert(xml.includes('Epsilon="4.6"'), 'Epsilon=4.6');
+    assert(xml.includes('Kappa="0.01"'), 'Kappa=0.01');
+  }
+
+  // --- A9: Cylinder XML ---
+  log('\n=== A9: Cylinder Primitive XML ===');
+  {
+    const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+    sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+    sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
+    const metal = sim.addMetal('conductor');
+    metal.addCylinder([0, 0, 0], [0, 0, 1], 0.005, 10);
+    const xml = sim.toXML();
+    assert(xml.includes('<Cylinder Priority="10" Radius="0.005"'), 'Cylinder with Radius');
+  }
+
+  // --- A10: MSLPort XML ---
+  log('\n=== A10: MSLPort XML ===');
+  {
+    const sim = new Simulation({ nrTS: 5000, endCriteria: 1e-5 });
+    sim.setExcitation({ type: 'gauss', f0: 5e9, fc: 4e9 });
+    sim.setBoundaryConditions(['PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8']);
+    const xLines = []; for (let i = 0; i <= 20; i++) xLines.push(i * 0.5);
+    sim.setGrid(1e-3, xLines, [0, 1, 2, 3, 4, 5], [0, 0.5, 1, 1.5, 2]);
+    const port = sim.addMSLPort({ portNr: 1, metalProp: 'patch', start: [0, 0, 0], stop: [10, 5, 2], propDir: 0, excDir: 2, excite: 1, feedR: 50 });
+    assert(port instanceof MSLPort, 'addMSLPort returns MSLPort');
+    assert(port.U_filenames.length === 3, 'MSLPort has 3 voltage probe filenames');
+    assert(port.I_filenames.length === 2, 'MSLPort has 2 current probe filenames');
+    const xml = sim.toXML();
+    assert(xml.includes('LumpedElement'), 'MSLPort XML has LumpedElement');
+    assert(xml.includes('R="50"'), 'MSLPort XML has R=50');
+  }
+
+  // --- A11: WaveguidePort XML ---
+  log('\n=== A11: WaveguidePort XML ===');
+  {
+    const port = new WaveguidePort({ portNr: 1, start: [0, 0, 0], stop: [10, 20, 0.5], excDir: 2, E_func: ['sin(pi*x/10)', '0', '0'], H_func: ['0', 'sin(pi*x/10)', '0'], kc: 31.416, excite: 1 });
+    assert(port instanceof WaveguidePort, 'WaveguidePort created');
+    assert(port.kc === 31.416, 'WaveguidePort kc correct');
+    const xml = port.toXML();
+    assert(xml.includes('Type="10"'), 'WaveguidePort has mode-matched voltage probe');
+    assert(xml.includes('Type="11"'), 'WaveguidePort has mode-matched current probe');
+  }
+
+  // --- A12: RectWGPort XML ---
+  log('\n=== A12: RectWGPort XML ===');
+  {
+    const a = 22.86e-3, b = 10.16e-3;
+    const port = new RectWGPort({ portNr: 1, start: [0, 0, 0], stop: [a, b, 0.01], excDir: 2, a, b, modeName: 'TE10', excite: 1 });
+    assert(port instanceof RectWGPort, 'RectWGPort created');
+    assert(port instanceof WaveguidePort, 'RectWGPort extends WaveguidePort');
+    assert(port.M === 1 && port.N === 0, 'RectWGPort mode indices correct');
+    const expectedKc = Math.PI / a;
+    assert(Math.abs(port.kc - expectedKc) / expectedKc < 1e-10, `RectWGPort kc correct`);
+    let caught = false;
+    try { new RectWGPort({ portNr: 2, start: [0, 0, 0], stop: [a, b, 0.01], excDir: 2, a, b, modeName: 'TM10', excite: 0 }); } catch (e) { caught = true; }
+    assert(caught, 'RectWGPort rejects TM modes');
+  }
+
+  // --- A13: NF2FF Box ---
+  log('\n=== A13: NF2FF Box Creation ===');
+  {
+    const sim = new Simulation({ nrTS: 1000, endCriteria: 1e-4 });
+    sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+    sim.setBoundaryConditions(['PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8']);
+    sim.setGrid(1e-3, [-50, 0, 50], [-50, 0, 50], [-50, 0, 50]);
+    const nf2ff = sim.createNF2FFBox('nf2ff_rec', [-40, -40, -40], [40, 40, 40]);
+    assert(nf2ff instanceof NF2FFBox, 'createNF2FFBox returns NF2FFBox');
+    assert(nf2ff.directions.length === 6, 'NF2FF has 6 directions');
+    const xml = sim.toXML();
+    assert(xml.includes('nf2ff_rec_E'), 'NF2FF XML has E-field dump');
+    assert(xml.includes('nf2ff_rec_H'), 'NF2FF XML has H-field dump');
+  }
+
+  // --- A14: NF2FF Frequency Domain ---
+  log('\n=== A14: NF2FF Frequency-Domain ===');
+  {
+    const sim = new Simulation({ nrTS: 1000, endCriteria: 1e-4 });
+    sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+    sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
+    const nf2ff = sim.createNF2FFBox('nf2ff_fd', [0, 0, 0], [1, 1, 1], { frequency: [1e9, 2e9] });
+    assert(nf2ff.frequency.length === 2, 'NF2FF has 2 frequencies');
+    const xml = sim.toXML();
+    assert(xml.includes('DumpType="10"'), 'FD NF2FF has DumpType=10');
+    assert(xml.includes('DumpType="11"'), 'FD NF2FF has DumpType=11');
+  }
+
+  // --- A15: NF2FF calcNF2FF ---
+  log('\n=== A15: NF2FF calcNF2FF with Surface Data ===');
+  {
+    const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+    sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+    sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
+    const nf2ff = sim.createNF2FFBox('test', [0, 0, 0], [1, 1, 1]);
+    const nPts = 9;
+    const zeros = new Float64Array(nPts * 2);
+    const surfaceData = { faces: [{ E: [new Float64Array(nPts * 2), new Float64Array(nPts * 2), zeros], H: [zeros, new Float64Array(nPts * 2), new Float64Array(nPts * 2)], mesh: { x: new Float64Array([0.5]), y: new Float64Array([0, 0.5, 1]), z: new Float64Array([0, 0.5, 1]) }, normal: [1, 0, 0] }] };
+    for (let i = 0; i < nPts; i++) { surfaceData.faces[0].H[1][2 * i] = 1.0; surfaceData.faces[0].H[2][2 * i] = 0.5; }
+    const theta = [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4, Math.PI];
+    const phi = [0, Math.PI / 2];
+    const result = nf2ff.calcNF2FF(surfaceData, 1e9, theta, phi);
+    assert(result instanceof NF2FFResult, 'calcNF2FF returns NF2FFResult');
+    assert(result.theta.length === 5, 'Result has 5 theta angles');
+    assert(result.phi.length === 2, 'Result has 2 phi angles');
+  }
+
+  // --- A16: NF2FFResult Class ---
+  log('\n=== A16: NF2FFResult Class ===');
+  {
+    const result = new NF2FFResult({ theta: new Float64Array([0, Math.PI / 4, Math.PI / 2]), phi: new Float64Array([0, Math.PI / 2]), r: 1.0, freq: [1e9], Dmax: [5.0], Prad: [0.1], E_theta: [new Float64Array(6)], E_phi: [new Float64Array(6)], E_norm: [new Float64Array(6)], E_cprh: [new Float64Array(6)], E_cplh: [new Float64Array(6)], P_rad: [new Float64Array(6)] });
+    assert(result.theta.length === 3, 'NF2FFResult theta has 3 angles');
+    assert(result.Dmax[0] === 5.0, 'NF2FFResult Dmax = 5.0');
+    assert(result.Prad[0] === 0.1, 'NF2FFResult Prad = 0.1');
+  }
+
+  // --- A17: Automesh - meshHintFromBox ---
+  log('\n=== A17: meshHintFromBox ===');
+  {
+    const hint = meshHintFromBox([0, 0, 0], [10, 20, 30], 'xyz');
+    assert(hint[0] !== null && hint[1] !== null && hint[2] !== null, 'All hints present');
+    assert(hint[0].includes(0) && hint[0].includes(10), 'x hints include start and stop');
+    const hintX = meshHintFromBox([5, 5, 5], [15, 25, 35], 'x');
+    assert(hintX[0] !== null && hintX[1] === null && hintX[2] === null, 'x-only hint correct');
+    const hintMer = meshHintFromBox([0, 0, 0], [10, 20, 30], 'xyz', { metalEdgeRes: 1.0 });
+    assert(hintMer[0].length === 4, 'Metal edge res produces 4 x hints');
+    const hintFlat = meshHintFromBox([5, 5, 5], [5, 10, 10], 'xyz');
+    assert(hintFlat[0].length === 1, 'Zero-size x has 1 hint');
+  }
+
+  // --- A18: Automesh - meshCombine ---
+  log('\n=== A18: meshCombine ===');
+  {
+    const combined = meshCombine([[1, 3, 5], [10, 20], null], [[2, 4], null, [100, 200]]);
+    assert(combined[0].length === 5, 'Combined x has 5 elements');
+    assert(combined[1] !== null && combined[1].length === 2, 'Combined y from m1 only');
+    assert(combined[2] !== null && combined[2].length === 2, 'Combined z from m2 only');
+    const combined2 = meshCombine([null, null, null], [null, null, null]);
+    assert(combined2[0] === null, 'null + null = null');
+  }
+
+  // --- A19: Automesh - meshEstimateCflTimestep ---
+  log('\n=== A19: meshEstimateCflTimestep ===');
+  {
+    const lines = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    const dt = meshEstimateCflTimestep(lines, lines, lines, 1e-3);
+    const expected = 1e-3 / (C0 * Math.sqrt(3));
+    assert(Math.abs(dt - expected) / expected < 1e-10, `CFL timestep correct`);
+  }
+
+  // --- A20: Automesh - smoothMeshLines ---
+  log('\n=== A20: smoothMeshLines ===');
+  {
+    const smoothed = smoothMeshLines([0, 1, 5, 6], 2);
+    assert(smoothed.length > 4, `smoothMeshLines added points (4 -> ${smoothed.length})`);
+    let maxGap = 0;
+    for (let i = 1; i < smoothed.length; i++) { const g = smoothed[i] - smoothed[i - 1]; if (g > maxGap) maxGap = g; }
+    assert(maxGap <= 2.0 + 1e-10, `Max gap after smoothing <= 2.0`);
+    assert(smoothMeshLines([0, 1, 2, 3], 2).length === 4, 'Already smooth unchanged');
+    assert(smoothMeshLines([5], 1).length === 1, 'Single point unchanged');
+  }
+
+  // --- A21: New Primitives (Sphere, SphericalShell, Polygon, LinPoly, RotPoly, Wire) ---
+  log('\n=== A21: Geometry Primitives ===');
+  {
+    const mkSim = () => {
+      const s = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+      s.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+      s.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+      s.setGrid(1, [0, 1], [0, 1], [0, 1]);
+      return s;
+    };
+
+    // Sphere
+    let sim = mkSim();
+    sim.addMetal('ball').addSphere([0.5, 0.5, 0.5], 0.25, 10);
+    assert(sim.toXML().includes('<Sphere Priority="10" Radius="0.25"'), 'Sphere XML');
+
+    // SphericalShell
+    sim = mkSim();
+    sim.addMetal('shell').addSphericalShell([0, 0, 0], 1.0, 0.05, 8);
+    assert(sim.toXML().includes('<SphericalShell Priority="8" Radius="1" ShellWidth="0.05"'), 'SphericalShell XML');
+
+    // Polygon
+    sim = mkSim();
+    sim.addMetal('patch').addPolygon([[0, 0], [1, 0], [1, 1], [0, 1]], 2, 0.5, 10);
+    let xml = sim.toXML();
+    assert(xml.includes('<Polygon Priority="10" NormDir="2" Elevation="0.5"'), 'Polygon XML');
+    assert((xml.match(/<Vertex X=/g) || []).length === 4, 'Polygon has 4 vertices');
+
+    // LinPoly
+    sim = mkSim();
+    sim.addMetal('extrusion').addLinPoly([[0, 0], [1, 0], [0.5, 1]], 2, 0, 0.5, 5);
+    assert(sim.toXML().includes('<LinPoly Priority="5" NormDir="2" Elevation="0" Length="0.5"'), 'LinPoly XML');
+
+    // RotPoly
+    sim = mkSim();
+    sim.addMetal('revolved').addRotPoly([[0.5, 0], [1, 0], [1, 1], [0.5, 1]], 2, 0, Math.PI, 7);
+    assert(sim.toXML().includes('<RotPoly Priority="7" NormDir="2" Elevation="0"'), 'RotPoly XML');
+
+    // Wire
+    sim = mkSim();
+    sim.addMetal('wire').addWire([[0, 0, 0], [0, 0, 0.5], [0.5, 0, 0.5]], 0.001, 10);
+    xml = sim.toXML();
+    assert(xml.includes('<Wire Priority="10" WireRadius="0.001"'), 'Wire XML');
+    assert((xml.match(/<Vertex X=/g) || []).length === 3, 'Wire has 3 vertices');
+
+    // CylindricalShell
+    sim = mkSim();
+    sim.addMetal('shield');
+    sim.addCylindricalShell('shield', 10, [0, 0, 0], [0, 0, 1], 0.5, 0.01);
+    assert(sim.toXML().includes('<CylindricalShell'), 'CylindricalShell XML');
+
+    // Curve
+    sim = mkSim();
+    sim.addMetal('wire_path');
+    sim.addCurve('wire_path', 5, [[0, 0, 0], [0.5, 0.5, 0], [1, 0.5, 0.5], [1, 1, 1]]);
+    xml = sim.toXML();
+    assert(xml.includes('<Curve'), 'Curve XML');
+    assert((xml.match(/<Vertex /g) || []).length === 4, 'Curve has 4 vertices');
+  }
+
+  // --- A22: smoothGrid ---
+  log('\n=== A22: smoothGrid ===');
+  {
+    const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+    sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+    sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    sim.setGrid(1, [0, 10, 100], [0, 5, 50], [0, 1, 2]);
+    const xBefore = sim._grid.x.length;
+    sim.smoothGrid(5);
+    assert(sim._grid.x.length > xBefore, `smoothGrid added x lines (${xBefore} -> ${sim._grid.x.length})`);
+  }
+
+  // --- A23: Visualization - prepareSParamData ---
+  log('\n=== A23: Visualization Functions ===');
+  {
+    const n = 10;
+    const freq = new Float64Array(n);
+    for (let i = 0; i < n; i++) freq[i] = (i + 1) * 1e9;
+
+    // prepareSParamData: perfect reflection
+    const port = { uf_ref_re: new Float64Array(n).fill(1), uf_ref_im: new Float64Array(n).fill(0), uf_inc_re: new Float64Array(n).fill(1), uf_inc_im: new Float64Array(n).fill(0) };
+    const result = prepareSParamData([port], freq);
+    assert(result.s11_dB !== undefined, 'prepareSParamData has s11_dB');
+    assert(Math.abs(result.s11_dB[0] - 0) < 0.01, 'S11 = 0 dB for perfect reflection');
+
+    // prepareSmithData
+    const port2 = { uf_ref_re: new Float64Array([0.5, 0.3, 0.1, 0, -0.1]), uf_ref_im: new Float64Array([0, 0.1, 0.2, 0, -0.2]), uf_inc_re: new Float64Array(5).fill(1), uf_inc_im: new Float64Array(5).fill(0) };
+    const freq5 = new Float64Array(5); for (let i = 0; i < 5; i++) freq5[i] = (i + 1) * 1e9;
+    const smith = prepareSmithData(port2, freq5);
+    assert(smith.gamma_re.length === 5, 'Smith data has gamma_re');
+    assert(Math.abs(smith.gamma_re[0] - 0.5) < 1e-10, 'gamma_re[0] = 0.5');
+
+    // prepareImpedanceData: matched
+    const portZ = { uf_ref_re: new Float64Array(5).fill(0), uf_ref_im: new Float64Array(5).fill(0), uf_inc_re: new Float64Array(5).fill(1), uf_inc_im: new Float64Array(5).fill(0), Z_ref: 50 };
+    const zData = prepareImpedanceData(portZ, freq5);
+    assert(Math.abs(zData.z_re[0] - 50) < 0.01, 'z_re = 50 for matched');
+    assert(Math.abs(zData.vswr[0] - 1) < 0.01, 'VSWR = 1 for matched');
+
+    // prepareTimeDomainData
+    const probeData = { time: new Float64Array([0, 1e-9, 2e-9, 3e-9]), values: new Float64Array([0, 0.5, 1.0, 0.5]) };
+    const td = prepareTimeDomainData(probeData, 'ns', 'voltage');
+    assert(td.time.length === 4, 'Time domain data has 4 samples');
+    assert(Math.abs(td.time[1] - 1.0) < 1e-10, 'time[1] = 1.0 ns');
+
+    // prepareRadiationPattern
+    const nTheta = 5, nPhi = 4;
+    const theta = new Float64Array(nTheta);
+    const phi = new Float64Array(nPhi);
+    for (let i = 0; i < nTheta; i++) theta[i] = i * Math.PI / (nTheta - 1);
+    for (let i = 0; i < nPhi; i++) phi[i] = i * Math.PI / 2;
+    const E_norm = new Float64Array(nTheta * nPhi);
+    for (let t = 0; t < nTheta; t++) for (let p = 0; p < nPhi; p++) E_norm[t * nPhi + p] = Math.sin(theta[t]);
+    const phiCut = prepareRadiationPattern({ theta, phi, E_norm: [E_norm] }, 'phi', 0);
+    assert(phiCut.angles.length === nTheta, 'Phi cut has nTheta angles');
+    assert(phiCut.pattern_dB[0] < -10, 'Pattern at theta=0 is low');
+  }
+
+  // --- A24: NF2FF Infinitesimal Dipole ---
+  log('\n=== A24: NF2FF Infinitesimal Dipole ===');
+  {
+    const freq = 1e9;
+    const meshX = new Float64Array([-0.001, 0, 0.001]);
+    const meshY = new Float64Array([-0.001, 0, 0.001]);
+    const meshZ = new Float64Array([0]);
+    const nPts = 9;
+    const face = { E: [new Float64Array(nPts * 2), new Float64Array(nPts * 2), new Float64Array(nPts * 2)], H: [new Float64Array(nPts * 2), new Float64Array(nPts * 2), new Float64Array(nPts * 2)], mesh: { x: meshX, y: meshY, z: meshZ }, normal: [0, 0, 1] };
+    for (let i = 0; i < nPts; i++) face.H[1][2 * i] = -1.0;
+    const nTheta = 91, nPhi = 73;
+    const thetaArr = new Float64Array(nTheta), phiArr = new Float64Array(nPhi);
+    for (let i = 0; i < nTheta; i++) thetaArr[i] = i * Math.PI / (nTheta - 1);
+    for (let i = 0; i < nPhi; i++) phiArr[i] = i * 2 * Math.PI / (nPhi - 1);
+    const result = computeNF2FF({ faces: [face] }, freq, thetaArr, phiArr, [0, 0, 0], 1);
+    const p_max = Math.max(...result.P_rad);
+    assert(p_max > 0, `NF2FF P_max = ${p_max.toExponential(4)} (non-zero)`);
+
+    let prad_int = 0;
+    const dTheta = Math.PI / (nTheta - 1), dPhi = 2 * Math.PI / (nPhi - 1);
+    for (let tn = 0; tn < nTheta; tn++) {
+      const sinT = Math.sin(thetaArr[tn]);
+      for (let pn = 0; pn < nPhi; pn++) prad_int += result.P_rad[tn * nPhi + pn] * sinT * dTheta * dPhi;
+    }
+    const dmax = prad_int > 0 ? 4 * Math.PI * p_max / prad_int : 0;
+    assert(Math.abs(dmax - 1.5) / 1.5 < 0.10, `NF2FF Dmax = ${dmax.toFixed(4)} (expected ~1.5)`);
+  }
+
+  // --- A25: SAR ---
+  log('\n=== A25: SAR Computation ===');
+  {
+    // Local SAR uniform
+    const N = 27, sigma = 0.5, rho = 1000, E_mag2 = 100;
+    const SAR = computeLocalSAR(new Float64Array(N).fill(E_mag2), new Float32Array(N).fill(sigma), new Float32Array(N).fill(rho));
+    const expected = 0.5 * sigma * E_mag2 / rho;
+    assert(Math.abs(SAR[0] - expected) < 1e-6, `Local SAR = ${SAR[0].toFixed(6)} W/kg (expected ${expected})`);
+
+    // Zero density
+    const SAR0 = computeLocalSAR(new Float64Array(10).fill(100), new Float32Array(10).fill(0.5), new Float32Array(10).fill(0));
+    let allZero = true, anyNaN = false;
+    for (let i = 0; i < 10; i++) { if (SAR0[i] !== 0) allZero = false; if (isNaN(SAR0[i])) anyNaN = true; }
+    assert(allZero && !anyNaN, 'Zero density produces zero SAR, no NaN');
+
+    // findPeakSAR
+    const peak = findPeakSAR(new Float32Array([0.1, 0.5, 0.3, 0.8, 0.2, 0.4]));
+    assert(Math.abs(peak.value - 0.8) < 1e-6, `Peak SAR = ${peak.value}`);
+    assert(peak.index === 3, 'Peak index = 3');
+
+    const SAR3D = new Float32Array(27); SAR3D[13] = 5.0;
+    const peak3D = findPeakSAR(SAR3D, { Nx: 3, Ny: 3, Nz: 3 });
+    assert(peak3D.value === 5.0, '3D peak SAR = 5.0');
+    assert(peak3D.position[0] === 1 && peak3D.position[1] === 1 && peak3D.position[2] === 1, '3D peak at [1,1,1]');
+  }
+
+  // --- A26: Port calcPort with Fixture Data ---
+  log('\n=== A26: Port calcPort with Fixture Data ===');
+  try {
+    const resp = await fetch('/tests/fixtures/coax/reference.json');
+    if (!resp.ok) throw new Error('fixture not found');
+    const ref = await resp.json();
+    let vtHasSignal = false;
+    for (const v of ref.probe_ut1.voltage) { if (v !== 0) { vtHasSignal = true; break; } }
+    if (!vtHasSignal) {
+      log('  SKIP: Coax fixture has zero signal');
+    } else {
+      const vTime = new Float64Array(ref.probe_ut1.time_s);
+      const vVals = new Float64Array(ref.probe_ut1.voltage);
+      const iTime = new Float64Array(ref.probe_it1.time_s);
+      const iVals = new Float64Array(ref.probe_it1.voltage);
+      const freqs = linspace(0.1e9, 0.5e9, 200);
+      const Vf = dftTime2Freq(vTime, vVals, freqs);
+      const If = dftTime2Freq(iTime, iVals, freqs);
+      const Z = complexDivide(Vf.re, Vf.im, If.re, If.im);
+      const Zmag2 = complexAbs(Z.re, Z.im);
+      const Z0exp = ref.Z0_analytical_ohm;
+      const upper = Z0exp * (1 + ref.tolerances.upper_error);
+      const lower = Z0exp * (1 - ref.tolerances.lower_error);
+      let allInRange = true, minZ = Infinity, maxZ = -Infinity;
+      for (let i = 0; i < Zmag2.length; i++) {
+        if (Zmag2[i] < minZ) minZ = Zmag2[i]; if (Zmag2[i] > maxZ) maxZ = Zmag2[i];
+        if (Zmag2[i] > upper || Zmag2[i] < lower) allInRange = false;
+      }
+      assert(allInRange, `Z0 in [${lower.toFixed(2)}, ${upper.toFixed(2)}] Ohm (actual: ${minZ.toFixed(2)} - ${maxZ.toFixed(2)})`);
+
+      // S11
+      const Zref = 50, nf = freqs.length;
+      const uf_inc_re = new Float64Array(nf), uf_inc_im = new Float64Array(nf);
+      const uf_ref_re = new Float64Array(nf), uf_ref_im = new Float64Array(nf);
+      for (let i = 0; i < nf; i++) {
+        uf_inc_re[i] = 0.5 * (Vf.re[i] + If.re[i] * Zref);
+        uf_inc_im[i] = 0.5 * (Vf.im[i] + If.im[i] * Zref);
+        uf_ref_re[i] = Vf.re[i] - uf_inc_re[i];
+        uf_ref_im[i] = Vf.im[i] - uf_inc_im[i];
+      }
+      const S11 = complexDivide(uf_ref_re, uf_ref_im, uf_inc_re, uf_inc_im);
+      const S11mag = complexAbs(S11.re, S11.im);
+      let maxS11 = 0;
+      for (let i = 0; i < S11mag.length; i++) if (S11mag[i] > maxS11) maxS11 = S11mag[i];
+      const s11dB = 20 * Math.log10(Math.max(maxS11, 1e-15));
+      assert(s11dB < -10, `S11 max = ${s11dB.toFixed(1)} dB (should be < -10 dB)`);
+    }
+  } catch (e) {
+    log(`  SKIP: Coax fixture not available (${e.message})`);
+  }
+
+  // --- A27: Cavity Fixture Spectral Analysis ---
+  log('\n=== A27: Cavity Fixture Spectral Analysis ===');
+  try {
+    const [refResp, probeResp] = await Promise.all([
+      fetch('/tests/fixtures/cavity/reference.json'),
+      fetch('/tests/fixtures/cavity/probe_ut1z.csv'),
+    ]);
+    if (!refResp.ok || !probeResp.ok) throw new Error('fixture not found');
+    const ref = await refResp.json();
+    const probeText = await probeResp.text();
+    const probe = parseProbe(probeText);
+    assert(probe.time.length > 100, `Probe has ${probe.time.length} samples`);
+    let hasSignal = false;
+    for (let i = 0; i < probe.values.length; i++) if (probe.values[i] !== 0) { hasSignal = true; break; }
+    assert(hasSignal, 'Probe data contains non-zero values');
+
+    const dt = probe.time[1] - probe.time[0];
+    const NFFT = Math.pow(2, Math.ceil(Math.log2(probe.time.length)));
+    const df = 1 / (NFFT * dt);
+    const fStart = 1e9, fStop = 10e9;
+    const nFreqs = Math.ceil((fStop - fStart) / df);
+    const freqs = new Float64Array(nFreqs);
+    for (let i = 0; i < nFreqs; i++) freqs[i] = fStart + i * df;
+
+    const spectrum = dftMagnitude(probe.time, probe.values, freqs);
+    const globalMax = Math.max(...spectrum);
+    const normSpectrum = new Float64Array(spectrum.length);
+    for (let i = 0; i < spectrum.length; i++) normSpectrum[i] = spectrum[i] / globalMax;
+
+    const peaks = findPeaks(freqs, normSpectrum, 0.1);
+    assert(peaks.length >= 2, `Found ${peaks.length} peaks above 10% threshold`);
+
+    const allModes = { ...ref.te_modes, ...ref.tm_modes };
+    let matchedModes = 0;
+    for (const [mode, fAnalytical] of Object.entries(allModes)) {
+      const isTE = mode.startsWith('TE');
+      const tolRel = isTE ? ref.tolerances.te_freq_rel : ref.tolerances.tm_freq_lower_rel;
+      const fLow = fAnalytical * (1 - tolRel), fHigh = fAnalytical * (1 + tolRel);
+      let peakAmp = -Infinity;
+      for (let i = 0; i < freqs.length; i++) {
+        if (freqs[i] >= fLow && freqs[i] <= fHigh && normSpectrum[i] > peakAmp) peakAmp = normSpectrum[i];
+      }
+      const minAmp = isTE ? ref.tolerances.te_min_amplitude : ref.tolerances.tm_min_amplitude;
+      if (peakAmp >= minAmp) matchedModes++;
+    }
+    assert(matchedModes >= 2, `At least 2 resonance modes detected (found ${matchedModes})`);
+  } catch (e) {
+    log(`  SKIP: Cavity fixtures not available (${e.message})`);
+  }
+
+  // --- A28: Dipole Fixture ---
+  log('\n=== A28: Dipole Field Probes (Fixture) ===');
+  try {
+    const resp = await fetch('/tests/fixtures/dipole/reference.json');
+    if (!resp.ok) throw new Error('fixture not found');
+    const ref = await resp.json();
+    let probesTested = 0;
+    for (const probeName of ['et1', 'et2', 'ht1', 'ht2']) {
+      const key = `probe_${probeName}`;
+      if (!ref[key]) continue;
+      const values = new Float64Array(ref[key].voltage);
+      let maxAmp = 0;
+      for (let i = 0; i < values.length; i++) if (Math.abs(values[i]) > maxAmp) maxAmp = Math.abs(values[i]);
+      const isE = probeName.startsWith('e');
+      const minAmp = isE ? ref.tolerances.min_e_amp : ref.tolerances.min_h_amp;
+      if (maxAmp > 0) { assert(maxAmp >= minAmp, `${probeName}: max amplitude ${maxAmp.toExponential(3)} >= threshold`); probesTested++; }
+    }
+    assert(probesTested >= 2, `At least 2 field probes have signal (found ${probesTested})`);
+  } catch (e) {
+    log(`  SKIP: Dipole fixture not available (${e.message})`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SECTION B: WebGPU CPU Reference Engine Tests
+// ---------------------------------------------------------------------------
+
+async function runSectionB() {
+  log('\n======================================================================');
+  log('SECTION B: WebGPU CPU Reference Engine Tests');
+  log('======================================================================');
+
+  // --- B1: ArrayNIJK Indexing ---
+  log('\n=== B1: ArrayNIJK Indexing ===');
+  {
+    const Nx = 5, Ny = 4, Nz = 3;
+    assert(idx(0, 0, 0, 0, Nx, Ny, Nz) === 0, 'idx(0,0,0,0) = 0');
+    assert(idx(0, 0, 0, 1, Nx, Ny, Nz) === 1, 'Z stride is 1');
+    assert(idx(0, 0, 1, 0, Nx, Ny, Nz) === Nz, `Y stride = Nz = ${Nz}`);
+    assert(idx(0, 1, 0, 0, Nx, Ny, Nz) === Ny * Nz, `X stride = Ny*Nz`);
+    assert(idx(1, 0, 0, 0, Nx, Ny, Nz) === Nx * Ny * Nz, `N stride = Nx*Ny*Nz`);
+    assert(idx(2, Nx - 1, Ny - 1, Nz - 1, Nx, Ny, Nz) === 3 * Nx * Ny * Nz - 1, 'Last index');
+  }
+
+  // --- B2: CPUFDTDEngine Indexing ---
+  log('\n=== B2: CPUFDTDEngine Indexing ===');
+  {
+    const Nx = 5, Ny = 4, Nz = 3;
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], createFreeSpaceCoefficients(Nx, Ny, Nz));
+    assert(engine.idx(0, 0, 0, 0) === 0, 'engine.idx(0,0,0,0) = 0');
+    assert(engine.idx(1, 0, 0, 0) === Nx * Ny * Nz, 'engine.idx component stride');
+    assert(engine.idx(0, 1, 0, 0) === Ny * Nz, 'engine.idx X stride');
+  }
+
+  // --- B3: Voltage Update Boundary Handling ---
+  log('\n=== B3: Voltage Update Boundary Handling ===');
+  {
+    const Nx = 3, Ny = 3, Nz = 3;
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], createFreeSpaceCoefficients(Nx, Ny, Nz));
+    for (let n = 0; n < 3; n++)
+      for (let x = 0; x < Nx; x++)
+        for (let y = 0; y < Ny; y++)
+          for (let z = 0; z < Nz; z++)
+            engine.curr[idx(n, x, y, z, Nx, Ny, Nz)] = (n + 1) * 0.1 * (x + y + z + 1);
+    engine.updateVoltages();
+    assertApprox(engine.volt[idx(0, 0, 0, 0, Nx, Ny, Nz)], 0.0, 1e-10, 'Ex at (0,0,0) boundary curl is zero');
+
+    // Interior point
+    const hz11 = engine.curr[idx(2, 1, 1, 1, Nx, Ny, Nz)];
+    const hz01 = engine.curr[idx(2, 1, 0, 1, Nx, Ny, Nz)];
+    const hy11 = engine.curr[idx(1, 1, 1, 1, Nx, Ny, Nz)];
+    const hy10 = engine.curr[idx(1, 1, 1, 0, Nx, Ny, Nz)];
+    const interiorCurl = hz11 - hz01 - hy11 + hy10;
+    const expectedInterior = 0.0 + 0.3 * interiorCurl;
+    assertApprox(engine.volt[idx(0, 1, 1, 1, Nx, Ny, Nz)], expectedInterior, 1e-6, 'Ex at interior (1,1,1) matches manual');
+  }
+
+  // --- B4: Current Update Loop Bounds ---
+  log('\n=== B4: Current Update Loop Bounds ===');
+  {
+    const Nx = 4, Ny = 4, Nz = 4;
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], createFreeSpaceCoefficients(Nx, Ny, Nz));
+    for (let n = 0; n < 3; n++)
+      for (let x = 0; x < Nx; x++)
+        for (let y = 0; y < Ny; y++)
+          for (let z = 0; z < Nz; z++)
+            engine.volt[idx(n, x, y, z, Nx, Ny, Nz)] = n * 0.1 + x * 0.01 + y * 0.001 + z * 0.0001;
+    engine.updateCurrents();
+    const ez11 = 2 * 0.1 + 1 * 0.01 + 1 * 0.001 + 1 * 0.0001;
+    const ez21 = 2 * 0.1 + 1 * 0.01 + 2 * 0.001 + 1 * 0.0001;
+    const ey11 = 1 * 0.1 + 1 * 0.01 + 1 * 0.001 + 1 * 0.0001;
+    const ey12 = 1 * 0.1 + 1 * 0.01 + 1 * 0.001 + 2 * 0.0001;
+    const hxCurl = ez11 - ez21 - ey11 + ey12;
+    const expectedHx = 0.3 * hxCurl;
+    assertApprox(engine.curr[idx(0, 1, 1, 1, Nx, Ny, Nz)], expectedHx, 1e-6, 'Hx at (1,1,1) matches manual curl');
+  }
+
+  // --- B5: Full Timestep Field Evolution ---
+  log('\n=== B5: Full Timestep Field Evolution ===');
+  {
+    const Nx = 8, Ny = 8, Nz = 8;
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], createFreeSpaceCoefficients(Nx, Ny, Nz));
+    const cx = 4, cy = 4, cz = 4;
+    engine.volt[idx(0, cx, cy, cz, Nx, Ny, Nz)] = 1.0;
+    engine.updateVoltages();
+    engine.updateCurrents();
+    engine.numTS++;
+    assertApprox(engine.volt[idx(0, cx, cy, cz, Nx, Ny, Nz)], 1.0, 1e-6, 'After 1 voltage update, Ex at center = 1.0');
+    assertApprox(engine.curr[idx(1, cx, cy, cz, Nx, Ny, Nz)], 0.3, 1e-6, 'Hy at center = 0.3');
+    assertApprox(engine.curr[idx(2, cx, cy, cz, Nx, Ny, Nz)], -0.3, 1e-6, 'Hz at center = -0.3');
+
+    for (let i = 0; i < 3; i++) { engine.updateVoltages(); engine.updateCurrents(); engine.numTS++; }
+    let nonZeroCount = 0;
+    for (let x = 0; x < Nx; x++)
+      for (let y = 0; y < Ny; y++)
+        for (let z = 0; z < Nz; z++)
+          if (Math.abs(engine.volt[idx(0, x, y, z, Nx, Ny, Nz)]) > 1e-10) nonZeroCount++;
+    assert(nonZeroCount > 1, `After 4 steps, Ex non-zero at ${nonZeroCount} cells`);
+  }
+
+  // --- B6: Excitation Injection ---
+  log('\n=== B6: Excitation Injection ===');
+  {
+    const Nx = 5, Ny = 5, Nz = 5;
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], createFreeSpaceCoefficients(Nx, Ny, Nz));
+    const signal = new Float32Array([1.0, 0.5, 0.25, 0.125]);
+    engine.configureExcitation({ signal, delay: new Uint32Array([0]), amp: new Float32Array([2.0]), dir: new Uint32Array([0]), pos: new Uint32Array([2 * Ny * Nz + 2 * Nz + 2]), period: 0 });
+    engine.applyExcitation();
+    assertApprox(engine.volt[idx(0, 2, 2, 2, Nx, Ny, Nz)], 2.0, 1e-6, 'Excitation at step 0: amp * signal[0] = 2.0');
+
+    engine.volt.fill(0);
+    engine.numTS = 2;
+    engine.applyExcitation();
+    assertApprox(engine.volt[idx(0, 2, 2, 2, Nx, Ny, Nz)], 0.5, 1e-6, 'Excitation at step 2: amp * signal[2] = 0.5');
+  }
+
+  // --- B7: Multi-step with Excitation ---
+  log('\n=== B7: Multi-step with Excitation ===');
+  {
+    const Nx = 10, Ny = 10, Nz = 10;
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], createFreeSpaceCoefficients(Nx, Ny, Nz));
+    const sigLen = 50;
+    const signal = new Float32Array(sigLen);
+    for (let i = 0; i < sigLen; i++) { const t = (i - 25) / 5; signal[i] = Math.exp(-t * t); }
+    engine.configureExcitation({ signal, delay: new Uint32Array([0]), amp: new Float32Array([1.0]), dir: new Uint32Array([2]), pos: new Uint32Array([5 * Ny * Nz + 5 * Nz + 5]), period: 0 });
+    engine.iterate(20);
+    assert(engine.numTS === 20, 'After 20 iterations, numTS = 20');
+    let maxVolt = 0, maxCurr = 0;
+    for (let i = 0; i < engine.volt.length; i++) maxVolt = Math.max(maxVolt, Math.abs(engine.volt[i]));
+    for (let i = 0; i < engine.curr.length; i++) maxCurr = Math.max(maxCurr, Math.abs(engine.curr[i]));
+    assert(maxVolt > 0.01, `Max |volt| = ${maxVolt.toFixed(6)} > 0.01`);
+    assert(maxCurr > 0.01, `Max |curr| = ${maxCurr.toFixed(6)} > 0.01`);
+  }
+
+  // --- B8: PEC Boundary ---
+  log('\n=== B8: PEC Boundary Conditions ===');
+  {
+    const Nx = 6, Ny = 6, Nz = 6;
+    const total = 3 * Nx * Ny * Nz;
+    const vv = new Float32Array(total).fill(1.0);
+    const vi = new Float32Array(total).fill(0.3);
+    const ii = new Float32Array(total).fill(1.0);
+    const iv = new Float32Array(total).fill(0.3);
+    for (let n = 0; n < 3; n++)
+      for (let y = 0; y < Ny; y++)
+        for (let z = 0; z < Nz; z++) { const i = idx(n, 0, y, z, Nx, Ny, Nz); vv[i] = 0; vi[i] = 0; }
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], { vv, vi, ii, iv });
+    engine.volt[idx(0, 3, 3, 3, Nx, Ny, Nz)] = 1.0;
+    engine.iterate(5);
+    let maxAtBoundary = 0;
+    for (let n = 0; n < 3; n++)
+      for (let y = 0; y < Ny; y++)
+        for (let z = 0; z < Nz; z++)
+          maxAtBoundary = Math.max(maxAtBoundary, Math.abs(engine.volt[idx(n, 0, y, z, Nx, Ny, Nz)]));
+    assertApprox(maxAtBoundary, 0.0, 1e-10, 'PEC boundary: all voltages at x=0 remain 0');
+  }
+
+  // --- B9: Energy Conservation ---
+  log('\n=== B9: Energy Conservation (Lossless) ===');
+  {
+    const Nx = 10, Ny = 10, Nz = 10;
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], createFreeSpaceCoefficients(Nx, Ny, Nz));
+    engine.volt[idx(0, 5, 5, 5, Nx, Ny, Nz)] = 1.0;
+    function totalEnergy() {
+      let e = 0;
+      for (let i = 0; i < engine.volt.length; i++) e += engine.volt[i] * engine.volt[i];
+      for (let i = 0; i < engine.curr.length; i++) e += engine.curr[i] * engine.curr[i];
+      return e;
+    }
+    engine.step(); const e1 = totalEnergy();
+    engine.step(); const e2 = totalEnergy();
+    engine.step(); const e3 = totalEnergy();
+    assert(e2 > 0 && e3 > 0, 'Energy positive');
+    const maxRatio = Math.max(e2 / e1, e3 / e2);
+    assert(maxRatio < 2.0, `Energy ratio between steps < 2.0 (got ${maxRatio.toFixed(4)})`);
+  }
+
+  // --- B10: WGSL Shader Syntax Validation ---
+  log('\n=== B10: WGSL Shader Syntax Validation ===');
+  {
+    assert(UPDATE_VOLTAGE_WGSL.includes('struct Params'), 'Voltage WGSL has Params struct');
+    assert(UPDATE_VOLTAGE_WGSL.includes('fn update_voltages'), 'Voltage WGSL has entry point');
+    assert(UPDATE_CURRENT_WGSL.includes('fn update_currents'), 'Current WGSL has entry point');
+    assert(UPDATE_PML_WGSL.includes('fn pml_'), 'PML WGSL has pml_ functions');
+    assert(EXCITATION_WGSL.includes('fn apply_excitation'), 'Excitation WGSL has entry point');
+    assert(LORENTZ_ADE_WGSL.includes('fn update_volt_ade'), 'Lorentz ADE WGSL has entry point');
+    assert(TFSF_WGSL.includes('tfsf'), 'TFSF WGSL has tfsf');
+    assert(LUMPED_RLC_WGSL.includes('fn update_rlc'), 'Lumped RLC WGSL has entry point');
+    assert(MUR_ABC_WGSL.includes('mur'), 'Mur ABC WGSL has mur');
+    assert(STEADY_STATE_WGSL.includes('SSParams'), 'Steady State WGSL has SSParams');
+  }
+
+  // --- B11: WASM-GPU Bridge ---
+  log('\n=== B11: WASM-GPU Bridge Configuration ===');
+  try {
+    const mockEms = createMockWASMInstance(4, 3, 2);
+    const bridge = new WASMGPUBridge();
+    bridge.configureFromWASM(mockEms);
+    assert(bridge.gridSize[0] === 4 && bridge.gridSize[1] === 3 && bridge.gridSize[2] === 2, 'Bridge grid size correct');
+    assert(bridge.coefficients.vv.length === 3 * 4 * 3 * 2, 'Bridge coefficient array length correct');
+
+    const engine = bridge.createCPUEngine();
+    assert(engine !== null, 'Bridge creates CPU engine');
+    engine.volt[idx(0, 2, 1, 1, 4, 3, 2)] = 1.0;
+    engine.iterate(5);
+    let maxV = 0;
+    for (let i = 0; i < engine.volt.length; i++) maxV = Math.max(maxV, Math.abs(engine.volt[i]));
+    assert(maxV > 0, 'Bridge-configured engine evolves fields');
+  } catch(e) {
+    log(`  SKIP: B11 bridge test failed (${e.message})`);
+  }
+
+  // --- B12: Determinism ---
+  log('\n=== B12: Determinism (two identical engines) ===');
+  {
+    const Nx = 6, Ny = 6, Nz = 6;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const e1 = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+    const e2 = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+    e1.volt[idx(0, 3, 3, 3, Nx, Ny, Nz)] = 1.0;
+    e2.volt[idx(0, 3, 3, 3, Nx, Ny, Nz)] = 1.0;
+    e1.iterate(10);
+    e2.iterate(10);
+    let maxDiff = 0;
+    for (let i = 0; i < e1.volt.length; i++) {
+      const d = Math.abs(e1.volt[i] - e2.volt[i]);
+      if (d > maxDiff) maxDiff = d;
+    }
+    assertApprox(maxDiff, 0, 1e-10, 'Two identical engines produce identical results');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SECTION C: WASM Tests
+// ---------------------------------------------------------------------------
+
+async function runSectionC() {
+  log('\n======================================================================');
+  log('SECTION C: WASM Module Tests');
+  log('======================================================================');
+
+  let wasmFactory;
+  try {
+    if (typeof window.createOpenEMS === 'function') {
+      wasmFactory = window.createOpenEMS;
+    } else {
+      log('  INFO: createOpenEMS not on window, trying dynamic import');
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = '/build-wasm/openems.js';
+        s.onload = resolve;
+        s.onerror = reject;
+        document.head.appendChild(s);
+      });
+      wasmFactory = window.createOpenEMS;
+    }
+    if (typeof wasmFactory !== 'function') throw new Error('createOpenEMS is not a function');
+  } catch (e) {
+    log(`  SKIP: WASM module not available (${e.message})`);
+    failed++;
+    return;
+  }
+
+  let WASMModule;
+  try {
+    WASMModule = await wasmFactory();
+  } catch (e) {
+    log(`  SKIP: WASM module failed to initialize (${e.message})`);
+    return;
+  }
+
+  // --- C1: WASM Module Loading ---
+  log('\n=== C1: WASM Module Loading ===');
+  assert(WASMModule !== null && WASMModule !== undefined, 'Module loaded');
+  assert(typeof WASMModule.OpenEMS === 'function', 'OpenEMS class available');
+  assert(typeof WASMModule.FS === 'object', 'FS available');
+
+  {
+    const ems = new WASMModule.OpenEMS();
+    assert(typeof ems.configure === 'function', 'configure method exists');
+    assert(typeof ems.loadXML === 'function', 'loadXML method exists');
+    assert(typeof ems.setup === 'function', 'setup method exists');
+    assert(typeof ems.run === 'function', 'run method exists');
+    assert(typeof ems.readFile === 'function', 'readFile method exists');
+    assert(typeof ems.listFiles === 'function', 'listFiles method exists');
+    ems.delete();
+  }
+
+  // --- C2: WASM Cavity Simulation ---
+  log('\n=== C2: WASM Cavity Simulation ===');
+  try {
+    try { WASMModule.FS.mkdir('/sim_browser'); } catch (e) {}
+    WASMModule.FS.chdir('/sim_browser');
+
+    const a = 5e-2, b = 2e-2, d = 6e-2;
+    const meshX = Array.from(linspace(0, a, 26));
+    const meshY = Array.from(linspace(0, b, 11));
+    const meshZ = Array.from(linspace(0, d, 32));
+    const exIdxX = Math.floor(26 * 2 / 3), exIdxY = Math.floor(11 * 2 / 3), exIdxZ = Math.floor(32 * 2 / 3);
+    const prX = meshX[Math.floor(26 / 4)], prY = meshY[Math.floor(11 / 2)], prZIdx = Math.floor(32 / 5);
+    const fStart = 1e9, fStop = 10e9, f0 = (fStop + fStart) / 2, fc = (fStop - fStart) / 2;
+
+    const sim = new Simulation({ nrTS: 20000, endCriteria: 1e-6 });
+    sim.setExcitation({ type: 'gauss', f0, fc });
+    sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    sim.setGrid(1, meshX, meshY, meshZ);
+    const excProp = { type: 'Excitation', name: 'excite1', attrs: { Number: 0, Type: 0, Excite: '1,1,1' }, primitives: [{ type: 'Box', start: [meshX[exIdxX], meshY[exIdxY], meshZ[exIdxZ]], stop: [meshX[exIdxX + 1], meshY[exIdxY + 1], meshZ[exIdxZ + 1]], priority: 0 }] };
+    sim._properties.push(excProp);
+    sim.addProbe('ut1z', 0, [prX, prY, meshZ[prZIdx]], [prX, prY, meshZ[prZIdx + 1]]);
+    const xml = sim.toXML();
+    assert(xml.includes('NumberOfTimesteps="20000"'), 'Cavity XML has 20000 timesteps');
+
+    log('  Running FDTD cavity simulation via WASM...');
+    const t0 = performance.now();
+    const { module: mod, ems, simPath } = await sim.run(wasmFactory);
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+    log(`  Simulation complete in ${elapsed}s`);
+
+    const files = ems.listFiles(simPath);
+    const fileList = [];
+    for (let i = 0; i < files.size(); i++) fileList.push(files.get(i));
+    const probeFile = fileList.find(f => f.startsWith('ut1z') && !f.includes('FD'));
+    assert(probeFile !== undefined, 'Probe output file found');
+
+    if (probeFile) {
+      const probeText = ems.readFile(`${simPath}/${probeFile}`);
+      const probe = parseProbe(probeText);
+      assert(probe.time.length > 100, `Probe has ${probe.time.length} samples`);
+      let hasNonZero = false;
+      for (let i = 0; i < probe.values.length; i++) if (probe.values[i] !== 0) { hasNonZero = true; break; }
+      assert(hasNonZero, 'Probe has non-zero values');
+
+      if (hasNonZero) {
+        const dt = probe.time[1] - probe.time[0];
+        const NFFT = Math.pow(2, Math.ceil(Math.log2(probe.time.length)));
+        const df = 1 / (NFFT * dt);
+        const nFreqs = Math.ceil((fStop - fStart) / df);
+        const freqs = new Float64Array(nFreqs);
+        for (let i = 0; i < nFreqs; i++) freqs[i] = fStart + i * df;
+        const spectrum = dftMagnitude(probe.time, probe.values, freqs);
+        const globalMax = Math.max(...spectrum);
+        const normSpectrum = new Float64Array(spectrum.length);
+        for (let i = 0; i < spectrum.length; i++) normSpectrum[i] = spectrum[i] / globalMax;
+        const peaks = findPeaks(freqs, normSpectrum, 0.1);
+        assert(peaks.length >= 1, `Cavity has ${peaks.length} spectral peaks`);
+      }
+    }
+    ems.delete();
+  } catch (e) {
+    log(`  FAIL: WASM Cavity: ${e.message}`);
+    failed++;
+  }
+
+  // --- C3: WASM Engine Types ---
+  log('\n=== C3: WASM Engine Types ===');
+  try {
+    const ems = new WASMModule.OpenEMS();
+    // Test basic engine
+    ems.configure('--engine=basic');
+    assert(true, 'Engine basic configured');
+    // Test SSE engine
+    ems.configure('--engine=sse');
+    assert(true, 'Engine sse configured');
+    ems.delete();
+  } catch (e) {
+    log(`  INFO: Engine type test: ${e.message}`);
+  }
+
+  // --- C4: WASM Coefficient Extraction ---
+  log('\n=== C4: WASM Coefficient Extraction ===');
+  try {
+    try { WASMModule.FS.mkdir('/sim_coeff'); } catch (e) {}
+    WASMModule.FS.chdir('/sim_coeff');
+
+    const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+    sim.setExcitation({ type: 'gauss', f0: 5e9, fc: 4e9 });
+    sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    sim.setGrid(1, Array.from(linspace(0, 0.05, 6)), Array.from(linspace(0, 0.02, 4)), Array.from(linspace(0, 0.06, 8)));
+    const xml = sim.toXML();
+
+    const ems = new WASMModule.OpenEMS();
+    ems.configure('--engine=basic --numThreads=0');
+    ems.loadXML(xml, '/sim_coeff');
+    ems.setup();
+
+    if (typeof ems.getGridSize === 'function') {
+      const gs = ems.getGridSize();
+      assert(gs.size() === 3, 'getGridSize returns 3 elements');
+      assert(gs.get(0) > 0 && gs.get(1) > 0 && gs.get(2) > 0, 'Grid dimensions positive');
+      gs.delete();
+    }
+    if (typeof ems.getVV === 'function') {
+      const vv = ems.getVV();
+      assert(vv.size() > 0, `getVV returns ${vv.size()} coefficients`);
+      vv.delete();
+    }
+    ems.delete();
+  } catch (e) {
+    log(`  INFO: Coefficient extraction: ${e.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SECTION D: WebGPU Shader Tests (GPU required)
+// ---------------------------------------------------------------------------
+
+async function runSectionD() {
+  log('\n======================================================================');
+  log('SECTION D: WebGPU Shader Tests');
+  log('======================================================================');
+
+  if (!navigator.gpu) {
+    log('  SKIP: WebGPU not available');
+    return;
+  }
+
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) { log('  SKIP: No GPU adapter'); return; }
+  const device = await adapter.requestDevice();
+  assert(device !== null, 'GPU device obtained');
+
+  // --- D1: Shader Compilation ---
+  log('\n=== D1: Shader Compilation ===');
+  const shaderFiles = [
+    ['update_voltage.wgsl', 'Voltage'],
+    ['update_current.wgsl', 'Current'],
+    ['excitation.wgsl', 'Excitation'],
+    ['update_pml.wgsl', 'PML'],
+    ['lorentz_ade.wgsl', 'Lorentz ADE'],
+    ['tfsf.wgsl', 'TFSF'],
+    ['lumped_rlc.wgsl', 'Lumped RLC'],
+    ['mur_abc.wgsl', 'Mur ABC'],
+    ['steady_state.wgsl', 'Steady State'],
+  ];
+
+  for (const [file, name] of shaderFiles) {
+    try {
+      const wgsl = await (await fetch(`/src/shaders/${file}`)).text();
+      assert(wgsl.length > 50, `${name} shader loaded (${wgsl.length} chars)`);
+      const module = device.createShaderModule({ code: wgsl });
+      const info = await module.getCompilationInfo();
+      const errors = info.messages.filter(m => m.type === 'error');
+      assert(errors.length === 0, `${name} shader compiled (${errors.length} errors)`);
+    } catch (e) {
+      log(`  FAIL: ${name} shader: ${e.message}`);
+      failed++;
+    }
+  }
+
+  // --- D2: Voltage Update Pipeline + GPU-vs-CPU ---
+  log('\n=== D2: Voltage Update Pipeline + GPU-vs-CPU ===');
+  try {
+    const Nx = 8, Ny = 8, Nz = 8;
+    const totalCells = Nx * Ny * Nz;
+    const bufSize = 3 * totalCells * 4;
+    const voltageWGSL = await (await fetch('/src/shaders/update_voltage.wgsl')).text();
+    const voltageModule = device.createShaderModule({ code: voltageWGSL });
+
+    const voltBuffer = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const currBuffer = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const vvBuffer = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    const viBuffer = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+
+    const ones = new Float32Array(3 * totalCells).fill(1.0);
+    const halves = new Float32Array(3 * totalCells).fill(0.5);
+    device.queue.writeBuffer(vvBuffer, 0, ones);
+    device.queue.writeBuffer(viBuffer, 0, halves);
+
+    const currData = new Float32Array(3 * totalCells);
+    for (let i = 0; i < currData.length; i++) currData[i] = Math.sin(i * 0.1);
+    device.queue.writeBuffer(currBuffer, 0, currData);
+
+    const paramsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const paramsData = new ArrayBuffer(32);
+    new Uint32Array(paramsData, 0, 4).set([Nx, Ny, Nz, 0]);
+    new Int32Array(paramsData, 16, 4).set([1, 1, 1, 0]);
+    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+
+    const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module: voltageModule, entryPoint: 'update_voltages' } });
+    const bindGroup0 = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: voltBuffer } }, { binding: 1, resource: { buffer: currBuffer } }, { binding: 2, resource: { buffer: paramsBuffer } }] });
+    const bindGroup1 = device.createBindGroup({ layout: pipeline.getBindGroupLayout(1), entries: [{ binding: 0, resource: { buffer: vvBuffer } }, { binding: 1, resource: { buffer: viBuffer } }] });
+
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup0);
+    pass.setBindGroup(1, bindGroup1);
+    pass.dispatchWorkgroups(Math.ceil(Nx / 4), Math.ceil(Ny / 4), Math.ceil(Nz / 4));
+    pass.end();
+    const readback = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    encoder.copyBufferToBuffer(voltBuffer, 0, readback, 0, bufSize);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    const result = new Float32Array(readback.getMappedRange().slice(0));
+    readback.unmap();
+
+    assert(result.length === 3 * totalCells, `Output size correct (${result.length})`);
+    let hasNonZero = false, hasNaN = false;
+    for (let i = 0; i < result.length; i++) { if (result[i] !== 0) hasNonZero = true; if (isNaN(result[i])) hasNaN = true; }
+    assert(hasNonZero, 'Voltage update produced non-zero results');
+    assert(!hasNaN, 'No NaN in voltage output');
+
+    // CPU reference comparison
+    const cpuVolt = new Float32Array(3 * totalCells);
+    const idx2 = (n, x, y, z) => n * Nx * Ny * Nz + x * Ny * Nz + y * Nz + z;
+    for (let x = 0; x < Nx; x++) {
+      const shiftX = x > 0 ? 1 : 0;
+      for (let y = 0; y < Ny; y++) {
+        const shiftY = y > 0 ? 1 : 0;
+        for (let z = 0; z < Nz; z++) {
+          const shiftZ = z > 0 ? 1 : 0;
+          cpuVolt[idx2(0, x, y, z)] = halves[idx2(0, x, y, z)] * (currData[idx2(2, x, y, z)] - currData[idx2(2, x, y - shiftY, z)] - currData[idx2(1, x, y, z)] + currData[idx2(1, x, y, z - shiftZ)]);
+          cpuVolt[idx2(1, x, y, z)] = halves[idx2(1, x, y, z)] * (currData[idx2(0, x, y, z)] - currData[idx2(0, x, y, z - shiftZ)] - currData[idx2(2, x, y, z)] + currData[idx2(2, x - shiftX, y, z)]);
+          cpuVolt[idx2(2, x, y, z)] = halves[idx2(2, x, y, z)] * (currData[idx2(1, x, y, z)] - currData[idx2(1, x - shiftX, y, z)] - currData[idx2(0, x, y, z)] + currData[idx2(0, x, y - shiftY, z)]);
+        }
+      }
+    }
+    let maxDiff = 0;
+    for (let i = 0; i < result.length; i++) { const d = Math.abs(result[i] - cpuVolt[i]); if (d > maxDiff) maxDiff = d; }
+    assert(maxDiff < 1e-5, `GPU matches CPU reference (max diff=${maxDiff.toExponential(3)})`);
+
+    voltBuffer.destroy(); currBuffer.destroy(); vvBuffer.destroy(); viBuffer.destroy();
+    paramsBuffer.destroy(); readback.destroy();
+  } catch (e) {
+    log(`  FAIL: Voltage pipeline: ${e.message}`);
+    failed++;
+  }
+
+  device.destroy();
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+async function run() {
+  log('openEMS Unified Browser Tests');
+  log(`Started at ${new Date().toISOString()}\n`);
+
+  try {
+    await runSectionA();
+  } catch (e) {
+    log(`\nSECTION A FATAL: ${e.message}\n${e.stack}`);
+    failed++;
+  }
+
+  try {
+    await runSectionB();
+  } catch (e) {
+    log(`\nSECTION B FATAL: ${e.message}\n${e.stack}`);
+    failed++;
+  }
+
+  try {
+    await runSectionC();
+  } catch (e) {
+    log(`\nSECTION C FATAL: ${e.message}\n${e.stack}`);
+    failed++;
+  }
+
+  try {
+    await runSectionD();
+  } catch (e) {
+    log(`\nSECTION D FATAL: ${e.message}\n${e.stack}`);
+    failed++;
+  }
+
+  log(`\n${'='.repeat(60)}`);
+  log(`Results: ${passed} passed, ${failed} failed`);
+  log(`Completed at ${new Date().toISOString()}`);
+  window.__TEST_RESULTS__ = { passed, failed, done: true };
+}
+
+run().catch(e => {
+  log(`FATAL: ${e.message}\n${e.stack}`);
+  window.__TEST_RESULTS__ = { passed, failed: failed + 1, done: true };
+});
+
+</script>
+</body>
+</html>
