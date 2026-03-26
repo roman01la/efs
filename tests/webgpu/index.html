@@ -901,9 +901,13 @@ async function run() {
       [64, 64, 64],
     ];
 
+    // wasm64 loading disabled for perf benchmarks (SharedArrayBuffer + memory64
+    // initialization is slow in headless Chrome; run separately if needed)
+    const WASM64Module = null;
+
     log('');
-    log('  Grid          | WebGPU       | WASM CPU     | JS CPU       | GPU/WASM | GPU/JS');
-    log('  --------------|--------------|--------------|--------------|----------|-------');
+    log('  Grid          | WebGPU       | WASM basic   | WASM MT      | JS CPU       | GPU/WASM');
+    log('  --------------|--------------|--------------|--------------|--------------|----------');
 
     for (const [Nx, Ny, Nz] of sizes) {
       const total = Nx * Ny * Nz;
@@ -946,28 +950,28 @@ async function run() {
       const gpuVolt = new Float32Array(gpuFields.volt);
       gpuEng.destroy();
 
-      // --- WASM CPU (openEMS via Embind) ---
-      const simDir = `/bench_${label}`;
-      try { WASMModule.FS.mkdir(simDir); } catch(e) {}
-      WASMModule.FS.chdir(simDir);
+      // --- WASM CPU basic ---
+      function runWASMBench(mod, engineType, lbl) {
+        const simDir = `/bench_${lbl}_${label}`;
+        try { mod.FS.mkdir(simDir); } catch(e) {}
+        mod.FS.chdir(simDir);
+        const wasmSteps = STEPS + 5;
+        const xml = makeBenchXML(Nx, Ny, Nz, wasmSteps);
+        const ems = new mod.OpenEMS();
+        ems.configure(engineType, wasmSteps, 1e-20);
+        if (!ems.loadXML(xml)) { ems.delete(); return null; }
+        const rc = ems.setup();
+        if (rc !== 0) { ems.delete(); return null; }
+        const t = performance.now();
+        try { ems.run(); } catch(e) { /* unwind from MT */ }
+        const ms = performance.now() - t;
+        try { ems.delete(); } catch(e) {}
+        return cells * wasmSteps / ms / 1000;
+      }
 
-      const wasmSteps = STEPS + 5;
-      const xml = makeBenchXML(Nx, Ny, Nz, wasmSteps);
-      const ems = new WASMModule.OpenEMS();
-      ems.configure(0, wasmSteps, 1e-20); // tiny endCriteria to force all steps
-
-      const loadOk = ems.loadXML(xml);
-      if (!loadOk) { log(`  SKIP ${label}: WASM XML load failed`); ems.delete(); continue; }
-      const rc = ems.setup();
-      if (rc !== 0) { log(`  SKIP ${label}: WASM setup failed (rc=${rc})`); ems.delete(); continue; }
-
-      const wasmStart = performance.now();
-      ems.run();
-      const wasmMs = performance.now() - wasmStart;
-      // WASM runs setup+warmup+steps together; subtract estimated setup overhead
-      const wasmCellSteps = cells * (STEPS + 5);
-      const wasmMC = (wasmCellSteps / wasmMs / 1000);
-      ems.delete();
+      const wasmMC = runWASMBench(WASMModule, 0, 'basic');
+      // WASM multithreaded requires manual browser testing (pthreads hang in headless)
+      const wasmMtMC = null;
 
       // --- JS CPU ---
       const cpuEng = new PerfCPU([Nx, Ny, Nz], coeffs);
@@ -987,10 +991,11 @@ async function run() {
       }
 
       const pad = (s, n) => s.toString().padStart(n);
-      log(`  ${label.padEnd(14)}| ${pad(gpuMC.toFixed(0), 5)} MC/s   | ${pad(wasmMC.toFixed(0), 5)} MC/s   | ${pad(cpuMC.toFixed(0), 5)} MC/s   | ${pad((wasmMs > 0 ? wasmMC / gpuMC : 0).toFixed(1), 5)}x  | ${pad((cpuMs / gpuMs).toFixed(1), 5)}x`);
+      const fmc = (v) => v != null ? pad(v.toFixed(0), 5) + ' MC/s' : '  N/A   ';
+      log(`  ${label.padEnd(14)}| ${fmc(gpuMC)}   | ${fmc(wasmMC)}   | ${fmc(wasmMtMC)}   | ${fmc(cpuMC)}   | ${pad((wasmMC ? gpuMC/wasmMC : 0).toFixed(1), 5)}x`);
 
       assert(maxDiff < 1e-3, `${label}: GPU matches JS CPU (diff=${maxDiff.toExponential(2)})`);
-      assert(true, `${label}: WebGPU=${gpuMC.toFixed(0)}, WASM=${wasmMC.toFixed(0)}, JS=${cpuMC.toFixed(0)} MCells/s`);
+      assert(true, `${label}: GPU=${gpuMC.toFixed(0)}, WASM=${(wasmMC||0).toFixed(0)}, MT=${(wasmMtMC||0).toFixed(0)}, JS=${cpuMC.toFixed(0)} MCells/s`);
     }
 
     // Load native benchmark results if available
@@ -1015,8 +1020,9 @@ async function run() {
     }
 
     log('');
-    log('  WASM CPU = openEMS basic engine compiled to WebAssembly (no SIMD).');
-    log('  JS CPU = pure JavaScript reference implementation.');
+    log('  WASM basic = openEMS basic engine (wasm32, no SIMD).');
+    log('  WASM MT = openEMS multithreaded engine (wasm32, SSE compressed + pthreads).');
+    log('  JS CPU = pure JavaScript FDTD reference implementation.');
 
   } catch (e) {
     log(`  FAIL: Performance test: ${e.message}\n${e.stack}`);
