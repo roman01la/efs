@@ -559,6 +559,39 @@ export class WebGPUEngine {
         this.excPosBuffer = null;
         this.excitationConfigured = false;
 
+        // Lorentz ADE state
+        this.adeOrders = [];          // array of { pipeline, directions: [{ bindGroup, dispatch }] }
+        this.adeCurrOrders = [];      // current ADE orders (separate pipeline)
+        this.adeConfigured = false;
+
+        // TFSF state
+        this.tfsfVoltPipeline = null;
+        this.tfsfCurrPipeline = null;
+        this.tfsfVoltBindGroup = null;
+        this.tfsfCurrBindGroup = null;
+        this.tfsfParamsBuffer = null;
+        this.tfsfConfigured = false;
+
+        // RLC state
+        this.rlcPipeline = null;
+        this.rlcBindGroup = null;
+        this.rlcConfigured = false;
+
+        // Mur ABC state
+        this.murPrePipeline = null;
+        this.murPostPipeline = null;
+        this.murApplyPipeline = null;
+        this.murBindGroup = null;
+        this.murConfigured = false;
+
+        // Steady-state state
+        this.ssPipeline = null;
+        this.ssBindGroup = null;
+        this.ssParamsBuffer = null;
+        this.ssConfigured = false;
+        this.ssCurrentSample = 0;
+        this.ssRecording = false;
+
         // Pipelines
         this.voltagePipeline = null;
         this.currentPipeline = null;
@@ -800,6 +833,683 @@ export class WebGPUEngine {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Lorentz ADE Extension
+    // -----------------------------------------------------------------------
+
+    /**
+     * Configure Lorentz/Drude ADE for GPU.
+     * Each order+direction becomes a separate dispatch.
+     *
+     * @param {Object} config - same as CPUFDTDEngine.configureLorentz()
+     */
+    configureLorentzADE(config) {
+        if (!this.device) throw new Error('WebGPU device not initialized.');
+
+        // Voltage ADE pipeline (reuses the embedded LORENTZ_ADE_WGSL which has update_volt_ade)
+        const voltAdeModule = this.device.createShaderModule({ code: LORENTZ_ADE_WGSL });
+        const voltAdePipeline = this.device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: voltAdeModule, entryPoint: 'update_volt_ade' },
+        });
+
+        // Current ADE pipeline — same shader structure but operates on curr buffer.
+        // We reuse the same shader code but with a separate bind group pointing to curr.
+        const currAdeModule = this.device.createShaderModule({ code: LORENTZ_ADE_WGSL });
+        const currAdePipeline = this.device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: currAdeModule, entryPoint: 'update_volt_ade' },
+        });
+
+        this.adeOrders = [];
+        this.adeCurrOrders = [];
+
+        for (const order of config.orders) {
+            const voltDirs = [];
+            const currDirs = [];
+
+            for (const d of order.directions) {
+                const numCells = order.numCells;
+
+                // ADE params uniform: 4 x u32 = 16 bytes
+                const adeParamsBuffer = this.device.createBuffer({
+                    size: 16,
+                    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                });
+                const adeParamsData = new Uint32Array([numCells, order.hasLorentz ? 1 : 0, d.dir, this.totalCells]);
+                this.device.queue.writeBuffer(adeParamsBuffer, 0, adeParamsData);
+
+                // Voltage ADE state buffers
+                const voltADEBuf = this.device.createBuffer({
+                    size: Math.max(numCells * 4, 4),
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+                });
+                const voltLorADEBuf = this.device.createBuffer({
+                    size: Math.max(numCells * 4, 4),
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+                });
+
+                const vIntBuf = this._createAndUploadBuffer(d.v_int_ADE, GPUBufferUsage.STORAGE);
+                const vExtBuf = this._createAndUploadBuffer(d.v_ext_ADE, GPUBufferUsage.STORAGE);
+                const vLorBuf = this._createAndUploadBuffer(
+                    d.v_Lor_ADE || new Float32Array(numCells), GPUBufferUsage.STORAGE);
+                const posIdxBuf = this._createAndUploadBuffer(d.pos_idx, GPUBufferUsage.STORAGE);
+
+                const voltBindGroup = this.device.createBindGroup({
+                    layout: voltAdePipeline.getBindGroupLayout(1),
+                    entries: [
+                        { binding: 0, resource: { buffer: adeParamsBuffer } },
+                        { binding: 1, resource: { buffer: voltADEBuf } },
+                        { binding: 2, resource: { buffer: voltLorADEBuf } },
+                        { binding: 3, resource: { buffer: vIntBuf } },
+                        { binding: 4, resource: { buffer: vExtBuf } },
+                        { binding: 5, resource: { buffer: vLorBuf } },
+                        { binding: 6, resource: { buffer: posIdxBuf } },
+                    ],
+                });
+
+                voltDirs.push({
+                    bindGroup: voltBindGroup,
+                    dispatch: Math.ceil(numCells / this.WG_SIZE_EXC),
+                    buffers: [adeParamsBuffer, voltADEBuf, voltLorADEBuf, vIntBuf, vExtBuf, vLorBuf, posIdxBuf],
+                });
+
+                // Current ADE — same layout, different coefficient buffers
+                const adeParamsBufferC = this.device.createBuffer({
+                    size: 16,
+                    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                });
+                this.device.queue.writeBuffer(adeParamsBufferC, 0, adeParamsData);
+
+                const currADEBuf = this.device.createBuffer({
+                    size: Math.max(numCells * 4, 4),
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+                });
+                const currLorADEBuf = this.device.createBuffer({
+                    size: Math.max(numCells * 4, 4),
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+                });
+
+                const iIntBuf = this._createAndUploadBuffer(
+                    d.i_int_ADE || new Float32Array(numCells), GPUBufferUsage.STORAGE);
+                const iExtBuf = this._createAndUploadBuffer(
+                    d.i_ext_ADE || new Float32Array(numCells), GPUBufferUsage.STORAGE);
+                const iLorBuf = this._createAndUploadBuffer(
+                    d.i_Lor_ADE || new Float32Array(numCells), GPUBufferUsage.STORAGE);
+
+                const currBindGroup = this.device.createBindGroup({
+                    layout: currAdePipeline.getBindGroupLayout(1),
+                    entries: [
+                        { binding: 0, resource: { buffer: adeParamsBufferC } },
+                        { binding: 1, resource: { buffer: currADEBuf } },
+                        { binding: 2, resource: { buffer: currLorADEBuf } },
+                        { binding: 3, resource: { buffer: iIntBuf } },
+                        { binding: 4, resource: { buffer: iExtBuf } },
+                        { binding: 5, resource: { buffer: iLorBuf } },
+                        { binding: 6, resource: { buffer: posIdxBuf } },
+                    ],
+                });
+
+                currDirs.push({
+                    bindGroup: currBindGroup,
+                    dispatch: Math.ceil(numCells / this.WG_SIZE_EXC),
+                    buffers: [adeParamsBufferC, currADEBuf, currLorADEBuf, iIntBuf, iExtBuf, iLorBuf],
+                });
+            }
+
+            this.adeOrders.push({ pipeline: voltAdePipeline, directions: voltDirs });
+            this.adeCurrOrders.push({ pipeline: currAdePipeline, directions: currDirs });
+        }
+
+        this.adeConfigured = true;
+    }
+
+    /**
+     * Dispatch voltage ADE updates.
+     * @param {GPUCommandEncoder} encoder
+     */
+    stepVoltADE(encoder) {
+        if (!this.adeConfigured) return;
+        for (const order of this.adeOrders) {
+            for (const d of order.directions) {
+                const pass = encoder.beginComputePass();
+                pass.setPipeline(order.pipeline);
+                pass.setBindGroup(0, this.coreBindGroup);
+                pass.setBindGroup(1, d.bindGroup);
+                pass.dispatchWorkgroups(d.dispatch, 1, 1);
+                pass.end();
+            }
+        }
+    }
+
+    /**
+     * Dispatch current ADE updates.
+     * @param {GPUCommandEncoder} encoder
+     */
+    stepCurrADE(encoder) {
+        if (!this.adeConfigured) return;
+        for (const order of this.adeCurrOrders) {
+            for (const d of order.directions) {
+                const pass = encoder.beginComputePass();
+                pass.setPipeline(order.pipeline);
+                pass.setBindGroup(0, this.coreBindGroup);
+                pass.setBindGroup(1, d.bindGroup);
+                pass.dispatchWorkgroups(d.dispatch, 1, 1);
+                pass.end();
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // TFSF Extension
+    // -----------------------------------------------------------------------
+
+    /**
+     * Configure TFSF plane wave injection for GPU.
+     *
+     * @param {Object} config - {
+     *   signal: Float32Array,
+     *   period: number,
+     *   voltagePoints: Array<{ field_idx, delay_int, delay_frac, amp }>,
+     *   currentPoints: Array<{ field_idx, delay_int, delay_frac, amp }>,
+     * }
+     */
+    configureTFSF(config) {
+        if (!this.device) throw new Error('WebGPU device not initialized.');
+
+        const signalBuf = this._createAndUploadBuffer(config.signal, GPUBufferUsage.STORAGE);
+        this._tfsfSignalLength = config.signal.length;
+        this._tfsfPeriod = config.period || 0;
+
+        // TFSF params uniform: 8 x u32 = 32 bytes
+        this.tfsfParamsBuffer = this.device.createBuffer({
+            size: 32,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        // Voltage points
+        const voltPts = config.voltagePoints || [];
+        const currPts = config.currentPoints || [];
+        this._tfsfNumVoltPoints = voltPts.length;
+        this._tfsfNumCurrPoints = currPts.length;
+
+        // Combine lower (voltage) and upper (current) points for the voltage shader
+        const allVoltPts = voltPts;
+        if (allVoltPts.length > 0) {
+            const delayIntArr = new Uint32Array(allVoltPts.length);
+            const delayFracArr = new Float32Array(allVoltPts.length);
+            const ampArr = new Float32Array(allVoltPts.length);
+            const fieldIdxArr = new Uint32Array(allVoltPts.length);
+
+            for (let i = 0; i < allVoltPts.length; i++) {
+                delayIntArr[i] = allVoltPts[i].delay_int;
+                delayFracArr[i] = allVoltPts[i].delay_frac;
+                ampArr[i] = allVoltPts[i].amp;
+                fieldIdxArr[i] = allVoltPts[i].field_idx;
+            }
+
+            const delayIntBuf = this._createAndUploadBuffer(delayIntArr, GPUBufferUsage.STORAGE);
+            const delayFracBuf = this._createAndUploadBuffer(delayFracArr, GPUBufferUsage.STORAGE);
+            const ampBuf = this._createAndUploadBuffer(ampArr, GPUBufferUsage.STORAGE);
+            const fieldIdxBuf = this._createAndUploadBuffer(fieldIdxArr, GPUBufferUsage.STORAGE);
+
+            // Create voltage TFSF pipeline
+            const tfsfVoltModule = this.device.createShaderModule({ code: TFSF_WGSL });
+            this.tfsfVoltPipeline = this.device.createComputePipeline({
+                layout: 'auto',
+                compute: { module: tfsfVoltModule, entryPoint: 'tfsf_apply_voltage' },
+            });
+
+            this.tfsfVoltBindGroup = this.device.createBindGroup({
+                layout: this.tfsfVoltPipeline.getBindGroupLayout(1),
+                entries: [
+                    { binding: 0, resource: { buffer: this.tfsfParamsBuffer } },
+                    { binding: 1, resource: { buffer: signalBuf } },
+                    { binding: 2, resource: { buffer: delayIntBuf } },
+                    { binding: 3, resource: { buffer: delayFracBuf } },
+                    { binding: 4, resource: { buffer: ampBuf } },
+                    { binding: 5, resource: { buffer: fieldIdxBuf } },
+                ],
+            });
+        }
+
+        // Current points — reuse same shader structure (operates on volt buffer in shader,
+        // but for current injection we use the same entry point with curr-mapped points)
+        if (currPts.length > 0) {
+            const delayIntArr = new Uint32Array(currPts.length);
+            const delayFracArr = new Float32Array(currPts.length);
+            const ampArr = new Float32Array(currPts.length);
+            const fieldIdxArr = new Uint32Array(currPts.length);
+
+            for (let i = 0; i < currPts.length; i++) {
+                delayIntArr[i] = currPts[i].delay_int;
+                delayFracArr[i] = currPts[i].delay_frac;
+                ampArr[i] = currPts[i].amp;
+                fieldIdxArr[i] = currPts[i].field_idx;
+            }
+
+            const delayIntBuf = this._createAndUploadBuffer(delayIntArr, GPUBufferUsage.STORAGE);
+            const delayFracBuf = this._createAndUploadBuffer(delayFracArr, GPUBufferUsage.STORAGE);
+            const ampBuf = this._createAndUploadBuffer(ampArr, GPUBufferUsage.STORAGE);
+            const fieldIdxBuf = this._createAndUploadBuffer(fieldIdxArr, GPUBufferUsage.STORAGE);
+
+            // For current injection, we need a separate TFSF shader that writes to curr instead of volt.
+            // Reuse the TFSF_WGSL with volt binding pointing to curr buffer.
+            // We create a second pipeline with the same shader but different core bind group.
+            const tfsfCurrModule = this.device.createShaderModule({ code: TFSF_WGSL });
+            this.tfsfCurrPipeline = this.device.createComputePipeline({
+                layout: 'auto',
+                compute: { module: tfsfCurrModule, entryPoint: 'tfsf_apply_voltage' },
+            });
+
+            // Create a separate TFSF params buffer for current
+            this._tfsfCurrParamsBuffer = this.device.createBuffer({
+                size: 32,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            });
+
+            this.tfsfCurrBindGroup = this.device.createBindGroup({
+                layout: this.tfsfCurrPipeline.getBindGroupLayout(1),
+                entries: [
+                    { binding: 0, resource: { buffer: this._tfsfCurrParamsBuffer } },
+                    { binding: 1, resource: { buffer: signalBuf } },
+                    { binding: 2, resource: { buffer: delayIntBuf } },
+                    { binding: 3, resource: { buffer: delayFracBuf } },
+                    { binding: 4, resource: { buffer: ampBuf } },
+                    { binding: 5, resource: { buffer: fieldIdxBuf } },
+                ],
+            });
+
+            // Create a core bind group variant where binding 0 is curr (for current TFSF injection)
+            this._tfsfCurrCoreBindGroup = this.device.createBindGroup({
+                layout: this.tfsfCurrPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: this.currBuffer } }, // curr instead of volt
+                    { binding: 1, resource: { buffer: this.currBuffer } },
+                    { binding: 2, resource: { buffer: this.paramsBuffer } },
+                ],
+            });
+        }
+
+        this.tfsfConfigured = true;
+    }
+
+    /**
+     * Update TFSF params uniform with current timestep.
+     */
+    _updateTFSFParams() {
+        // TFSFParams: numTS(u32) + period(u32) + signalLength(u32) + numLowerPoints(u32) +
+        //             numUpperPoints(u32) + pad(vec3<u32>) = 32 bytes
+        const data = new Uint32Array(8);
+        data[0] = this.numTS;
+        data[1] = this._tfsfPeriod;
+        data[2] = this._tfsfSignalLength;
+        data[3] = this._tfsfNumVoltPoints; // numLowerPoints
+        data[4] = 0; // numUpperPoints (handled separately)
+        data[5] = 0;
+        data[6] = 0;
+        data[7] = 0;
+        this.device.queue.writeBuffer(this.tfsfParamsBuffer, 0, data);
+
+        if (this._tfsfCurrParamsBuffer) {
+            const currData = new Uint32Array(8);
+            currData[0] = this.numTS;
+            currData[1] = this._tfsfPeriod;
+            currData[2] = this._tfsfSignalLength;
+            currData[3] = this._tfsfNumCurrPoints;
+            currData[4] = 0;
+            this.device.queue.writeBuffer(this._tfsfCurrParamsBuffer, 0, currData);
+        }
+    }
+
+    /**
+     * Dispatch TFSF voltage injection.
+     * @param {GPUCommandEncoder} encoder
+     */
+    stepTFSFVoltage(encoder) {
+        if (!this.tfsfConfigured || !this.tfsfVoltPipeline) return;
+        this._updateTFSFParams();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.tfsfVoltPipeline);
+        pass.setBindGroup(0, this.coreBindGroup);
+        pass.setBindGroup(1, this.tfsfVoltBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(this._tfsfNumVoltPoints / this.WG_SIZE_EXC), 1, 1);
+        pass.end();
+    }
+
+    /**
+     * Dispatch TFSF current injection.
+     * @param {GPUCommandEncoder} encoder
+     */
+    stepTFSFCurrent(encoder) {
+        if (!this.tfsfConfigured || !this.tfsfCurrPipeline) return;
+        this._updateTFSFParams();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.tfsfCurrPipeline);
+        pass.setBindGroup(0, this._tfsfCurrCoreBindGroup);
+        pass.setBindGroup(1, this.tfsfCurrBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(this._tfsfNumCurrPoints / this.WG_SIZE_EXC), 1, 1);
+        pass.end();
+    }
+
+    // -----------------------------------------------------------------------
+    // Lumped RLC Extension
+    // -----------------------------------------------------------------------
+
+    /**
+     * Configure lumped RLC elements for GPU.
+     *
+     * @param {Object} config - { elements: Array<{
+     *   field_idx, direction, type_flag, i2v, ilv, vvd, vv2, vj1, vj2, ib0, b1, b2
+     * }> }
+     */
+    configureRLC(config) {
+        if (!this.device) throw new Error('WebGPU device not initialized.');
+
+        const n = config.elements.length;
+        if (n === 0) return;
+
+        // RLC params uniform: 4 x u32 = 16 bytes
+        const rlcParamsBuffer = this.device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        const rlcParamsData = new Uint32Array([n, this.totalCells, 0, 0]);
+        this.device.queue.writeBuffer(rlcParamsBuffer, 0, rlcParamsData);
+
+        // Pack elements into a struct-of-arrays: 12 fields per element, each field is u32 or f32.
+        // RLCElement struct size: 12 * 4 = 48 bytes per element
+        const elemData = new ArrayBuffer(n * 48);
+        const u32View = new Uint32Array(elemData);
+        const f32View = new Float32Array(elemData);
+        for (let i = 0; i < n; i++) {
+            const e = config.elements[i];
+            const base = i * 12;
+            u32View[base + 0] = e.field_idx;
+            u32View[base + 1] = e.direction;
+            u32View[base + 2] = e.type_flag;
+            f32View[base + 3] = e.i2v;
+            f32View[base + 4] = e.ilv;
+            f32View[base + 5] = e.vvd;
+            f32View[base + 6] = e.vv2;
+            f32View[base + 7] = e.vj1;
+            f32View[base + 8] = e.vj2;
+            f32View[base + 9] = e.ib0;
+            f32View[base + 10] = e.b1;
+            f32View[base + 11] = e.b2;
+        }
+        const elemBuffer = this._createAndUploadBuffer(new Uint8Array(elemData), GPUBufferUsage.STORAGE);
+
+        // State buffers: Vdn(n*3), Jn(n*3), v_Il(n)
+        const vdnBuffer = this.device.createBuffer({
+            size: n * 3 * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+        });
+        const jnBuffer = this.device.createBuffer({
+            size: n * 3 * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+        });
+        const vilBuffer = this.device.createBuffer({
+            size: n * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+        });
+
+        // Create pipeline
+        const rlcModule = this.device.createShaderModule({ code: LUMPED_RLC_WGSL });
+        this.rlcPipeline = this.device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: rlcModule, entryPoint: 'update_rlc' },
+        });
+
+        this.rlcBindGroup = this.device.createBindGroup({
+            layout: this.rlcPipeline.getBindGroupLayout(1),
+            entries: [
+                { binding: 0, resource: { buffer: rlcParamsBuffer } },
+                { binding: 1, resource: { buffer: elemBuffer } },
+                { binding: 2, resource: { buffer: vdnBuffer } },
+                { binding: 3, resource: { buffer: jnBuffer } },
+                { binding: 4, resource: { buffer: vilBuffer } },
+            ],
+        });
+
+        this._rlcCount = n;
+        this._rlcBuffers = [rlcParamsBuffer, elemBuffer, vdnBuffer, jnBuffer, vilBuffer];
+        this.rlcConfigured = true;
+    }
+
+    /**
+     * Dispatch RLC update (combined pre-voltage + apply in one kernel).
+     * @param {GPUCommandEncoder} encoder
+     */
+    stepRLC(encoder) {
+        if (!this.rlcConfigured) return;
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.rlcPipeline);
+        pass.setBindGroup(0, this.coreBindGroup);
+        pass.setBindGroup(1, this.rlcBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(this._rlcCount / this.WG_SIZE_EXC), 1, 1);
+        pass.end();
+    }
+
+    // -----------------------------------------------------------------------
+    // Mur ABC Extension
+    // -----------------------------------------------------------------------
+
+    /**
+     * Configure Mur ABC boundary for GPU.
+     * Supports dual-component mode (nyP + nyPP) for full C++ compatibility.
+     *
+     * @param {Object} config - Single component: { coeff, normal_idx, shifted_idx }
+     *   Dual component: { coeff_nyP, coeff_nyPP, normal_idx_nyP, shifted_idx_nyP,
+     *                      normal_idx_nyPP, shifted_idx_nyPP }
+     */
+    configureMur(config) {
+        if (!this.device) throw new Error('WebGPU device not initialized.');
+
+        let coeffArr, normalIdxArr, shiftedIdxArr, numPoints;
+
+        if (config.coeff_nyP) {
+            // Dual-component mode: concatenate nyP and nyPP arrays
+            const n1 = config.normal_idx_nyP.length;
+            const n2 = config.normal_idx_nyPP.length;
+            numPoints = n1 + n2;
+
+            coeffArr = new Float32Array(numPoints);
+            normalIdxArr = new Uint32Array(numPoints);
+            shiftedIdxArr = new Uint32Array(numPoints);
+
+            coeffArr.set(config.coeff_nyP, 0);
+            coeffArr.set(config.coeff_nyPP, n1);
+            normalIdxArr.set(config.normal_idx_nyP, 0);
+            normalIdxArr.set(config.normal_idx_nyPP, n1);
+            shiftedIdxArr.set(config.shifted_idx_nyP, 0);
+            shiftedIdxArr.set(config.shifted_idx_nyPP, n1);
+        } else {
+            // Single-component mode (backward compatible)
+            numPoints = config.normal_idx.length;
+            if (typeof config.coeff === 'number') {
+                coeffArr = new Float32Array(numPoints).fill(config.coeff);
+            } else {
+                coeffArr = config.coeff;
+            }
+            normalIdxArr = config.normal_idx;
+            shiftedIdxArr = config.shifted_idx;
+        }
+
+        // MurParams uniform: numPoints(u32) + pad(vec3<u32>) = 16 bytes
+        const murParamsBuffer = this.device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(murParamsBuffer, 0, new Uint32Array([numPoints, 0, 0, 0]));
+
+        const normalIdxBuf = this._createAndUploadBuffer(normalIdxArr, GPUBufferUsage.STORAGE);
+        const shiftedIdxBuf = this._createAndUploadBuffer(shiftedIdxArr, GPUBufferUsage.STORAGE);
+        const savedVoltBuf = this.device.createBuffer({
+            size: numPoints * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+        });
+        const coeffBuf = this._createAndUploadBuffer(coeffArr, GPUBufferUsage.STORAGE);
+
+        // Create three pipelines for the three entry points
+        const murModule = this.device.createShaderModule({ code: MUR_ABC_WGSL });
+        this.murPrePipeline = this.device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: murModule, entryPoint: 'mur_pre_voltage' },
+        });
+        this.murPostPipeline = this.device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: murModule, entryPoint: 'mur_post_voltage' },
+        });
+        this.murApplyPipeline = this.device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: murModule, entryPoint: 'mur_apply' },
+        });
+
+        // All three share the same bind group layout (group 1)
+        this.murBindGroup = this.device.createBindGroup({
+            layout: this.murPrePipeline.getBindGroupLayout(1),
+            entries: [
+                { binding: 0, resource: { buffer: murParamsBuffer } },
+                { binding: 1, resource: { buffer: normalIdxBuf } },
+                { binding: 2, resource: { buffer: shiftedIdxBuf } },
+                { binding: 3, resource: { buffer: savedVoltBuf } },
+                { binding: 4, resource: { buffer: coeffBuf } },
+            ],
+        });
+
+        this._murNumPoints = numPoints;
+        this._murBuffers = [murParamsBuffer, normalIdxBuf, shiftedIdxBuf, savedVoltBuf, coeffBuf];
+        this.murConfigured = true;
+    }
+
+    /**
+     * Dispatch Mur pre-voltage save.
+     * @param {GPUCommandEncoder} encoder
+     */
+    stepMurPre(encoder) {
+        if (!this.murConfigured) return;
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.murPrePipeline);
+        pass.setBindGroup(0, this.coreBindGroup);
+        pass.setBindGroup(1, this.murBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
+        pass.end();
+    }
+
+    /**
+     * Dispatch Mur post-voltage accumulate.
+     * @param {GPUCommandEncoder} encoder
+     */
+    stepMurPost(encoder) {
+        if (!this.murConfigured) return;
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.murPostPipeline);
+        pass.setBindGroup(0, this.coreBindGroup);
+        pass.setBindGroup(1, this.murBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
+        pass.end();
+    }
+
+    /**
+     * Dispatch Mur apply (overwrite boundary).
+     * @param {GPUCommandEncoder} encoder
+     */
+    stepMurApply(encoder) {
+        if (!this.murConfigured) return;
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.murApplyPipeline);
+        pass.setBindGroup(0, this.coreBindGroup);
+        pass.setBindGroup(1, this.murBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
+        pass.end();
+    }
+
+    // -----------------------------------------------------------------------
+    // Steady-State Detection Extension
+    // -----------------------------------------------------------------------
+
+    /**
+     * Configure steady-state detection for GPU.
+     *
+     * @param {Object} config - {
+     *   probe_idx: Uint32Array,
+     *   periodSamples: number,
+     *   threshold: number,
+     * }
+     */
+    configureSteadyState(config) {
+        if (!this.device) throw new Error('WebGPU device not initialized.');
+
+        const numProbes = config.probe_idx.length;
+
+        // SSParams uniform: 4 x u32 = 16 bytes
+        this.ssParamsBuffer = this.device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        const probeIdxBuf = this._createAndUploadBuffer(config.probe_idx, GPUBufferUsage.STORAGE);
+        const energy1Buf = this.device.createBuffer({
+            size: Math.max(numProbes * 4, 4),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+        });
+        const energy2Buf = this.device.createBuffer({
+            size: Math.max(numProbes * 4, 4),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+        });
+
+        const ssModule = this.device.createShaderModule({ code: STEADY_STATE_WGSL });
+        this.ssPipeline = this.device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: ssModule, entryPoint: 'accumulate_energy' },
+        });
+
+        this.ssBindGroup = this.device.createBindGroup({
+            layout: this.ssPipeline.getBindGroupLayout(1),
+            entries: [
+                { binding: 0, resource: { buffer: this.ssParamsBuffer } },
+                { binding: 1, resource: { buffer: probeIdxBuf } },
+                { binding: 2, resource: { buffer: energy1Buf } },
+                { binding: 3, resource: { buffer: energy2Buf } },
+            ],
+        });
+
+        this._ssNumProbes = numProbes;
+        this._ssPeriodSamples = config.periodSamples;
+        this._ssThreshold = config.threshold || 1e-6;
+        this._ssEnergy1Buf = energy1Buf;
+        this._ssEnergy2Buf = energy2Buf;
+        this._ssBuffers = [this.ssParamsBuffer, probeIdxBuf, energy1Buf, energy2Buf];
+        this.ssCurrentSample = 0;
+        this.ssRecording = false;
+        this.ssConfigured = true;
+    }
+
+    /**
+     * Update steady-state params and dispatch energy accumulation.
+     * @param {GPUCommandEncoder} encoder
+     */
+    stepSteadyState(encoder) {
+        if (!this.ssConfigured || !this.ssRecording) return;
+
+        const data = new Uint32Array(4);
+        data[0] = this._ssNumProbes;
+        data[1] = this._ssPeriodSamples;
+        data[2] = this.ssCurrentSample;
+        data[3] = this.ssRecording ? 1 : 0;
+        this.device.queue.writeBuffer(this.ssParamsBuffer, 0, data);
+
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.ssPipeline);
+        pass.setBindGroup(0, this.coreBindGroup);
+        pass.setBindGroup(1, this.ssBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(this._ssNumProbes / this.WG_SIZE_EXC), 1, 1);
+        pass.end();
+
+        this.ssCurrentSample++;
+    }
+
     /**
      * Dispatch the voltage (E-field) update compute shader.
      * @param {GPUCommandEncoder} [encoder] - optional shared encoder
@@ -897,17 +1607,37 @@ export class WebGPUEngine {
         for (let step = 0; step < numSteps; step++) {
             const encoder = this.device.createCommandEncoder();
 
-            this.stepPML(encoder, 0); // pre-voltage PML
+            // === PRE-VOLTAGE ===
+            this.stepSteadyState(encoder);        // Priority +2M: steady-state energy
+            this.stepPML(encoder, 0);              // Priority +1M: PML pre-voltage
+            this.stepVoltADE(encoder);             // Priority 0: Lorentz/Drude ADE
+            this.stepMurPre(encoder);              // Priority 0: Mur pre-voltage (save boundary)
+            this.stepRLC(encoder);                 // Priority 0: RLC pre-voltage + apply
+
+            // === CORE VOLTAGE UPDATE ===
             this.stepVoltage(encoder);
-            this.stepPML(encoder, 1); // post-voltage PML
 
+            // === POST-VOLTAGE ===
+            this.stepPML(encoder, 1);              // Priority +1M: PML post-voltage
+            this.stepTFSFVoltage(encoder);         // Priority +50K: TFSF voltage injection
+            this.stepMurPost(encoder);             // Priority 0: Mur post-voltage
+
+            // === APPLY TO VOLTAGES ===
             if (this.excitationConfigured) {
-                this.applyExcitation(encoder);
+                this.applyExcitation(encoder);     // Priority -1K: Excitation voltage
             }
+            this.stepMurApply(encoder);            // Priority 0: Mur apply (overwrite boundary)
 
-            this.stepPML(encoder, 2); // pre-current PML
+            // === PRE-CURRENT ===
+            this.stepPML(encoder, 2);              // Priority +1M: PML pre-current
+            this.stepCurrADE(encoder);             // Priority 0: Lorentz/Drude ADE current
+
+            // === CORE CURRENT UPDATE ===
             this.stepCurrent(encoder);
-            this.stepPML(encoder, 3); // post-current PML
+
+            // === POST-CURRENT ===
+            this.stepPML(encoder, 3);              // Priority +1M: PML post-current
+            this.stepTFSFCurrent(encoder);         // Priority +50K: TFSF current injection
 
             commandBuffers.push(encoder.finish());
             this.numTS++;
@@ -989,6 +1719,8 @@ export class WebGPUEngine {
             this.excParamsBuffer, this.excSignalBuffer,
             this.excDelayBuffer, this.excAmpBuffer,
             this.excDirBuffer, this.excPosBuffer,
+            this.tfsfParamsBuffer, this._tfsfCurrParamsBuffer,
+            this.ssParamsBuffer,
         ];
         for (const buf of buffers) {
             if (buf) buf.destroy();
@@ -1002,6 +1734,24 @@ export class WebGPUEngine {
                 if (buf) buf.destroy();
             }
         }
+        // Destroy ADE buffers
+        for (const order of this.adeOrders) {
+            for (const d of order.directions) {
+                for (const buf of (d.buffers || [])) { if (buf) buf.destroy(); }
+            }
+        }
+        for (const order of this.adeCurrOrders) {
+            for (const d of order.directions) {
+                for (const buf of (d.buffers || [])) { if (buf) buf.destroy(); }
+            }
+        }
+        // Destroy RLC buffers
+        for (const buf of (this._rlcBuffers || [])) { if (buf) buf.destroy(); }
+        // Destroy Mur buffers
+        for (const buf of (this._murBuffers || [])) { if (buf) buf.destroy(); }
+        // Destroy steady-state buffers
+        for (const buf of (this._ssBuffers || [])) { if (buf) buf.destroy(); }
+
         if (this.device) {
             this.device.destroy();
         }

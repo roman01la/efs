@@ -616,27 +616,69 @@ export class CPUFDTDEngine {
      * Supports per-point, per-component coefficients matching C++
      * m_Mur_Coeff_nyP(i,j) and m_Mur_Coeff_nyPP(i,j).
      *
+     * Single-component (backward compatible):
      * @param {Object} config - {
      *   coeff: number|Float32Array,   // scalar (uniform) or per-point array
      *   normal_idx: Uint32Array,      // field indices at the boundary
      *   shifted_idx: Uint32Array,     // field indices one cell inward
      * }
+     *
+     * Dual-component (full C++ compatibility):
+     * @param {Object} config - {
+     *   coeff_nyP: Float32Array,       // per-point coefficients for first tangential component
+     *   coeff_nyPP: Float32Array,      // per-point coefficients for second tangential component
+     *   normal_idx_nyP: Uint32Array,   // field indices for nyP at boundary
+     *   shifted_idx_nyP: Uint32Array,  // field indices for nyP one cell inward
+     *   normal_idx_nyPP: Uint32Array,  // field indices for nyPP at boundary
+     *   shifted_idx_nyPP: Uint32Array, // field indices for nyPP one cell inward
+     * }
      */
     configureMur(config) {
-        const numPoints = config.normal_idx.length;
-        let coeff;
-        if (typeof config.coeff === 'number') {
-            coeff = new Float32Array(numPoints).fill(config.coeff);
+        if (config.coeff_nyP) {
+            // Dual-component mode: two tangential components per boundary face
+            const n1 = config.normal_idx_nyP.length;
+            const n2 = config.normal_idx_nyPP.length;
+            const totalPoints = n1 + n2;
+
+            // Concatenate into unified arrays for uniform processing
+            const coeff = new Float32Array(totalPoints);
+            const normal_idx = new Uint32Array(totalPoints);
+            const shifted_idx = new Uint32Array(totalPoints);
+
+            coeff.set(config.coeff_nyP, 0);
+            coeff.set(config.coeff_nyPP, n1);
+            normal_idx.set(config.normal_idx_nyP, 0);
+            normal_idx.set(config.normal_idx_nyPP, n1);
+            shifted_idx.set(config.shifted_idx_nyP, 0);
+            shifted_idx.set(config.shifted_idx_nyPP, n1);
+
+            this.murConfig = {
+                coeff,
+                normal_idx,
+                shifted_idx,
+                numPoints: totalPoints,
+                saved_volt: new Float32Array(totalPoints),
+                // Store split info for introspection
+                numPointsNyP: n1,
+                numPointsNyPP: n2,
+            };
         } else {
-            coeff = config.coeff;
+            // Single-component mode (backward compatible)
+            const numPoints = config.normal_idx.length;
+            let coeff;
+            if (typeof config.coeff === 'number') {
+                coeff = new Float32Array(numPoints).fill(config.coeff);
+            } else {
+                coeff = config.coeff;
+            }
+            this.murConfig = {
+                coeff,
+                normal_idx: config.normal_idx,
+                shifted_idx: config.shifted_idx,
+                numPoints,
+                saved_volt: new Float32Array(numPoints),
+            };
         }
-        this.murConfig = {
-            coeff,
-            normal_idx: config.normal_idx,
-            shifted_idx: config.shifted_idx,
-            numPoints,
-            saved_volt: new Float32Array(numPoints),
-        };
     }
 
     /**
@@ -929,7 +971,7 @@ export class WebGPUFDTD {
      */
     configureLorentz(config) {
         if (this._useGPU) {
-            // GPU path: not yet implemented
+            this._gpuEngine.configureLorentzADE(config);
         } else {
             this._cpuEngine.configureLorentz(config);
         }
@@ -940,7 +982,7 @@ export class WebGPUFDTD {
      */
     configureTFSF(config) {
         if (this._useGPU) {
-            // GPU path: not yet implemented
+            this._gpuEngine.configureTFSF(config);
         } else {
             this._cpuEngine.configureTFSF(config);
         }
@@ -951,7 +993,7 @@ export class WebGPUFDTD {
      */
     configureRLC(config) {
         if (this._useGPU) {
-            // GPU path: not yet implemented
+            this._gpuEngine.configureRLC(config);
         } else {
             this._cpuEngine.configureRLC(config);
         }
@@ -962,7 +1004,7 @@ export class WebGPUFDTD {
      */
     configureMur(config) {
         if (this._useGPU) {
-            // GPU path: not yet implemented
+            this._gpuEngine.configureMur(config);
         } else {
             this._cpuEngine.configureMur(config);
         }
@@ -973,7 +1015,7 @@ export class WebGPUFDTD {
      */
     configureSteadyState(config) {
         if (this._useGPU) {
-            // GPU path: not yet implemented
+            this._gpuEngine.configureSteadyState(config);
         } else {
             this._cpuEngine.configureSteadyState(config);
         }

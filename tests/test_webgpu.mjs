@@ -2120,6 +2120,108 @@ section('Mur ABC — Boundary Value Set After Apply');
 }
 
 // ---------------------------------------------------------------------------
+// Mur ABC — Dual-Component Tests
+// ---------------------------------------------------------------------------
+
+section('Mur ABC — Dual-Component (nyP + nyPP)');
+
+{
+    const Nx = 6, Ny = 6, Nz = 6;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    // Simulate boundary at x=0. Two tangential components: Ey (nyP) and Ez (nyPP).
+    // nyP indices: Ey at boundary (x=0) and one cell inward (x=1)
+    const normalNyP = new Uint32Array([idx(1, 0, 2, 2, Nx, Ny, Nz)]);
+    const shiftedNyP = new Uint32Array([idx(1, 1, 2, 2, Nx, Ny, Nz)]);
+    const coeffNyP = new Float32Array([0.3]);
+
+    // nyPP indices: Ez at boundary (x=0) and one cell inward (x=1)
+    const normalNyPP = new Uint32Array([idx(2, 0, 2, 2, Nx, Ny, Nz)]);
+    const shiftedNyPP = new Uint32Array([idx(2, 1, 2, 2, Nx, Ny, Nz)]);
+    const coeffNyPP = new Float32Array([0.5]);
+
+    // Set initial field values
+    engine.volt[normalNyP[0]] = 1.0;
+    engine.volt[shiftedNyP[0]] = 2.0;
+    engine.volt[normalNyPP[0]] = 3.0;
+    engine.volt[shiftedNyPP[0]] = 4.0;
+
+    engine.configureMur({
+        coeff_nyP: coeffNyP,
+        coeff_nyPP: coeffNyPP,
+        normal_idx_nyP: normalNyP,
+        shifted_idx_nyP: shiftedNyP,
+        normal_idx_nyPP: normalNyPP,
+        shifted_idx_nyPP: shiftedNyPP,
+    });
+
+    assert(engine.murConfig.numPoints === 2, 'Dual Mur: total points = nyP + nyPP');
+    assert(engine.murConfig.numPointsNyP === 1, 'Dual Mur: numPointsNyP stored');
+    assert(engine.murConfig.numPointsNyPP === 1, 'Dual Mur: numPointsNyPP stored');
+
+    // Pre-voltage: saved_nyP = shifted_nyP - coeffNyP * normal_nyP = 2.0 - 0.3 * 1.0 = 1.7
+    // Pre-voltage: saved_nyPP = shifted_nyPP - coeffNyPP * normal_nyPP = 4.0 - 0.5 * 3.0 = 2.5
+    engine.murPreVoltage();
+    assertApprox(engine.murConfig.saved_volt[0], 2.0 - 0.3 * 1.0, 1e-7,
+        'Dual Mur pre: saved nyP correct');
+    assertApprox(engine.murConfig.saved_volt[1], 4.0 - 0.5 * 3.0, 1e-7,
+        'Dual Mur pre: saved nyPP correct');
+
+    // Simulate voltage update: modify shifted fields
+    engine.volt[shiftedNyP[0]] = 5.0;
+    engine.volt[shiftedNyPP[0]] = 6.0;
+
+    // Post-voltage: saved_nyP += coeffNyP * shifted_after = 1.7 + 0.3 * 5.0 = 3.2
+    // Post-voltage: saved_nyPP += coeffNyPP * shifted_after = 2.5 + 0.5 * 6.0 = 5.5
+    engine.murPostVoltage();
+    assertApprox(engine.murConfig.saved_volt[0], 1.7 + 0.3 * 5.0, 1e-7,
+        'Dual Mur post: saved nyP correct');
+    assertApprox(engine.murConfig.saved_volt[1], 2.5 + 0.5 * 6.0, 1e-7,
+        'Dual Mur post: saved nyPP correct');
+
+    // Apply: both boundary points overwritten
+    engine.murApply();
+    assertApprox(engine.volt[normalNyP[0]], 1.7 + 0.3 * 5.0, 1e-7,
+        'Dual Mur apply: nyP boundary overwritten');
+    assertApprox(engine.volt[normalNyPP[0]], 2.5 + 0.5 * 6.0, 1e-7,
+        'Dual Mur apply: nyPP boundary overwritten');
+}
+
+section('Mur ABC — Backward Compatibility (single component)');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const normalIdx = new Uint32Array([idx(0, 0, 1, 1, Nx, Ny, Nz)]);
+    const shiftedIdx = new Uint32Array([idx(0, 1, 1, 1, Nx, Ny, Nz)]);
+    const coeff = 0.4;
+
+    engine.volt[normalIdx[0]] = 5.0;
+    engine.volt[shiftedIdx[0]] = 8.0;
+
+    engine.configureMur({ coeff, normal_idx: normalIdx, shifted_idx: shiftedIdx });
+
+    assert(engine.murConfig.numPoints === 1, 'Compat Mur: single point');
+    assert(engine.murConfig.numPointsNyP === undefined, 'Compat Mur: no nyP split info');
+
+    engine.murPreVoltage();
+    assertApprox(engine.murConfig.saved_volt[0], 8.0 - 0.4 * 5.0, 1e-7,
+        'Compat Mur pre: saved correct');
+
+    engine.volt[shiftedIdx[0]] = 10.0;
+    engine.murPostVoltage();
+    assertApprox(engine.murConfig.saved_volt[0], 6.0 + 0.4 * 10.0, 1e-7,
+        'Compat Mur post: saved correct');
+
+    engine.murApply();
+    assertApprox(engine.volt[normalIdx[0]], 6.0 + 0.4 * 10.0, 1e-7,
+        'Compat Mur apply: boundary overwritten');
+}
+
+// ---------------------------------------------------------------------------
 // Steady-State Detection Tests
 // ---------------------------------------------------------------------------
 

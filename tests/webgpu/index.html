@@ -249,9 +249,412 @@ async function run() {
   }
 
   // ----------------------------------------------------------
-  // Test 7: WASM module loading in browser
+  // Test 7: Lorentz ADE pipeline compilation + dispatch
   // ----------------------------------------------------------
-  log('\n=== Test: WASM Module in Browser ===');
+  log('\n=== Test: Lorentz ADE Pipeline ===');
+
+  try {
+    const adeWGSL = await (await fetch('/src/shaders/lorentz_ade.wgsl')).text();
+    const adeModule = device.createShaderModule({ code: adeWGSL });
+    const adeInfo = await adeModule.getCompilationInfo();
+    const adeErrors = adeInfo.messages.filter(m => m.type === 'error');
+    assert(adeErrors.length === 0, `Lorentz ADE shader compiled (${adeErrors.length} errors)`);
+
+    const adePipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: adeModule, entryPoint: 'update_volt_ade' },
+    });
+    assert(adePipeline !== null, 'Lorentz ADE pipeline created');
+
+    // Small dispatch test: 4 dispersive cells
+    const numCells = 4;
+    const Nx = 4, Ny = 4, Nz = 4;
+    const totalCells = Nx * Ny * Nz;
+    const bufSize = 3 * totalCells * 4;
+
+    const voltBuf = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const paramsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const pData = new ArrayBuffer(32);
+    new Uint32Array(pData, 0, 4).set([Nx, Ny, Nz, 0]);
+    device.queue.writeBuffer(paramsBuf, 0, pData);
+
+    const adeParamsBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(adeParamsBuf, 0, new Uint32Array([numCells, 0, 0, totalCells]));
+
+    const mkBuf = (arr) => {
+      const b = device.createBuffer({ size: arr.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+      device.queue.writeBuffer(b, 0, arr);
+      return b;
+    };
+    const voltADE = mkBuf(new Float32Array(numCells));
+    const voltLorADE = mkBuf(new Float32Array(numCells));
+    const vInt = mkBuf(new Float32Array(numCells).fill(0.5));
+    const vExt = mkBuf(new Float32Array(numCells).fill(0.3));
+    const vLor = mkBuf(new Float32Array(numCells));
+    const posIdx = mkBuf(new Uint32Array([0, 1, 2, 3]));
+
+    const bg0 = device.createBindGroup({
+      layout: adePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: voltBuf } },
+        { binding: 2, resource: { buffer: paramsBuf } },
+      ],
+    });
+    const bg1 = device.createBindGroup({
+      layout: adePipeline.getBindGroupLayout(1),
+      entries: [
+        { binding: 0, resource: { buffer: adeParamsBuf } },
+        { binding: 1, resource: { buffer: voltADE } },
+        { binding: 2, resource: { buffer: voltLorADE } },
+        { binding: 3, resource: { buffer: vInt } },
+        { binding: 4, resource: { buffer: vExt } },
+        { binding: 5, resource: { buffer: vLor } },
+        { binding: 6, resource: { buffer: posIdx } },
+      ],
+    });
+
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(adePipeline);
+    pass.setBindGroup(0, bg0);
+    pass.setBindGroup(1, bg1);
+    pass.dispatchWorkgroups(1, 1, 1);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    assert(true, 'Lorentz ADE dispatched without error');
+
+    voltBuf.destroy(); paramsBuf.destroy(); adeParamsBuf.destroy();
+    voltADE.destroy(); voltLorADE.destroy(); vInt.destroy(); vExt.destroy(); vLor.destroy(); posIdx.destroy();
+  } catch (e) {
+    log(`  FAIL: Lorentz ADE test threw: ${e.message}`);
+    failed++;
+  }
+
+  // ----------------------------------------------------------
+  // Test 8: TFSF pipeline compilation + dispatch
+  // ----------------------------------------------------------
+  log('\n=== Test: TFSF Pipeline ===');
+
+  try {
+    const tfsfWGSL = await (await fetch('/src/shaders/tfsf.wgsl')).text();
+    const tfsfModule = device.createShaderModule({ code: tfsfWGSL });
+    const tfsfInfo = await tfsfModule.getCompilationInfo();
+    const tfsfErrors = tfsfInfo.messages.filter(m => m.type === 'error');
+    assert(tfsfErrors.length === 0, `TFSF shader compiled (${tfsfErrors.length} errors)`);
+
+    const tfsfPipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: tfsfModule, entryPoint: 'tfsf_apply_voltage' },
+    });
+    assert(tfsfPipeline !== null, 'TFSF pipeline created');
+
+    const Nx = 4, Ny = 4, Nz = 4;
+    const totalCells = Nx * Ny * Nz;
+    const bufSize = 3 * totalCells * 4;
+    const voltBuf = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const paramsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(paramsBuf, 0, new Uint32Array([Nx, Ny, Nz, 0, 0, 0, 0, 0]));
+
+    const tfsfParamsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(tfsfParamsBuf, 0, new Uint32Array([0, 0, 4, 2, 0, 0, 0, 0]));
+
+    const mkBuf2 = (arr) => {
+      const b = device.createBuffer({ size: arr.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      device.queue.writeBuffer(b, 0, arr);
+      return b;
+    };
+    const signal = mkBuf2(new Float32Array([1.0, 0.5, 0.2, 0.0]));
+    const delayInt = mkBuf2(new Uint32Array([0, 0]));
+    const delayFrac = mkBuf2(new Float32Array([0.0, 0.5]));
+    const amp = mkBuf2(new Float32Array([1.0, -1.0]));
+    const fieldIdx = mkBuf2(new Uint32Array([0, 1]));
+
+    const bg0 = device.createBindGroup({
+      layout: tfsfPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: voltBuf } },
+        { binding: 2, resource: { buffer: paramsBuf } },
+      ],
+    });
+    const bg1 = device.createBindGroup({
+      layout: tfsfPipeline.getBindGroupLayout(1),
+      entries: [
+        { binding: 0, resource: { buffer: tfsfParamsBuf } },
+        { binding: 1, resource: { buffer: signal } },
+        { binding: 2, resource: { buffer: delayInt } },
+        { binding: 3, resource: { buffer: delayFrac } },
+        { binding: 4, resource: { buffer: amp } },
+        { binding: 5, resource: { buffer: fieldIdx } },
+      ],
+    });
+
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(tfsfPipeline);
+    pass.setBindGroup(0, bg0);
+    pass.setBindGroup(1, bg1);
+    pass.dispatchWorkgroups(1, 1, 1);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    assert(true, 'TFSF dispatched without error');
+
+    voltBuf.destroy(); paramsBuf.destroy(); tfsfParamsBuf.destroy();
+    signal.destroy(); delayInt.destroy(); delayFrac.destroy(); amp.destroy(); fieldIdx.destroy();
+  } catch (e) {
+    log(`  FAIL: TFSF test threw: ${e.message}`);
+    failed++;
+  }
+
+  // ----------------------------------------------------------
+  // Test 9: Lumped RLC pipeline compilation + dispatch
+  // ----------------------------------------------------------
+  log('\n=== Test: Lumped RLC Pipeline ===');
+
+  try {
+    const rlcWGSL = await (await fetch('/src/shaders/lumped_rlc.wgsl')).text();
+    const rlcModule = device.createShaderModule({ code: rlcWGSL });
+    const rlcInfo = await rlcModule.getCompilationInfo();
+    const rlcErrors = rlcInfo.messages.filter(m => m.type === 'error');
+    assert(rlcErrors.length === 0, `RLC shader compiled (${rlcErrors.length} errors)`);
+
+    const rlcPipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: rlcModule, entryPoint: 'update_rlc' },
+    });
+    assert(rlcPipeline !== null, 'RLC pipeline created');
+
+    const Nx = 4, Ny = 4, Nz = 4;
+    const totalCells = Nx * Ny * Nz;
+    const bufSize = 3 * totalCells * 4;
+    const voltBuf = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const paramsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(paramsBuf, 0, new Uint32Array([Nx, Ny, Nz, 0, 0, 0, 0, 0]));
+
+    const rlcParamsBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(rlcParamsBuf, 0, new Uint32Array([1, totalCells, 0, 0]));
+
+    // One RLC element: 12 fields * 4 bytes = 48 bytes
+    const elemData = new ArrayBuffer(48);
+    new Uint32Array(elemData, 0, 3).set([0, 0, 0]); // field_idx=0, dir=0, type_flag=0
+    new Float32Array(elemData, 12, 9).set([1.0, 0.5, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    const elemBuf = device.createBuffer({ size: 48, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(elemBuf, 0, new Uint8Array(elemData));
+
+    const vdnBuf = device.createBuffer({ size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    const jnBuf = device.createBuffer({ size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    const vilBuf = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+
+    const bg0 = device.createBindGroup({
+      layout: rlcPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: voltBuf } },
+        { binding: 2, resource: { buffer: paramsBuf } },
+      ],
+    });
+    const bg1 = device.createBindGroup({
+      layout: rlcPipeline.getBindGroupLayout(1),
+      entries: [
+        { binding: 0, resource: { buffer: rlcParamsBuf } },
+        { binding: 1, resource: { buffer: elemBuf } },
+        { binding: 2, resource: { buffer: vdnBuf } },
+        { binding: 3, resource: { buffer: jnBuf } },
+        { binding: 4, resource: { buffer: vilBuf } },
+      ],
+    });
+
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(rlcPipeline);
+    pass.setBindGroup(0, bg0);
+    pass.setBindGroup(1, bg1);
+    pass.dispatchWorkgroups(1, 1, 1);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    assert(true, 'RLC dispatched without error');
+
+    voltBuf.destroy(); paramsBuf.destroy(); rlcParamsBuf.destroy();
+    elemBuf.destroy(); vdnBuf.destroy(); jnBuf.destroy(); vilBuf.destroy();
+  } catch (e) {
+    log(`  FAIL: RLC test threw: ${e.message}`);
+    failed++;
+  }
+
+  // ----------------------------------------------------------
+  // Test 10: Mur ABC pipeline compilation + dispatch
+  // ----------------------------------------------------------
+  log('\n=== Test: Mur ABC Pipeline ===');
+
+  try {
+    const murWGSL = await (await fetch('/src/shaders/mur_abc.wgsl')).text();
+    const murModule = device.createShaderModule({ code: murWGSL });
+    const murInfo = await murModule.getCompilationInfo();
+    const murErrors = murInfo.messages.filter(m => m.type === 'error');
+    assert(murErrors.length === 0, `Mur ABC shader compiled (${murErrors.length} errors)`);
+
+    const murPrePipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: murModule, entryPoint: 'mur_pre_voltage' },
+    });
+    const murPostPipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: murModule, entryPoint: 'mur_post_voltage' },
+    });
+    const murApplyPipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: murModule, entryPoint: 'mur_apply' },
+    });
+    assert(murPrePipeline !== null && murPostPipeline !== null && murApplyPipeline !== null,
+      'Mur 3 pipelines created (pre/post/apply)');
+
+    const Nx = 4, Ny = 4, Nz = 4;
+    const totalCells = Nx * Ny * Nz;
+    const bufSize = 3 * totalCells * 4;
+    const voltBuf = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const paramsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(paramsBuf, 0, new Uint32Array([Nx, Ny, Nz, 0, 0, 0, 0, 0]));
+
+    const murParamsBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(murParamsBuf, 0, new Uint32Array([2, 0, 0, 0]));
+
+    const mkBuf3 = (arr) => {
+      const b = device.createBuffer({ size: arr.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+      device.queue.writeBuffer(b, 0, arr);
+      return b;
+    };
+    const normalIdx = mkBuf3(new Uint32Array([0, 1]));
+    const shiftedIdx = mkBuf3(new Uint32Array([Ny * Nz, Ny * Nz + 1]));
+    const savedVolt = mkBuf3(new Float32Array(2));
+    const murCoeff = mkBuf3(new Float32Array([0.3, 0.5]));
+
+    const murBG = device.createBindGroup({
+      layout: murPrePipeline.getBindGroupLayout(1),
+      entries: [
+        { binding: 0, resource: { buffer: murParamsBuf } },
+        { binding: 1, resource: { buffer: normalIdx } },
+        { binding: 2, resource: { buffer: shiftedIdx } },
+        { binding: 3, resource: { buffer: savedVolt } },
+        { binding: 4, resource: { buffer: murCoeff } },
+      ],
+    });
+    const coreBG = device.createBindGroup({
+      layout: murPrePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: voltBuf } },
+        { binding: 2, resource: { buffer: paramsBuf } },
+      ],
+    });
+
+    // Dispatch all 3 phases
+    const enc = device.createCommandEncoder();
+    let pass;
+    pass = enc.beginComputePass();
+    pass.setPipeline(murPrePipeline);
+    pass.setBindGroup(0, coreBG);
+    pass.setBindGroup(1, murBG);
+    pass.dispatchWorkgroups(1, 1, 1);
+    pass.end();
+    pass = enc.beginComputePass();
+    pass.setPipeline(murPostPipeline);
+    pass.setBindGroup(0, coreBG);
+    pass.setBindGroup(1, murBG);
+    pass.dispatchWorkgroups(1, 1, 1);
+    pass.end();
+    pass = enc.beginComputePass();
+    pass.setPipeline(murApplyPipeline);
+    pass.setBindGroup(0, coreBG);
+    pass.setBindGroup(1, murBG);
+    pass.dispatchWorkgroups(1, 1, 1);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    assert(true, 'Mur ABC 3-phase dispatched without error');
+
+    voltBuf.destroy(); paramsBuf.destroy(); murParamsBuf.destroy();
+    normalIdx.destroy(); shiftedIdx.destroy(); savedVolt.destroy(); murCoeff.destroy();
+  } catch (e) {
+    log(`  FAIL: Mur ABC test threw: ${e.message}`);
+    failed++;
+  }
+
+  // ----------------------------------------------------------
+  // Test 11: Steady-state pipeline compilation + dispatch
+  // ----------------------------------------------------------
+  log('\n=== Test: Steady-State Pipeline ===');
+
+  try {
+    const ssWGSL = await (await fetch('/src/shaders/steady_state.wgsl')).text();
+    const ssModule = device.createShaderModule({ code: ssWGSL });
+    const ssInfo = await ssModule.getCompilationInfo();
+    const ssErrors = ssInfo.messages.filter(m => m.type === 'error');
+    assert(ssErrors.length === 0, `Steady-state shader compiled (${ssErrors.length} errors)`);
+
+    const ssPipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: ssModule, entryPoint: 'accumulate_energy' },
+    });
+    assert(ssPipeline !== null, 'Steady-state pipeline created');
+
+    const Nx = 4, Ny = 4, Nz = 4;
+    const totalCells = Nx * Ny * Nz;
+    const bufSize = 3 * totalCells * 4;
+    const voltBuf = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const paramsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(paramsBuf, 0, new Uint32Array([Nx, Ny, Nz, 0, 0, 0, 0, 0]));
+
+    const ssParamsBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(ssParamsBuf, 0, new Uint32Array([2, 100, 0, 1]));
+
+    const mkBuf4 = (arr) => {
+      const b = device.createBuffer({ size: arr.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+      device.queue.writeBuffer(b, 0, arr);
+      return b;
+    };
+    const probeIdx = mkBuf4(new Uint32Array([0, 1]));
+    const energy1 = mkBuf4(new Float32Array(2));
+    const energy2 = mkBuf4(new Float32Array(2));
+
+    const bg0 = device.createBindGroup({
+      layout: ssPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: voltBuf } },
+        { binding: 2, resource: { buffer: paramsBuf } },
+      ],
+    });
+    const bg1 = device.createBindGroup({
+      layout: ssPipeline.getBindGroupLayout(1),
+      entries: [
+        { binding: 0, resource: { buffer: ssParamsBuf } },
+        { binding: 1, resource: { buffer: probeIdx } },
+        { binding: 2, resource: { buffer: energy1 } },
+        { binding: 3, resource: { buffer: energy2 } },
+      ],
+    });
+
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(ssPipeline);
+    pass.setBindGroup(0, bg0);
+    pass.setBindGroup(1, bg1);
+    pass.dispatchWorkgroups(1, 1, 1);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    assert(true, 'Steady-state dispatched without error');
+
+    voltBuf.destroy(); paramsBuf.destroy(); ssParamsBuf.destroy();
+    probeIdx.destroy(); energy1.destroy(); energy2.destroy();
+  } catch (e) {
+    log(`  FAIL: Steady-state test threw: ${e.message}`);
+    failed++;
+  }
+
+  // ----------------------------------------------------------
+  // Test 12: WASM module loading in browser
+  // ----------------------------------------------------------
+  log('\n=== Test: WASM Module Loading ===');
 
   try {
     await new Promise((resolve, reject) => {
