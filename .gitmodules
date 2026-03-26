@@ -1,0 +1,6 @@
+[submodule "vendor/openEMS"]
+	path = vendor/openEMS
+	url = https://github.com/thliebig/openEMS
+[submodule "vendor/CSXCAD"]
+	path = vendor/CSXCAD
+	url = https://github.com/thliebig/CSXCAD
