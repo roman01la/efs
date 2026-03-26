@@ -13,7 +13,8 @@ const ROOT = join(__dirname, '..');
 import { C0, MUE0, EPS0, Z0, linspace, dftTime2Freq, dftMagnitude, complexDivide, complexAbs, parseProbe, findPeaks, calcSParam } from '../src/analysis.mjs';
 import { Simulation } from '../src/simulation.mjs';
 import { LumpedPort, MSLPort, WaveguidePort, RectWGPort } from '../src/ports.mjs';
-import { createNF2FFBox, NF2FFBox, NF2FFResult } from '../src/nf2ff.mjs';
+import { createNF2FFBox, NF2FFBox, NF2FFResult, computeNF2FF } from '../src/nf2ff.mjs';
+import { computeLocalSAR, computeAveragedSAR, findPeakSAR } from '../src/sar.mjs';
 import { meshHintFromBox, meshCombine, meshEstimateCflTimestep, smoothMeshLines } from '../src/automesh.mjs';
 import { prepareSParamData, prepareSmithData, prepareRadiationPattern, prepareImpedanceData, prepareTimeDomainData } from '../src/visualization.mjs';
 
@@ -865,10 +866,10 @@ function testNF2FFFreqDomain() {
 }
 
 // -----------------------------------------------------------------------
-// Test 19: NF2FF calcNF2FF stub throws
+// Test 19: NF2FF calcNF2FF with surface data
 // -----------------------------------------------------------------------
-async function testNF2FFCalcStub() {
-  console.log('\n=== Test: NF2FF calcNF2FF Stub ===');
+function testNF2FFCalcWithData() {
+  console.log('\n=== Test: NF2FF calcNF2FF with Surface Data ===');
 
   const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
   sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
@@ -876,13 +877,36 @@ async function testNF2FFCalcStub() {
   sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
 
   const nf2ff = sim.createNF2FFBox('test', [0, 0, 0], [1, 1, 1]);
-  let threw = false;
-  try {
-    await nf2ff.calcNF2FF('/sim', [1e9], [0, 45, 90], [0, 90, 180]);
-  } catch (e) {
-    threw = e.message.includes('Phase 5');
+
+  // Create minimal surface data (1 face, trivial fields)
+  const nP = 3, nPP = 3;
+  const nPts = nP * nPP;
+  const zeros = new Float64Array(nPts * 2);
+  const surfaceData = {
+    faces: [{
+      E: [new Float64Array(nPts * 2), new Float64Array(nPts * 2), zeros],
+      H: [zeros, new Float64Array(nPts * 2), new Float64Array(nPts * 2)],
+      mesh: { x: new Float64Array([0.5]), y: new Float64Array([0, 0.5, 1]), z: new Float64Array([0, 0.5, 1]) },
+      normal: [1, 0, 0],
+    }],
+  };
+  // Set some non-zero H-field to get non-zero Js
+  for (let i = 0; i < nPts; i++) {
+    surfaceData.faces[0].H[1][2 * i] = 1.0; // Hy_re = 1
+    surfaceData.faces[0].H[2][2 * i] = 0.5; // Hz_re = 0.5
   }
-  assert(threw, 'calcNF2FF throws Phase 5 message');
+
+  const theta = [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4, Math.PI];
+  const phi = [0, Math.PI / 2];
+  const result = nf2ff.calcNF2FF(surfaceData, 1e9, theta, phi);
+
+  assert(result instanceof NF2FFResult, 'calcNF2FF returns NF2FFResult');
+  assert(result.theta.length === 5, 'Result has 5 theta angles');
+  assert(result.phi.length === 2, 'Result has 2 phi angles');
+  assert(result.freq.length === 1, 'Result has 1 frequency');
+  assert(result.E_norm[0].length === 10, 'E_norm has nTheta*nPhi elements');
+  assert(typeof result.Dmax[0] === 'number', 'Dmax is a number');
+  assert(typeof result.Prad[0] === 'number', 'Prad is a number');
 }
 
 // -----------------------------------------------------------------------
@@ -1509,6 +1533,221 @@ function testPrepareTimeDomainData() {
 }
 
 // -----------------------------------------------------------------------
+// Test 42: NF2FF Infinitesimal Dipole Radiation Pattern
+// -----------------------------------------------------------------------
+function testNF2FFInfinitesimalDipole() {
+  console.log('\n=== Test: NF2FF Infinitesimal Dipole ===');
+
+  // Test the NF2FF computation with a known x-directed current element.
+  // An x-directed Js on a z-normal face produces:
+  //   E_theta proportional to cos(theta)*cos(phi)
+  //   E_phi proportional to -sin(phi)
+  //   Dmax = 1.5 (when computed from angular integration)
+  //
+  // With n = [0,0,+1] (z-normal face):
+  //   Js_x = -nz * Hy = -Hy  =>  set Hy = -Js0 for Js_x = Js0
+  //
+  // We test:
+  // 1. Non-zero far-field output
+  // 2. Pattern shape: null at (theta=pi/2, phi=0) for E_theta
+  // 3. Directivity computed from angular integration ~ 1.5
+
+  const freq = 1e9;
+  const Js0 = 1.0;
+
+  // Small 3x3 grid on z-normal face at z=0
+  const meshX = new Float64Array([-0.001, 0, 0.001]);
+  const meshY = new Float64Array([-0.001, 0, 0.001]);
+  const meshZ = new Float64Array([0]);
+  const nPts = 9;
+
+  const face = {
+    E: [new Float64Array(nPts * 2), new Float64Array(nPts * 2), new Float64Array(nPts * 2)],
+    H: [new Float64Array(nPts * 2), new Float64Array(nPts * 2), new Float64Array(nPts * 2)],
+    mesh: { x: meshX, y: meshY, z: meshZ },
+    normal: [0, 0, 1],
+  };
+
+  for (let i = 0; i < nPts; i++) {
+    face.H[1][2 * i] = -Js0; // Hy_re => Js_x = Js0
+  }
+
+  const surfaceData = { faces: [face] };
+
+  const nTheta = 91;
+  const nPhi = 73;
+  const thetaArr = new Float64Array(nTheta);
+  const phiArr = new Float64Array(nPhi);
+  for (let i = 0; i < nTheta; i++) thetaArr[i] = i * Math.PI / (nTheta - 1);
+  for (let i = 0; i < nPhi; i++) phiArr[i] = i * 2 * Math.PI / (nPhi - 1);
+
+  const result = computeNF2FF(surfaceData, freq, thetaArr, phiArr, [0, 0, 0], 1);
+
+  // 1. Non-zero far-field
+  const p_max = Math.max(...result.P_rad);
+  assert(p_max > 0, `NF2FF P_max = ${p_max.toExponential(4)} (non-zero far-field)`);
+
+  // 2. Pattern shape: at phi=0 (phi index 0), E_theta ~ cos(theta)
+  //    So P_rad at theta=pi/2, phi=0 should be near zero compared to theta=0
+  const phi0Idx = 0;
+  const theta0Idx = 0;
+  const thetaPi2Idx = Math.floor(nTheta / 2); // theta = pi/2
+
+  const p_at_pole = result.P_rad[theta0Idx * nPhi + phi0Idx];
+  const p_at_equator_phi0 = result.P_rad[thetaPi2Idx * nPhi + phi0Idx];
+
+  if (p_at_pole > 0) {
+    const ratio = p_at_equator_phi0 / p_at_pole;
+    // For x-dipole at phi=0: P ~ cos^2(theta), so P(pi/2)/P(0) should be ~0
+    assert(ratio < 0.05, `Pattern null at (theta=pi/2, phi=0): ratio = ${ratio.toFixed(4)} (expected ~0)`);
+  }
+
+  // 3. Directivity from angular integration of P_rad
+  //    Prad_integrated = integral of P_rad * sin(theta) dTheta dPhi / r^2
+  //    Dmax = 4*pi * P_max / Prad_integrated
+  let prad_int = 0;
+  const dTheta = Math.PI / (nTheta - 1);
+  const dPhi = 2 * Math.PI / (nPhi - 1);
+  for (let tn = 0; tn < nTheta; tn++) {
+    const sinT = Math.sin(thetaArr[tn]);
+    for (let pn = 0; pn < nPhi; pn++) {
+      prad_int += result.P_rad[tn * nPhi + pn] * sinT * dTheta * dPhi;
+    }
+  }
+
+  const dmax_from_integral = prad_int > 0 ? 4 * Math.PI * p_max / prad_int : 0;
+  assert(dmax_from_integral > 0, `NF2FF Dmax (from integral) = ${dmax_from_integral.toFixed(4)} (positive)`);
+
+  const dmaxErr = Math.abs(dmax_from_integral - 1.5) / 1.5;
+  assert(dmaxErr < 0.10, `NF2FF Dmax = ${dmax_from_integral.toFixed(4)} (expected ~1.5, error ${(dmaxErr * 100).toFixed(1)}%)`);
+
+  console.log(`  Dmax (angular) = ${dmax_from_integral.toFixed(4)}, P_max = ${p_max.toExponential(4)}, Prad_int = ${prad_int.toExponential(4)}`);
+}
+
+// -----------------------------------------------------------------------
+// Test 43: SAR Local with Uniform Field
+// -----------------------------------------------------------------------
+function testSARLocalUniform() {
+  console.log('\n=== Test: SAR Local Uniform Field ===');
+
+  // Uniform E-field with known sigma and density
+  // SAR = 0.5 * sigma * |E|^2 / density
+  const N = 27; // 3x3x3
+  const sigma = 0.5;  // S/m
+  const rho = 1000;   // kg/m^3
+  const E_mag2 = 100;  // |E|^2 = 100 V^2/m^2
+
+  const E = new Float64Array(N).fill(E_mag2);
+  const conductivity = new Float32Array(N).fill(sigma);
+  const density = new Float32Array(N).fill(rho);
+
+  const SAR = computeLocalSAR(E, conductivity, density);
+
+  const expected = 0.5 * sigma * E_mag2 / rho; // = 0.5 * 0.5 * 100 / 1000 = 0.025
+  assert(SAR.length === N, `SAR has ${N} elements`);
+
+  let allCorrect = true;
+  for (let i = 0; i < N; i++) {
+    if (Math.abs(SAR[i] - expected) > 1e-6) {
+      allCorrect = false;
+      break;
+    }
+  }
+  assert(allCorrect, `Local SAR = ${SAR[0].toFixed(6)} W/kg (expected ${expected.toFixed(6)})`);
+}
+
+// -----------------------------------------------------------------------
+// Test 44: SAR Zero Density
+// -----------------------------------------------------------------------
+function testSARZeroDensity() {
+  console.log('\n=== Test: SAR Zero Density ===');
+
+  const N = 10;
+  const E = new Float64Array(N).fill(100);
+  const conductivity = new Float32Array(N).fill(0.5);
+  const density = new Float32Array(N).fill(0); // all air
+
+  const SAR = computeLocalSAR(E, conductivity, density);
+
+  let allZero = true;
+  let anyNaN = false;
+  for (let i = 0; i < N; i++) {
+    if (SAR[i] !== 0) allZero = false;
+    if (isNaN(SAR[i])) anyNaN = true;
+  }
+  assert(allZero, 'Zero density produces zero SAR (not NaN)');
+  assert(!anyNaN, 'No NaN values in SAR output');
+}
+
+// -----------------------------------------------------------------------
+// Test 45: SAR Averaged with Uniform Distribution
+// -----------------------------------------------------------------------
+function testSARAveragedUniform() {
+  console.log('\n=== Test: SAR Averaged Uniform ===');
+
+  // For a uniform field and uniform tissue, averaged SAR should match local SAR
+  const Nx = 5, Ny = 5, Nz = 5;
+  const N = Nx * Ny * Nz;
+  const sigma = 0.5;
+  const rho = 1000;
+  const E_mag2 = 100;
+  const cellSize = 0.002; // 2mm cells
+  const cellVol = cellSize * cellSize * cellSize;
+
+  const E = new Float64Array(N).fill(E_mag2);
+  const conductivity = new Float32Array(N).fill(sigma);
+  const density = new Float32Array(N).fill(rho);
+
+  const localSAR = computeLocalSAR(E, conductivity, density);
+  const expectedLocal = 0.5 * sigma * E_mag2 / rho;
+
+  // For averaged SAR with uniform tissue, the result should match local SAR
+  const cellWidth = {
+    x: new Float64Array(Nx).fill(cellSize),
+    y: new Float64Array(Ny).fill(cellSize),
+    z: new Float64Array(Nz).fill(cellSize),
+  };
+
+  // Mass of 1g = 0.001 kg. With rho=1000 and cellVol = 8e-9 m^3,
+  // mass per cell = 1000 * 8e-9 = 8e-6 kg.
+  // Need 0.001 / 8e-6 = 125 cells for 1g. Our grid is only 125 cells.
+  const avgMass = 0.001; // 1g
+
+  const avgSAR = computeAveragedSAR(localSAR, density, cellVol, cellWidth, avgMass, 'simple');
+
+  assert(avgSAR.length === N, `Averaged SAR has ${N} elements`);
+
+  // For a uniform distribution, averaged SAR in the interior should
+  // approximately match local SAR (edge effects may differ)
+  const centerIdx = (2 * Ny + 2) * Nz + 2; // center voxel
+  const avgLocal = avgSAR[centerIdx];
+  const relErr = Math.abs(avgLocal - expectedLocal) / expectedLocal;
+  assert(relErr < 0.2, `Center averaged SAR = ${avgLocal.toFixed(6)} vs local ${expectedLocal.toFixed(6)} (error ${(relErr * 100).toFixed(1)}%)`);
+}
+
+// -----------------------------------------------------------------------
+// Test 46: findPeakSAR
+// -----------------------------------------------------------------------
+function testFindPeakSAR() {
+  console.log('\n=== Test: findPeakSAR ===');
+
+  const SAR = new Float32Array([0.1, 0.5, 0.3, 0.8, 0.2, 0.4]);
+  const peak = findPeakSAR(SAR);
+  assert(Math.abs(peak.value - 0.8) < 1e-6, `Peak SAR = ${peak.value} (expected ~0.8)`);
+  assert(peak.index === 3, `Peak index = ${peak.index} (expected 3)`);
+
+  // With grid info
+  const SAR3D = new Float32Array(27); // 3x3x3
+  SAR3D[13] = 5.0; // center voxel (1,1,1)
+  const peak3D = findPeakSAR(SAR3D, { Nx: 3, Ny: 3, Nz: 3 });
+  assert(peak3D.value === 5.0, `3D peak SAR = ${peak3D.value}`);
+  assert(
+    peak3D.position[0] === 1 && peak3D.position[1] === 1 && peak3D.position[2] === 1,
+    `3D peak position = [${peak3D.position}] (expected [1,1,1])`
+  );
+}
+
+// -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
 async function main() {
@@ -1533,7 +1772,7 @@ async function main() {
   testRectWGPortXML();
   testNF2FFBox();
   testNF2FFFreqDomain();
-  await testNF2FFCalcStub();
+  testNF2FFCalcWithData();
   testNF2FFDirections();
   testMeshHintFromBox();
   testMeshCombine();
@@ -1562,6 +1801,13 @@ async function main() {
   testPrepareRadiationPattern();
   testPrepareImpedanceData();
   testPrepareTimeDomainData();
+
+  // Phase 5: NF2FF and SAR tests
+  testNF2FFInfinitesimalDipole();
+  testSARLocalUniform();
+  testSARZeroDensity();
+  testSARAveragedUniform();
+  testFindPeakSAR();
 
   // WASM integration tests
   await testWasmCavityViaAPI();

@@ -590,6 +590,109 @@ async function testWasmCavity(Module) {
 }
 
 // -----------------------------------------------------------------------
+// Test: Cylindrical Coordinate Simulation
+// -----------------------------------------------------------------------
+async function testCylindricalCoords(_Module) {
+  console.log('\n=== Test: Cylindrical Coordinate Simulation ===');
+
+  const Module = _Module;
+
+  // Create a cylindrical cavity:
+  // CoordSystem=1 means cylindrical (rho, alpha, z)
+  const rMax = 0.05;
+  const aMax = 2 * Math.PI;
+  const zMax = 0.06;
+  const nR = 15, nA = 32, nZ = 20;
+
+  function meshCsv(arr) { return Array.from(arr).map(v => v.toExponential(10)).join(','); }
+
+  const rLines = linspace(0, rMax, nR);
+  const aLines = linspace(0, aMax, nA);
+  const zLines = linspace(0, zMax, nZ);
+
+  // Excitation and probe indices (away from boundaries and axis)
+  const exRI = 7, exAI = 8, exZI = 10;
+  const prRI = 5, prAI = 16, prZI = 7;
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<openEMS>
+  <FDTD NumberOfTimesteps="5000" endCriteria="1e-3" f_max="10e9">
+    <Excitation Type="0" f0="5.5e9" fc="4.5e9"/>
+    <BoundaryCond xmin="0" xmax="0" ymin="0" ymax="0" zmin="0" zmax="0"/>
+  </FDTD>
+  <ContinuousStructure CoordSystem="1">
+    <RectilinearGrid DeltaUnit="1" CoordSystem="1">
+      <XLines>${meshCsv(rLines)}</XLines>
+      <YLines>${meshCsv(aLines)}</YLines>
+      <ZLines>${meshCsv(zLines)}</ZLines>
+    </RectilinearGrid>
+    <Properties>
+      <Excitation ID="0" Name="exc" Number="0" Type="0" Excite="0,0,1">
+        <Primitives>
+          <Box Priority="0">
+            <P1 X="${rLines[exRI]}" Y="${aLines[exAI]}" Z="${zLines[exZI]}"/>
+            <P2 X="${rLines[exRI+1]}" Y="${aLines[exAI+1]}" Z="${zLines[exZI+1]}"/>
+          </Box>
+        </Primitives>
+      </Excitation>
+      <ProbeBox ID="1" Name="et_cyl" Number="0" Type="2" Weight="1" NormDir="-1">
+        <Primitives>
+          <Box Priority="0">
+            <P1 X="${rLines[prRI]}" Y="${aLines[prAI]}" Z="${zLines[prZI]}"/>
+            <P2 X="${rLines[prRI]}" Y="${aLines[prAI]}" Z="${zLines[prZI]}"/>
+          </Box>
+        </Primitives>
+      </ProbeBox>
+    </Properties>
+  </ContinuousStructure>
+</openEMS>`;
+
+
+  try { Module.FS.mkdir('/sim_cyl'); } catch (e) {}
+  Module.FS.chdir('/sim_cyl');
+
+  const ems = new Module.OpenEMS();
+  ems.configure(0, 5000, 1e-3);
+
+  const loadOk = ems.loadXML(xml);
+  if (!assert(loadOk, 'Cylindrical XML loaded successfully')) { ems.delete(); return; }
+
+  const rc = ems.setup();
+  if (!assert(rc === 0, `Cylindrical SetupFDTD returned ${rc} (expected 0)`)) { ems.delete(); return; }
+
+  console.log('  Running cylindrical FDTD simulation...');
+  const t0 = Date.now();
+  ems.run();
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  console.log(`  Cylindrical simulation complete in ${elapsed}s.`);
+
+  const files = ems.listFiles('/sim_cyl');
+  const fileList = [];
+  for (let i = 0; i < files.size(); i++) fileList.push(files.get(i));
+  console.log(`  Files: ${fileList.join(', ')}`);
+
+  const probeFilename = fileList.find(f => f.startsWith('et_cyl') && !f.includes('FD'));
+  assert(probeFilename !== undefined, 'Cylindrical probe output file found');
+
+  if (probeFilename) {
+    const probeText = ems.readFile(`/sim_cyl/${probeFilename}`);
+    assert(probeText.length > 0, `Cylindrical probe file has content (${probeText.length} bytes)`);
+
+    // E-field probe (Type=2) outputs: time, Er, Ealpha, Ez
+    const dataLines = probeText.split('\n').filter(l => !l.startsWith('%') && l.trim());
+    assert(dataLines.length > 10, `Cylindrical probe has ${dataLines.length} samples`);
+
+    // Verify the probe file has the expected 4-column format (time + 3 E-field components)
+    const firstDataLine = dataLines[1]; // skip t=0 line
+    const cols = firstDataLine.trim().split(/\s+/);
+    assert(cols.length === 4, `Cylindrical E-field probe has 4 columns (time, Er, Ea, Ez): found ${cols.length}`);
+    assert(!isNaN(parseFloat(cols[0])), 'Cylindrical probe time column is numeric');
+  }
+
+  ems.delete();
+}
+
+// -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
 async function main() {
@@ -603,6 +706,7 @@ async function main() {
   const Module = await testWasmModule();
   if (Module) {
     await testWasmCavity(Module);
+    await testCylindricalCoords(Module);
   }
 
   console.log(`\n${'='.repeat(50)}`);
