@@ -35,6 +35,13 @@ export class CPUFDTDEngine {
         this.numTS = 0;
         this.excitation = null;
         this.pmlRegions = [];
+
+        // Extension state
+        this.lorentzOrders = [];    // ADE dispersive material orders
+        this.tfsfConfig = null;     // TFSF plane wave injection
+        this.rlcElements = [];      // Lumped RLC elements
+        this.murConfig = null;      // Mur ABC boundary
+        this.steadyStateConfig = null; // Steady-state detection
     }
 
     /**
@@ -345,19 +352,468 @@ export class CPUFDTDEngine {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Lorentz/Drude ADE (Auxiliary Differential Equation) for dispersive materials
+    // -----------------------------------------------------------------------
+
     /**
-     * Run one complete FDTD timestep.
-     * Order: pre-voltage PML -> voltage -> post-voltage PML -> excitation ->
-     *        pre-current PML -> current -> post-current PML -> increment
+     * Configure Lorentz/Drude dispersive material orders.
+     * @param {Object} config - { orders: Array<{
+     *   numCells: number,
+     *   hasLorentz: boolean,
+     *   directions: Array<{
+     *     dir: number,                 // 0=x, 1=y, 2=z
+     *     pos_idx: Uint32Array,        // linear indices into global field
+     *     v_int_ADE: Float32Array,     // integration coefficient
+     *     v_ext_ADE: Float32Array,     // external coupling coefficient
+     *     v_Lor_ADE: Float32Array,     // Lorentz coupling coefficient
+     *     i_int_ADE: Float32Array,     // current integration coefficient
+     *     i_ext_ADE: Float32Array,     // current external coupling coefficient
+     *     i_Lor_ADE: Float32Array,     // current Lorentz coupling coefficient
+     *   }>
+     * }> }
+     */
+    configureLorentz(config) {
+        this.lorentzOrders = config.orders.map(order => ({
+            numCells: order.numCells,
+            hasLorentz: order.hasLorentz,
+            directions: order.directions.map(d => ({
+                dir: d.dir,
+                pos_idx: d.pos_idx,
+                v_int_ADE: d.v_int_ADE,
+                v_ext_ADE: d.v_ext_ADE,
+                v_Lor_ADE: d.v_Lor_ADE || new Float32Array(order.numCells),
+                i_int_ADE: d.i_int_ADE || new Float32Array(order.numCells),
+                i_ext_ADE: d.i_ext_ADE || new Float32Array(order.numCells),
+                i_Lor_ADE: d.i_Lor_ADE || new Float32Array(order.numCells),
+                volt_ADE: new Float32Array(order.numCells),
+                volt_Lor_ADE: new Float32Array(order.numCells),
+                curr_ADE: new Float32Array(order.numCells),
+                curr_Lor_ADE: new Float32Array(order.numCells),
+            })),
+        }));
+    }
+
+    /**
+     * Update voltage ADE for all Lorentz/Drude orders and directions.
+     */
+    updateVoltADE() {
+        for (const order of this.lorentzOrders) {
+            for (const d of order.directions) {
+                const { pos_idx, v_int_ADE, v_ext_ADE, v_Lor_ADE,
+                        volt_ADE, volt_Lor_ADE } = d;
+                const componentStride = this.totalCells;
+
+                for (let i = 0; i < order.numCells; i++) {
+                    const fieldIdx = d.dir * componentStride + pos_idx[i];
+                    const V = this.volt[fieldIdx];
+
+                    if (order.hasLorentz) {
+                        volt_Lor_ADE[i] += v_Lor_ADE[i] * volt_ADE[i];
+                        volt_ADE[i] = v_int_ADE[i] * volt_ADE[i]
+                                     + v_ext_ADE[i] * (V - volt_Lor_ADE[i]);
+                    } else {
+                        volt_ADE[i] = v_int_ADE[i] * volt_ADE[i]
+                                     + v_ext_ADE[i] * V;
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Update current ADE for all Lorentz/Drude orders and directions.
+     */
+    updateCurrADE() {
+        for (const order of this.lorentzOrders) {
+            for (const d of order.directions) {
+                const { pos_idx, i_int_ADE, i_ext_ADE, i_Lor_ADE,
+                        curr_ADE, curr_Lor_ADE } = d;
+                const componentStride = this.totalCells;
+
+                for (let i = 0; i < order.numCells; i++) {
+                    const fieldIdx = d.dir * componentStride + pos_idx[i];
+                    const I = this.curr[fieldIdx];
+
+                    if (order.hasLorentz) {
+                        curr_Lor_ADE[i] += i_Lor_ADE[i] * curr_ADE[i];
+                        curr_ADE[i] = i_int_ADE[i] * curr_ADE[i]
+                                     + i_ext_ADE[i] * (I - curr_Lor_ADE[i]);
+                    } else {
+                        curr_ADE[i] = i_int_ADE[i] * curr_ADE[i]
+                                     + i_ext_ADE[i] * I;
+                    }
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // TFSF (Total-Field/Scattered-Field)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Configure TFSF plane wave injection.
+     * @param {Object} config - {
+     *   signal: Float32Array,
+     *   period: number,
+     *   voltagePoints: Array<{ field_idx, delay_int, delay_frac, amp }>,
+     *   currentPoints: Array<{ field_idx, delay_int, delay_frac, amp }>,
+     * }
+     */
+    configureTFSF(config) {
+        this.tfsfConfig = {
+            signal: config.signal,
+            signalLength: config.signal.length,
+            period: config.period || 0,
+            voltagePoints: config.voltagePoints || [],
+            currentPoints: config.currentPoints || [],
+        };
+    }
+
+    /**
+     * Apply TFSF voltage injection.
+     */
+    applyTFSFVoltage() {
+        if (!this.tfsfConfig) return;
+        const { signal, signalLength, period, voltagePoints } = this.tfsfConfig;
+        const numTS = this.numTS;
+
+        for (const pt of voltagePoints) {
+            let d = numTS - pt.delay_int;
+            if (d < 0) continue;
+            if (period > 0) {
+                d = d % period;
+            }
+            if (d >= signalLength - 1) continue;
+
+            const delta = pt.delay_frac;
+            const sig = (1.0 - delta) * signal[d] + delta * signal[d + 1];
+            this.volt[pt.field_idx] += pt.amp * sig;
+        }
+    }
+
+    /**
+     * Apply TFSF current injection.
+     */
+    applyTFSFCurrent() {
+        if (!this.tfsfConfig) return;
+        const { signal, signalLength, period, currentPoints } = this.tfsfConfig;
+        const numTS = this.numTS;
+
+        for (const pt of currentPoints) {
+            let d = numTS - pt.delay_int;
+            if (d < 0) continue;
+            if (period > 0) {
+                d = d % period;
+            }
+            if (d >= signalLength - 1) continue;
+
+            const delta = pt.delay_frac;
+            const sig = (1.0 - delta) * signal[d] + delta * signal[d + 1];
+            this.curr[pt.field_idx] += pt.amp * sig;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Lumped RLC Elements
+    // -----------------------------------------------------------------------
+
+    /**
+     * Configure lumped RLC elements.
+     * @param {Object} config - { elements: Array<{
+     *   field_idx: number,    // linear index into global field
+     *   direction: number,    // component (0, 1, 2)
+     *   type_flag: number,    // 0=parallel, 1=series
+     *   i2v: number, ilv: number,
+     *   vvd: number, vv2: number, vj1: number, vj2: number,
+     *   ib0: number, b1: number, b2: number,
+     * }> }
+     */
+    configureRLC(config) {
+        const n = config.elements.length;
+        this.rlcElements = config.elements.map(elem => ({ ...elem }));
+        this.rlcVdn = new Float32Array(n * 3);   // 3-deep history
+        this.rlcJn = new Float32Array(n * 3);     // 3-deep history
+        this.rlcVIl = new Float32Array(n);        // inductor current accumulator
+    }
+
+    /**
+     * RLC pre-voltage: shift Vdn history, update parallel inductor current.
+     * Matches C++ DoPreVoltageUpdates in engine_ext_lumpedRLC.cpp:83-97.
+     */
+    preVoltageRLC() {
+        if (!this.rlcElements || this.rlcElements.length === 0) return;
+
+        const { rlcVdn: Vdn, rlcVIl: v_Il } = this;
+
+        for (let n = 0; n < this.rlcElements.length; n++) {
+            const h0 = n * 3;
+            const h1 = n * 3 + 1;
+            const h2 = n * 3 + 2;
+
+            Vdn[h2] = Vdn[h1];
+            Vdn[h1] = Vdn[h0];
+
+            const elem = this.rlcElements[n];
+            if (elem.type_flag === 0) {
+                v_Il[n] += elem.i2v * elem.ilv * Vdn[h1];
+            }
+        }
+    }
+
+    /**
+     * RLC apply-to-voltages: read voltage, shift Jn, series update, writeback.
+     * Matches C++ Apply2Voltages in engine_ext_lumpedRLC.cpp:100-142.
+     */
+    applyRLC() {
+        if (!this.rlcElements || this.rlcElements.length === 0) return;
+
+        const { rlcVdn: Vdn, rlcJn: Jn, rlcVIl: v_Il } = this;
+
+        for (let n = 0; n < this.rlcElements.length; n++) {
+            const elem = this.rlcElements[n];
+            const g = elem.direction * this.totalCells + elem.field_idx;
+            const h0 = n * 3;
+            const h1 = n * 3 + 1;
+            const h2 = n * 3 + 2;
+
+            Vdn[h0] = this.volt[g];
+
+            Jn[h2] = Jn[h1];
+            Jn[h1] = Jn[h0];
+
+            if (elem.type_flag === 1) {
+                const Il = v_Il[n];
+                Vdn[h0] = elem.vvd * (Vdn[h0] - Il
+                         + elem.vv2 * Vdn[h2]
+                         + elem.vj1 * Jn[h1]
+                         + elem.vj2 * Jn[h2]);
+
+                Jn[h0] = elem.ib0 * (Vdn[h0] - Vdn[h2])
+                        - elem.b1 * elem.ib0 * Jn[h1]
+                        - elem.b2 * elem.ib0 * Jn[h2];
+
+                this.volt[g] = Vdn[h0];
+            }
+        }
+    }
+
+    /**
+     * @deprecated Use preVoltageRLC() + applyRLC() instead.
+     */
+    updateRLC() {
+        this.preVoltageRLC();
+        this.applyRLC();
+    }
+
+    // -----------------------------------------------------------------------
+    // Mur Absorbing Boundary Condition
+    // -----------------------------------------------------------------------
+
+    /**
+     * Configure Mur ABC boundary.
+     * Supports per-point, per-component coefficients matching C++
+     * m_Mur_Coeff_nyP(i,j) and m_Mur_Coeff_nyPP(i,j).
+     *
+     * @param {Object} config - {
+     *   coeff: number|Float32Array,   // scalar (uniform) or per-point array
+     *   normal_idx: Uint32Array,      // field indices at the boundary
+     *   shifted_idx: Uint32Array,     // field indices one cell inward
+     * }
+     */
+    configureMur(config) {
+        const numPoints = config.normal_idx.length;
+        let coeff;
+        if (typeof config.coeff === 'number') {
+            coeff = new Float32Array(numPoints).fill(config.coeff);
+        } else {
+            coeff = config.coeff;
+        }
+        this.murConfig = {
+            coeff,
+            normal_idx: config.normal_idx,
+            shifted_idx: config.shifted_idx,
+            numPoints,
+            saved_volt: new Float32Array(numPoints),
+        };
+    }
+
+    /**
+     * Mur pre-voltage: save boundary state.
+     */
+    murPreVoltage() {
+        if (!this.murConfig) return;
+        const { coeff, normal_idx, shifted_idx, saved_volt, numPoints } = this.murConfig;
+
+        for (let n = 0; n < numPoints; n++) {
+            saved_volt[n] = this.volt[shifted_idx[n]] - coeff[n] * this.volt[normal_idx[n]];
+        }
+    }
+
+    /**
+     * Mur post-voltage: accumulate updated field.
+     */
+    murPostVoltage() {
+        if (!this.murConfig) return;
+        const { coeff, shifted_idx, saved_volt, numPoints } = this.murConfig;
+
+        for (let n = 0; n < numPoints; n++) {
+            saved_volt[n] += coeff[n] * this.volt[shifted_idx[n]];
+        }
+    }
+
+    /**
+     * Mur apply: overwrite boundary with Mur value.
+     */
+    murApply() {
+        if (!this.murConfig) return;
+        const { normal_idx, saved_volt, numPoints } = this.murConfig;
+
+        for (let n = 0; n < numPoints; n++) {
+            this.volt[normal_idx[n]] = saved_volt[n];
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Steady-State Detection
+    // -----------------------------------------------------------------------
+
+    /**
+     * Configure steady-state detection.
+     * @param {Object} config - {
+     *   probe_idx: Uint32Array,       // field indices for probe points
+     *   periodSamples: number,        // samples per period
+     *   threshold: number,            // convergence threshold (e.g. 1e-6)
+     * }
+     */
+    configureSteadyState(config) {
+        const numProbes = config.probe_idx.length;
+        this.steadyStateConfig = {
+            probe_idx: config.probe_idx,
+            periodSamples: config.periodSamples,
+            threshold: config.threshold || 1e-6,
+            numProbes,
+            currentSample: 0,
+            recording: false,
+            energy_period1: new Float32Array(numProbes),
+            energy_period2: new Float32Array(numProbes),
+        };
+    }
+
+    /**
+     * Accumulate energy at probe points for steady-state detection.
+     */
+    accumulateEnergy() {
+        if (!this.steadyStateConfig) return;
+        const ss = this.steadyStateConfig;
+        if (!ss.recording) return;
+
+        for (let n = 0; n < ss.numProbes; n++) {
+            const v = this.volt[ss.probe_idx[n]];
+            const e = v * v;
+
+            if (ss.currentSample < ss.periodSamples) {
+                ss.energy_period1[n] += e;
+            } else {
+                ss.energy_period2[n] += e;
+            }
+        }
+        ss.currentSample++;
+    }
+
+    /**
+     * Check if steady-state convergence has been reached.
+     * @returns {boolean} true if converged (ratio < threshold)
+     */
+    checkConvergence() {
+        if (!this.steadyStateConfig) return false;
+        const ss = this.steadyStateConfig;
+
+        // Need both periods to be recorded
+        if (ss.currentSample < 2 * ss.periodSamples) return false;
+
+        let maxRatio = 0;
+        for (let n = 0; n < ss.numProbes; n++) {
+            const e1 = ss.energy_period1[n];
+            const e2 = ss.energy_period2[n];
+            if (Math.abs(e1) < 1e-30) continue; // avoid division by zero
+            const ratio = Math.abs(e2 - e1) / Math.abs(e1);
+            if (ratio > maxRatio) maxRatio = ratio;
+        }
+        return maxRatio < ss.threshold;
+    }
+
+    /**
+     * Run one complete FDTD timestep with all extensions.
+     * Order follows the priority-based execution from engine_extension.h:
+     *
+     * PRE-VOLTAGE:
+     *   Priority +2M: Steady-state energy accumulation
+     *   Priority +1M: PML pre-voltage
+     *   Priority 0:   Mur pre-voltage (save boundary)
+     *
+     * CORE VOLTAGE UPDATE
+     *
+     * POST-VOLTAGE:
+     *   Priority +1M: PML post-voltage
+     *   Priority 0:   Lorentz/Drude ADE voltage update
+     *   Priority 0:   Mur post-voltage
+     *
+     * APPLY TO VOLTAGES:
+     *   Priority +50K: TFSF voltage injection
+     *   Priority -1K:  Excitation voltage injection
+     *   Priority -1K:  Mur apply (overwrite boundary)
+     *   Priority -1K:  RLC voltage update
+     *
+     * PRE-CURRENT:
+     *   Priority +1M: PML pre-current
+     *
+     * CORE CURRENT UPDATE
+     *
+     * POST-CURRENT:
+     *   Priority +1M: PML post-current
+     *   Lorentz/Drude ADE current update
+     *
+     * APPLY TO CURRENTS:
+     *   Priority +50K: TFSF current injection
+     *   Priority -1K:  Excitation current injection
      */
     step() {
-        this.preVoltageUpdatePML();
+        // === PRE-VOLTAGE ===
+        this.accumulateEnergy();           // Priority +2M: steady-state
+        this.preVoltageUpdatePML();        // Priority +1M: PML pre-voltage
+        this.updateVoltADE();              // Priority 0: Lorentz/Drude ADE (C++ DoPreVoltageUpdates)
+        this.murPreVoltage();              // Priority 0: Mur pre-voltage (C++ DoPreVoltageUpdates)
+        this.preVoltageRLC();              // Priority 0: RLC history shift + v_Il (C++ DoPreVoltageUpdates)
+
+        // === CORE VOLTAGE UPDATE ===
         this.updateVoltages();
-        this.postVoltageUpdatePML();
-        this.applyExcitation();
-        this.preCurrentUpdatePML();
+
+        // === POST-VOLTAGE ===
+        this.postVoltageUpdatePML();       // Priority +1M: PML post-voltage
+        this.applyTFSFVoltage();           // Priority +50K: TFSF voltage (C++ DoPostVoltageUpdates)
+        this.murPostVoltage();             // Priority 0: Mur post-voltage (C++ DoPostVoltageUpdates)
+
+        // === APPLY TO VOLTAGES ===
+        this.applyExcitation();            // Priority -1K: Excitation voltage
+        this.murApply();                   // Priority 0: Mur apply (C++ Apply2Voltages)
+        this.applyRLC();                   // Priority 0: RLC series update + writeback (C++ Apply2Voltages)
+
+        // === PRE-CURRENT ===
+        this.preCurrentUpdatePML();        // Priority +1M: PML pre-current
+        this.updateCurrADE();              // Priority 0: Lorentz/Drude ADE current (C++ DoPreCurrentUpdates)
+
+        // === CORE CURRENT UPDATE ===
         this.updateCurrents();
-        this.postCurrentUpdatePML();
+
+        // === POST-CURRENT ===
+        this.postCurrentUpdatePML();       // Priority +1M: PML post-current
+        this.applyTFSFCurrent();           // Priority +50K: TFSF current (C++ DoPostCurrentUpdates)
+
+        // === APPLY TO CURRENTS ===
+        // Excitation current injection would go here if implemented
+
         this.numTS++;
     }
 
@@ -465,6 +921,61 @@ export class WebGPUFDTD {
             this._gpuEngine.configurePML(pmlRegions);
         } else {
             this._cpuEngine.configurePML(pmlRegions);
+        }
+    }
+
+    /**
+     * Configure Lorentz/Drude dispersive material orders.
+     */
+    configureLorentz(config) {
+        if (this._useGPU) {
+            // GPU path: not yet implemented
+        } else {
+            this._cpuEngine.configureLorentz(config);
+        }
+    }
+
+    /**
+     * Configure TFSF plane wave injection.
+     */
+    configureTFSF(config) {
+        if (this._useGPU) {
+            // GPU path: not yet implemented
+        } else {
+            this._cpuEngine.configureTFSF(config);
+        }
+    }
+
+    /**
+     * Configure lumped RLC elements.
+     */
+    configureRLC(config) {
+        if (this._useGPU) {
+            // GPU path: not yet implemented
+        } else {
+            this._cpuEngine.configureRLC(config);
+        }
+    }
+
+    /**
+     * Configure Mur ABC boundary.
+     */
+    configureMur(config) {
+        if (this._useGPU) {
+            // GPU path: not yet implemented
+        } else {
+            this._cpuEngine.configureMur(config);
+        }
+    }
+
+    /**
+     * Configure steady-state detection.
+     */
+    configureSteadyState(config) {
+        if (this._useGPU) {
+            // GPU path: not yet implemented
+        } else {
+            this._cpuEngine.configureSteadyState(config);
         }
     }
 

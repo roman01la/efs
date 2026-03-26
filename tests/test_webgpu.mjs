@@ -8,7 +8,10 @@
 // 5. WGSL shader source parses as valid syntax (basic structural checks)
 
 import { CPUFDTDEngine } from '../src/webgpu-fdtd.mjs';
-import { UPDATE_VOLTAGE_WGSL, UPDATE_CURRENT_WGSL, UPDATE_PML_WGSL, EXCITATION_WGSL } from '../src/webgpu-engine.mjs';
+import {
+    UPDATE_VOLTAGE_WGSL, UPDATE_CURRENT_WGSL, UPDATE_PML_WGSL, EXCITATION_WGSL,
+    LORENTZ_ADE_WGSL, TFSF_WGSL, LUMPED_RLC_WGSL, MUR_ABC_WGSL, STEADY_STATE_WGSL,
+} from '../src/webgpu-engine.mjs';
 import { WASMGPUBridge } from '../src/wasm-gpu-bridge.mjs';
 
 // ---------------------------------------------------------------------------
@@ -1567,6 +1570,807 @@ section('PML Flux Initialization');
         `volt_flux size = ${pmlTotal}`);
     assert(region.curr_flux.length === pmlTotal,
         `curr_flux size = ${pmlTotal}`);
+}
+
+// ===========================================================================
+// Phase 4: GPU Extensions Tests
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Lorentz/Drude ADE Tests
+// ---------------------------------------------------------------------------
+
+section('Lorentz/Drude ADE — Pure Drude Update');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    // Set known voltage values
+    const pos0 = idx(0, 1, 1, 1, Nx, Ny, Nz); // Ex at (1,1,1)
+    engine.volt[pos0] = 2.0;
+
+    const v_int = 0.8;
+    const v_ext = 0.3;
+
+    engine.configureLorentz({
+        orders: [{
+            numCells: 1,
+            hasLorentz: false,
+            directions: [{
+                dir: 0,
+                pos_idx: new Uint32Array([1 * Ny * Nz + 1 * Nz + 1]),
+                v_int_ADE: new Float32Array([v_int]),
+                v_ext_ADE: new Float32Array([v_ext]),
+                v_Lor_ADE: new Float32Array([0]),
+            }],
+        }],
+    });
+
+    // Initial ADE is 0, so: volt_ADE = v_int * 0 + v_ext * V = v_ext * 2.0 = 0.6
+    engine.updateVoltADE();
+    const ade0 = engine.lorentzOrders[0].directions[0].volt_ADE[0];
+    assertApprox(ade0, v_ext * 2.0, 1e-7, 'Pure Drude: volt_ADE = v_ext * V');
+
+    // Second call: volt_ADE = v_int * 0.6 + v_ext * 2.0 = 0.48 + 0.6 = 1.08
+    engine.updateVoltADE();
+    const ade1 = engine.lorentzOrders[0].directions[0].volt_ADE[0];
+    assertApprox(ade1, v_int * 0.6 + v_ext * 2.0, 1e-6, 'Pure Drude: second update accumulates');
+}
+
+section('Lorentz/Drude ADE — Lorentz Update');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const pos0 = idx(0, 1, 1, 1, Nx, Ny, Nz);
+    engine.volt[pos0] = 3.0;
+
+    const v_int = 0.9;
+    const v_ext = 0.2;
+    const v_Lor = 0.1;
+
+    engine.configureLorentz({
+        orders: [{
+            numCells: 1,
+            hasLorentz: true,
+            directions: [{
+                dir: 0,
+                pos_idx: new Uint32Array([1 * Ny * Nz + 1 * Nz + 1]),
+                v_int_ADE: new Float32Array([v_int]),
+                v_ext_ADE: new Float32Array([v_ext]),
+                v_Lor_ADE: new Float32Array([v_Lor]),
+            }],
+        }],
+    });
+
+    // Step 1: volt_ADE=0, volt_Lor_ADE=0
+    // volt_Lor_ADE += v_Lor * volt_ADE = 0 + 0.1 * 0 = 0
+    // volt_ADE = v_int * 0 + v_ext * (3.0 - 0) = 0.6
+    engine.updateVoltADE();
+    const d = engine.lorentzOrders[0].directions[0];
+    assertApprox(d.volt_Lor_ADE[0], 0.0, 1e-7, 'Lorentz: Lor accumulator starts at 0');
+    assertApprox(d.volt_ADE[0], v_ext * 3.0, 1e-7, 'Lorentz: first ADE update');
+
+    // Step 2: volt_ADE=0.6, volt_Lor_ADE=0
+    // volt_Lor_ADE += v_Lor * volt_ADE = 0 + 0.1 * 0.6 = 0.06
+    // volt_ADE = v_int * 0.6 + v_ext * (3.0 - 0.06) = 0.54 + 0.588 = 1.128
+    engine.updateVoltADE();
+    assertApprox(d.volt_Lor_ADE[0], v_Lor * 0.6, 1e-7, 'Lorentz: Lor accumulator after step 2');
+    assertApprox(d.volt_ADE[0], v_int * 0.6 + v_ext * (3.0 - v_Lor * 0.6), 1e-6,
+        'Lorentz: ADE update with feedback');
+}
+
+section('Lorentz/Drude ADE — Multiple Orders');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const linearPos = 1 * Ny * Nz + 1 * Nz + 1;
+    engine.volt[idx(0, 1, 1, 1, Nx, Ny, Nz)] = 1.0;
+
+    engine.configureLorentz({
+        orders: [
+            {
+                numCells: 1,
+                hasLorentz: false,
+                directions: [{
+                    dir: 0,
+                    pos_idx: new Uint32Array([linearPos]),
+                    v_int_ADE: new Float32Array([0.5]),
+                    v_ext_ADE: new Float32Array([0.4]),
+                    v_Lor_ADE: new Float32Array([0]),
+                }],
+            },
+            {
+                numCells: 1,
+                hasLorentz: false,
+                directions: [{
+                    dir: 0,
+                    pos_idx: new Uint32Array([linearPos]),
+                    v_int_ADE: new Float32Array([0.7]),
+                    v_ext_ADE: new Float32Array([0.2]),
+                    v_Lor_ADE: new Float32Array([0]),
+                }],
+            },
+        ],
+    });
+
+    engine.updateVoltADE();
+    const ade0 = engine.lorentzOrders[0].directions[0].volt_ADE[0];
+    const ade1 = engine.lorentzOrders[1].directions[0].volt_ADE[0];
+    assertApprox(ade0, 0.4 * 1.0, 1e-7, 'Multi-order: order 0 updated');
+    assertApprox(ade1, 0.2 * 1.0, 1e-7, 'Multi-order: order 1 updated independently');
+}
+
+section('Lorentz/Drude ADE — Zero Coefficients');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    engine.volt[idx(0, 1, 1, 1, Nx, Ny, Nz)] = 5.0;
+
+    engine.configureLorentz({
+        orders: [{
+            numCells: 1,
+            hasLorentz: false,
+            directions: [{
+                dir: 0,
+                pos_idx: new Uint32Array([1 * Ny * Nz + 1 * Nz + 1]),
+                v_int_ADE: new Float32Array([0.0]),
+                v_ext_ADE: new Float32Array([0.0]),
+                v_Lor_ADE: new Float32Array([0.0]),
+            }],
+        }],
+    });
+
+    engine.updateVoltADE();
+    assertApprox(engine.lorentzOrders[0].directions[0].volt_ADE[0], 0.0, 1e-10,
+        'Zero coefficients: ADE stays zero');
+}
+
+// ---------------------------------------------------------------------------
+// TFSF Tests
+// ---------------------------------------------------------------------------
+
+section('TFSF — Injection with No Delay');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const signal = new Float32Array([1.0, 2.0, 3.0, 4.0, 5.0]);
+    const fieldIdx = idx(0, 1, 1, 1, Nx, Ny, Nz);
+    const amp = 0.5;
+
+    engine.configureTFSF({
+        signal,
+        period: 0,
+        voltagePoints: [{
+            field_idx: fieldIdx,
+            delay_int: 0,
+            delay_frac: 0.0,
+            amp,
+        }],
+    });
+
+    engine.numTS = 0;
+    const before = engine.volt[fieldIdx];
+    engine.applyTFSFVoltage();
+    // d = 0 - 0 = 0, delta=0, sig = 1.0*signal[0] + 0*signal[1] = 1.0
+    assertApprox(engine.volt[fieldIdx], before + amp * 1.0, 1e-7,
+        'TFSF no delay: V += amp * signal[0]');
+}
+
+section('TFSF — Injection with Delay and Interpolation');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const signal = new Float32Array([0.0, 1.0, 2.0, 3.0, 4.0]);
+    const fieldIdx = idx(1, 2, 2, 2, Nx, Ny, Nz);
+    const amp = 1.0;
+    const delayFrac = 0.25;
+
+    engine.configureTFSF({
+        signal,
+        period: 0,
+        voltagePoints: [{
+            field_idx: fieldIdx,
+            delay_int: 1,
+            delay_frac: delayFrac,
+            amp,
+        }],
+    });
+
+    engine.numTS = 3;
+    // d = 3 - 1 = 2, sig = (1 - 0.25) * signal[2] + 0.25 * signal[3] = 0.75*2 + 0.25*3 = 2.25
+    engine.applyTFSFVoltage();
+    assertApprox(engine.volt[fieldIdx], amp * 2.25, 1e-7,
+        'TFSF with delay and interpolation: correct signal value');
+}
+
+section('TFSF — Past Signal Length');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const signal = new Float32Array([1.0, 2.0, 3.0]);
+    const fieldIdx = idx(0, 1, 1, 1, Nx, Ny, Nz);
+
+    engine.configureTFSF({
+        signal,
+        period: 0,
+        voltagePoints: [{
+            field_idx: fieldIdx,
+            delay_int: 0,
+            delay_frac: 0.0,
+            amp: 1.0,
+        }],
+    });
+
+    engine.numTS = 10; // d = 10, signalLength-1 = 2, d >= 2 so skip
+    engine.applyTFSFVoltage();
+    assertApprox(engine.volt[fieldIdx], 0.0, 1e-10,
+        'TFSF past signal length: no injection');
+}
+
+section('TFSF — Periodic Signal Wrapping');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const signal = new Float32Array([10.0, 20.0, 30.0, 40.0, 50.0]);
+    const fieldIdx = idx(0, 1, 1, 1, Nx, Ny, Nz);
+
+    engine.configureTFSF({
+        signal,
+        period: 3,
+        voltagePoints: [{
+            field_idx: fieldIdx,
+            delay_int: 0,
+            delay_frac: 0.0,
+            amp: 1.0,
+        }],
+    });
+
+    engine.numTS = 5; // d = 5, period=3, d = 5%3 = 2, sig = signal[2] = 30.0
+    engine.applyTFSFVoltage();
+    assertApprox(engine.volt[fieldIdx], 30.0, 1e-7,
+        'TFSF periodic wrapping: d wraps via modulo');
+}
+
+// ---------------------------------------------------------------------------
+// Lumped RLC Tests
+// ---------------------------------------------------------------------------
+
+section('Lumped RLC — Parallel Mode');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const linearPos = 1 * Ny * Nz + 1 * Nz + 1;
+    const fieldIdx = idx(0, 1, 1, 1, Nx, Ny, Nz);
+    engine.volt[fieldIdx] = 5.0;
+
+    const i2v = 0.1;
+    const ilv = 0.2;
+
+    engine.configureRLC({
+        elements: [{
+            field_idx: linearPos,
+            direction: 0,
+            type_flag: 0, // parallel
+            i2v, ilv,
+            vvd: 0, vv2: 0, vj1: 0, vj2: 0, ib0: 0, b1: 0, b2: 0,
+        }],
+    });
+
+    // Step 1: shift history, Vdn[0]=volt[g]=5.0, Vdn[1]=0 (from shift of old Vdn[0]=0)
+    // v_Il += i2v * ilv * Vdn[h1] = 0 + 0.1 * 0.2 * 0 = 0
+    engine.updateRLC();
+    assertApprox(engine.rlcVIl[0], 0.0, 1e-10,
+        'Parallel RLC step 1: v_Il = 0 (Vdn[h1] was 0)');
+
+    // Step 2: shift, Vdn[1]=5.0, Vdn[0]=volt[g]=5.0
+    // v_Il += i2v * ilv * Vdn[h1] = 0 + 0.1 * 0.2 * 5.0 = 0.1
+    engine.updateRLC();
+    assertApprox(engine.rlcVIl[0], i2v * ilv * 5.0, 1e-7,
+        'Parallel RLC step 2: inductor current accumulation');
+}
+
+section('Lumped RLC — Series Mode');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const linearPos = 1 * Ny * Nz + 1 * Nz + 1;
+    const fieldIdx = idx(0, 1, 1, 1, Nx, Ny, Nz);
+    engine.volt[fieldIdx] = 2.0;
+
+    const vvd = 0.5;
+    const vv2 = 0.1;
+    const vj1 = 0.0;
+    const vj2 = 0.0;
+    const ib0 = 0.3;
+    const b1 = 0.0;
+    const b2 = 0.0;
+
+    engine.configureRLC({
+        elements: [{
+            field_idx: linearPos,
+            direction: 0,
+            type_flag: 1, // series
+            i2v: 0, ilv: 0,
+            vvd, vv2, vj1, vj2, ib0, b1, b2,
+        }],
+    });
+
+    // Step 1: all history=0, v_Il=0
+    // Vdn[0] = volt[g] = 2.0
+    // Vdn[0] = vvd * (2.0 - 0 + vv2*0 + vj1*0 + vj2*0) = 0.5 * 2.0 = 1.0
+    // Jn[0] = ib0 * (1.0 - 0) - 0 - 0 = 0.3
+    // volt[g] = 1.0
+    engine.updateRLC();
+    assertApprox(engine.volt[fieldIdx], 1.0, 1e-7,
+        'Series RLC step 1: voltage modified by IIR filter');
+    assertApprox(engine.rlcJn[0], 0.3, 1e-7,
+        'Series RLC step 1: current updated');
+}
+
+section('Lumped RLC — History Buffer Shifting');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const linearPos = 0;
+    const fieldIdx = idx(0, 0, 0, 0, Nx, Ny, Nz);
+
+    engine.configureRLC({
+        elements: [{
+            field_idx: linearPos,
+            direction: 0,
+            type_flag: 0, // parallel (doesn't modify voltage)
+            i2v: 0, ilv: 0,
+            vvd: 0, vv2: 0, vj1: 0, vj2: 0, ib0: 0, b1: 0, b2: 0,
+        }],
+    });
+
+    // Step 1: volt[g]=0
+    engine.volt[fieldIdx] = 1.0;
+    engine.updateRLC();
+    assertApprox(engine.rlcVdn[0], 1.0, 1e-10, 'History: Vdn[0]=1.0 after step 1');
+
+    // Step 2: volt[g]=2.0
+    engine.volt[fieldIdx] = 2.0;
+    engine.updateRLC();
+    assertApprox(engine.rlcVdn[0], 2.0, 1e-10, 'History: Vdn[0]=2.0 after step 2');
+    assertApprox(engine.rlcVdn[1], 1.0, 1e-10, 'History: Vdn[1]=1.0 (shifted from step 1)');
+
+    // Step 3: volt[g]=3.0
+    engine.volt[fieldIdx] = 3.0;
+    engine.updateRLC();
+    assertApprox(engine.rlcVdn[0], 3.0, 1e-10, 'History: Vdn[0]=3.0 after step 3');
+    assertApprox(engine.rlcVdn[1], 2.0, 1e-10, 'History: Vdn[1]=2.0 after step 3');
+    assertApprox(engine.rlcVdn[2], 1.0, 1e-10, 'History: Vdn[2]=1.0 after step 3');
+}
+
+section('Lumped RLC — Mixed Parallel/Series');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const pos0 = 0;
+    const pos1 = 1;
+    const fIdx0 = idx(0, 0, 0, 0, Nx, Ny, Nz);
+    const fIdx1 = idx(0, 0, 0, 1, Nx, Ny, Nz);
+    engine.volt[fIdx0] = 1.0;
+    engine.volt[fIdx1] = 2.0;
+
+    engine.configureRLC({
+        elements: [
+            {
+                field_idx: pos0,
+                direction: 0,
+                type_flag: 0, // parallel
+                i2v: 0.5, ilv: 0.3,
+                vvd: 0, vv2: 0, vj1: 0, vj2: 0, ib0: 0, b1: 0, b2: 0,
+            },
+            {
+                field_idx: pos1,
+                direction: 0,
+                type_flag: 1, // series
+                i2v: 0, ilv: 0,
+                vvd: 0.8, vv2: 0, vj1: 0, vj2: 0, ib0: 0.4, b1: 0, b2: 0,
+            },
+        ],
+    });
+
+    engine.updateRLC();
+    // Parallel (elem 0): v_Il += 0 (Vdn[h1]=0)
+    assertApprox(engine.rlcVIl[0], 0.0, 1e-10, 'Mixed: parallel element v_Il still 0');
+    // Series (elem 1): Vdn[0] = 0.8 * (2.0 - 0) = 1.6, volt[g]=1.6
+    assertApprox(engine.volt[fIdx1], 0.8 * 2.0, 1e-7, 'Mixed: series element modifies voltage');
+}
+
+// ---------------------------------------------------------------------------
+// Mur ABC Tests
+// ---------------------------------------------------------------------------
+
+section('Mur ABC — 3-Phase Update Sequence');
+
+{
+    const Nx = 6, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    // Set up boundary at x=0 (normal) with x=1 as shifted
+    const normalIdx = new Uint32Array([idx(0, 0, 1, 1, Nx, Ny, Nz)]);
+    const shiftedIdx = new Uint32Array([idx(0, 1, 1, 1, Nx, Ny, Nz)]);
+    const coeff = 0.3;
+
+    engine.volt[normalIdx[0]] = 1.0;
+    engine.volt[shiftedIdx[0]] = 2.0;
+
+    engine.configureMur({ coeff, normal_idx: normalIdx, shifted_idx: shiftedIdx });
+
+    // Pre-voltage: saved = shifted - coeff * normal = 2.0 - 0.3 * 1.0 = 1.7
+    engine.murPreVoltage();
+    assertApprox(engine.murConfig.saved_volt[0], 2.0 - coeff * 1.0, 1e-7,
+        'Mur pre: saved = shifted - coeff * normal');
+
+    // Simulate voltage update: change the shifted field
+    engine.volt[shiftedIdx[0]] = 3.5;
+
+    // Post-voltage: saved += coeff * shifted_after = 1.7 + 0.3 * 3.5 = 2.75
+    engine.murPostVoltage();
+    assertApprox(engine.murConfig.saved_volt[0], 1.7 + coeff * 3.5, 1e-7,
+        'Mur post: saved += coeff * shifted_updated');
+
+    // Apply: normal = saved
+    engine.murApply();
+    assertApprox(engine.volt[normalIdx[0]], 1.7 + coeff * 3.5, 1e-7,
+        'Mur apply: boundary overwritten with Mur value');
+}
+
+section('Mur ABC — Coefficient Verification');
+
+{
+    // Verify that coeff = (c*dT - dSpace) / (c*dT + dSpace)
+    const c = 3e8;      // speed of light
+    const dT = 1e-12;   // timestep
+    const dSpace = 1e-4; // cell size
+    const coeff = (c * dT - dSpace) / (c * dT + dSpace);
+
+    // c*dT = 3e-4, dSpace = 1e-4
+    // coeff = (3e-4 - 1e-4) / (3e-4 + 1e-4) = 2e-4 / 4e-4 = 0.5
+    assertApprox(coeff, 0.5, 1e-10, 'Mur coeff: (c*dT - dSpace)/(c*dT + dSpace) = 0.5');
+
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const normalIdx = new Uint32Array([idx(0, 0, 1, 1, Nx, Ny, Nz)]);
+    const shiftedIdx = new Uint32Array([idx(0, 1, 1, 1, Nx, Ny, Nz)]);
+
+    engine.configureMur({ coeff, normal_idx: normalIdx, shifted_idx: shiftedIdx });
+    assertApprox(engine.murConfig.coeff, 0.5, 1e-10, 'Mur config: coeff stored correctly');
+}
+
+section('Mur ABC — Boundary Value Set After Apply');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    // Multiple boundary points
+    const normalIdx = new Uint32Array([
+        idx(0, 0, 0, 0, Nx, Ny, Nz),
+        idx(0, 0, 1, 0, Nx, Ny, Nz),
+    ]);
+    const shiftedIdx = new Uint32Array([
+        idx(0, 1, 0, 0, Nx, Ny, Nz),
+        idx(0, 1, 1, 0, Nx, Ny, Nz),
+    ]);
+    const coeff = 0.4;
+
+    engine.volt[normalIdx[0]] = 10.0;
+    engine.volt[normalIdx[1]] = 20.0;
+    engine.volt[shiftedIdx[0]] = 15.0;
+    engine.volt[shiftedIdx[1]] = 25.0;
+
+    engine.configureMur({ coeff, normal_idx: normalIdx, shifted_idx: shiftedIdx });
+
+    engine.murPreVoltage();
+    // Simulate voltage update
+    engine.volt[shiftedIdx[0]] = 16.0;
+    engine.volt[shiftedIdx[1]] = 26.0;
+    engine.murPostVoltage();
+    engine.murApply();
+
+    // Point 0: saved = 15 - 0.4*10 = 11, then += 0.4*16 = 17.4
+    assertApprox(engine.volt[normalIdx[0]], 15.0 - 0.4 * 10.0 + 0.4 * 16.0, 1e-6,
+        'Mur multi-point: boundary 0 set correctly');
+    // Point 1: saved = 25 - 0.4*20 = 17, then += 0.4*26 = 27.4
+    assertApprox(engine.volt[normalIdx[1]], 25.0 - 0.4 * 20.0 + 0.4 * 26.0, 1e-6,
+        'Mur multi-point: boundary 1 set correctly');
+}
+
+// ---------------------------------------------------------------------------
+// Steady-State Detection Tests
+// ---------------------------------------------------------------------------
+
+section('Steady-State — Energy Accumulation Period 1');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const probeIdx = new Uint32Array([idx(0, 1, 1, 1, Nx, Ny, Nz)]);
+    engine.volt[probeIdx[0]] = 3.0;
+
+    engine.configureSteadyState({
+        probe_idx: probeIdx,
+        periodSamples: 5,
+        threshold: 1e-6,
+    });
+
+    engine.steadyStateConfig.recording = true;
+    engine.steadyStateConfig.currentSample = 0;
+    engine.accumulateEnergy();
+
+    assertApprox(engine.steadyStateConfig.energy_period1[0], 9.0, 1e-7,
+        'SS period 1: energy = v^2 = 9.0');
+    assertApprox(engine.steadyStateConfig.energy_period2[0], 0.0, 1e-10,
+        'SS period 1: period2 still zero');
+}
+
+section('Steady-State — Energy Accumulation Period 2');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const probeIdx = new Uint32Array([idx(0, 1, 1, 1, Nx, Ny, Nz)]);
+    engine.volt[probeIdx[0]] = 2.0;
+
+    engine.configureSteadyState({
+        probe_idx: probeIdx,
+        periodSamples: 3,
+        threshold: 1e-6,
+    });
+
+    engine.steadyStateConfig.recording = true;
+    engine.steadyStateConfig.currentSample = 3; // in period 2
+    engine.accumulateEnergy();
+
+    assertApprox(engine.steadyStateConfig.energy_period2[0], 4.0, 1e-7,
+        'SS period 2: energy = v^2 = 4.0');
+    assertApprox(engine.steadyStateConfig.energy_period1[0], 0.0, 1e-10,
+        'SS period 2: period1 still zero');
+}
+
+section('Steady-State — Convergence Check');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const probeIdx = new Uint32Array([idx(0, 1, 1, 1, Nx, Ny, Nz)]);
+    engine.configureSteadyState({
+        probe_idx: probeIdx,
+        periodSamples: 2,
+        threshold: 1e-3,
+    });
+
+    const ss = engine.steadyStateConfig;
+    // Set energy values that are very close (converged)
+    ss.energy_period1[0] = 100.0;
+    ss.energy_period2[0] = 100.00005;
+    ss.currentSample = 4; // >= 2 * periodSamples
+    ss.recording = true;
+
+    assert(engine.checkConvergence() === true, 'SS convergence: ratio < threshold -> converged');
+
+    // Set energy values that differ (not converged)
+    ss.energy_period1[0] = 100.0;
+    ss.energy_period2[0] = 110.0; // 10% difference
+    assert(engine.checkConvergence() === false, 'SS convergence: ratio > threshold -> not converged');
+}
+
+section('Steady-State — Not Recording Mode');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    const probeIdx = new Uint32Array([idx(0, 1, 1, 1, Nx, Ny, Nz)]);
+    engine.volt[probeIdx[0]] = 100.0;
+
+    engine.configureSteadyState({
+        probe_idx: probeIdx,
+        periodSamples: 5,
+        threshold: 1e-6,
+    });
+
+    // recording is false by default
+    engine.accumulateEnergy();
+    assertApprox(engine.steadyStateConfig.energy_period1[0], 0.0, 1e-10,
+        'SS not recording: no energy accumulated');
+    assertApprox(engine.steadyStateConfig.energy_period2[0], 0.0, 1e-10,
+        'SS not recording: period2 also zero');
+}
+
+// ---------------------------------------------------------------------------
+// Full Timestep Dispatch Order Test
+// ---------------------------------------------------------------------------
+
+section('Full Timestep Dispatch Order with Extensions');
+
+{
+    const Nx = 4, Ny = 4, Nz = 4;
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const engine = new CPUFDTDEngine([Nx, Ny, Nz], coeffs);
+
+    // Track execution order via side effects
+    const executionLog = [];
+
+    // Wrap methods to log execution order
+    const origAccumulateEnergy = engine.accumulateEnergy.bind(engine);
+    engine.accumulateEnergy = () => { executionLog.push('steadyState'); origAccumulateEnergy(); };
+
+    const origPreVoltPML = engine.preVoltageUpdatePML.bind(engine);
+    engine.preVoltageUpdatePML = () => { executionLog.push('pmlPreVolt'); origPreVoltPML(); };
+
+    const origVoltADE = engine.updateVoltADE.bind(engine);
+    engine.updateVoltADE = () => { executionLog.push('voltADE'); origVoltADE(); };
+
+    const origMurPre = engine.murPreVoltage.bind(engine);
+    engine.murPreVoltage = () => { executionLog.push('murPre'); origMurPre(); };
+
+    const origPreRLC = engine.preVoltageRLC.bind(engine);
+    engine.preVoltageRLC = () => { executionLog.push('preRLC'); origPreRLC(); };
+
+    const origVolt = engine.updateVoltages.bind(engine);
+    engine.updateVoltages = () => { executionLog.push('coreVoltage'); origVolt(); };
+
+    const origPostVoltPML = engine.postVoltageUpdatePML.bind(engine);
+    engine.postVoltageUpdatePML = () => { executionLog.push('pmlPostVolt'); origPostVoltPML(); };
+
+    const origTFSFVolt = engine.applyTFSFVoltage.bind(engine);
+    engine.applyTFSFVoltage = () => { executionLog.push('tfsfVolt'); origTFSFVolt(); };
+
+    const origMurPost = engine.murPostVoltage.bind(engine);
+    engine.murPostVoltage = () => { executionLog.push('murPost'); origMurPost(); };
+
+    const origExc = engine.applyExcitation.bind(engine);
+    engine.applyExcitation = () => { executionLog.push('excitation'); origExc(); };
+
+    const origMurApply = engine.murApply.bind(engine);
+    engine.murApply = () => { executionLog.push('murApply'); origMurApply(); };
+
+    const origApplyRLC = engine.applyRLC.bind(engine);
+    engine.applyRLC = () => { executionLog.push('applyRLC'); origApplyRLC(); };
+
+    const origPreCurrPML = engine.preCurrentUpdatePML.bind(engine);
+    engine.preCurrentUpdatePML = () => { executionLog.push('pmlPreCurr'); origPreCurrPML(); };
+
+    const origCurrADE = engine.updateCurrADE.bind(engine);
+    engine.updateCurrADE = () => { executionLog.push('currADE'); origCurrADE(); };
+
+    const origCurr = engine.updateCurrents.bind(engine);
+    engine.updateCurrents = () => { executionLog.push('coreCurrent'); origCurr(); };
+
+    const origPostCurrPML = engine.postCurrentUpdatePML.bind(engine);
+    engine.postCurrentUpdatePML = () => { executionLog.push('pmlPostCurr'); origPostCurrPML(); };
+
+    const origTFSFCurr = engine.applyTFSFCurrent.bind(engine);
+    engine.applyTFSFCurrent = () => { executionLog.push('tfsfCurr'); origTFSFCurr(); };
+
+    engine.step();
+
+    // Corrected order matching C++ extension hook phases:
+    const expectedOrder = [
+        'steadyState',    // Pre-voltage: +2M
+        'pmlPreVolt',     // Pre-voltage: +1M (DoPreVoltageUpdates)
+        'voltADE',        // Pre-voltage: 0 (DoPreVoltageUpdates — Lorentz)
+        'murPre',         // Pre-voltage: 0 (DoPreVoltageUpdates — Mur save)
+        'preRLC',         // Pre-voltage: 0 (DoPreVoltageUpdates — RLC shift+v_Il)
+        'coreVoltage',    // Core voltage update
+        'pmlPostVolt',    // Post-voltage: +1M (DoPostVoltageUpdates)
+        'tfsfVolt',       // Post-voltage: +50K (DoPostVoltageUpdates — TFSF)
+        'murPost',        // Post-voltage: 0 (DoPostVoltageUpdates — Mur accumulate)
+        'excitation',     // Apply2Voltages: -1K
+        'murApply',       // Apply2Voltages: 0 (Mur overwrite)
+        'applyRLC',       // Apply2Voltages: 0 (RLC series update)
+        'pmlPreCurr',     // Pre-current: +1M
+        'currADE',        // Pre-current: 0 (DoPreCurrentUpdates — Lorentz)
+        'coreCurrent',    // Core current update
+        'pmlPostCurr',    // Post-current: +1M (DoPostCurrentUpdates)
+        'tfsfCurr',       // Post-current: +50K (DoPostCurrentUpdates — TFSF)
+    ];
+
+    assert(executionLog.length === expectedOrder.length,
+        `Dispatch order: correct number of phases (${executionLog.length} === ${expectedOrder.length})`);
+
+    let orderCorrect = true;
+    for (let i = 0; i < expectedOrder.length; i++) {
+        if (executionLog[i] !== expectedOrder[i]) {
+            assert(false, `Dispatch order mismatch at ${i}: expected '${expectedOrder[i]}', got '${executionLog[i]}'`);
+            orderCorrect = false;
+            break;
+        }
+    }
+    if (orderCorrect) {
+        assert(true, 'Dispatch order: all phases execute in correct priority order');
+    }
+
+    assert(engine.numTS === 1, 'Dispatch order: numTS incremented after step');
+}
+
+// ---------------------------------------------------------------------------
+// WGSL Shader Source Structural Checks (new shaders)
+// ---------------------------------------------------------------------------
+
+section('New Shader Source Structure');
+
+{
+    // Lorentz ADE shader
+    assert(LORENTZ_ADE_WGSL.includes('fn update_volt_ade'), 'Lorentz ADE WGSL has entry point');
+    assert(LORENTZ_ADE_WGSL.includes('ADEParams'), 'Lorentz ADE WGSL has ADEParams struct');
+    assert(LORENTZ_ADE_WGSL.includes('hasLorentz'), 'Lorentz ADE WGSL has hasLorentz flag');
+    assert(LORENTZ_ADE_WGSL.includes('volt_Lor_ADE'), 'Lorentz ADE WGSL has Lor accumulator');
+
+    // TFSF shader
+    assert(TFSF_WGSL.includes('fn tfsf_apply_voltage'), 'TFSF WGSL has entry point');
+    assert(TFSF_WGSL.includes('TFSFParams'), 'TFSF WGSL has TFSFParams struct');
+    assert(TFSF_WGSL.includes('delay_frac'), 'TFSF WGSL has fractional delay');
+    assert(TFSF_WGSL.includes('signal'), 'TFSF WGSL has signal buffer');
+
+    // Lumped RLC shader
+    assert(LUMPED_RLC_WGSL.includes('fn update_rlc'), 'RLC WGSL has entry point');
+    assert(LUMPED_RLC_WGSL.includes('RLCElement'), 'RLC WGSL has RLCElement struct');
+    assert(LUMPED_RLC_WGSL.includes('type_flag'), 'RLC WGSL has type_flag');
+    assert(LUMPED_RLC_WGSL.includes('v_Il'), 'RLC WGSL has inductor current buffer');
+
+    // Mur ABC shader
+    assert(MUR_ABC_WGSL.includes('fn mur_pre_voltage'), 'Mur WGSL has pre_voltage entry');
+    assert(MUR_ABC_WGSL.includes('fn mur_post_voltage'), 'Mur WGSL has post_voltage entry');
+    assert(MUR_ABC_WGSL.includes('fn mur_apply'), 'Mur WGSL has apply entry');
+    assert(MUR_ABC_WGSL.includes('MurParams'), 'Mur WGSL has MurParams struct');
+
+    // Steady-state shader
+    assert(STEADY_STATE_WGSL.includes('fn accumulate_energy'), 'SS WGSL has entry point');
+    assert(STEADY_STATE_WGSL.includes('SSParams'), 'SS WGSL has SSParams struct');
+    assert(STEADY_STATE_WGSL.includes('energy_period1'), 'SS WGSL has period1 buffer');
+    assert(STEADY_STATE_WGSL.includes('energy_period2'), 'SS WGSL has period2 buffer');
 }
 
 // ---------------------------------------------------------------------------

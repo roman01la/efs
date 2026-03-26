@@ -254,6 +254,274 @@ fn apply_excitation(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+const LORENTZ_ADE_WGSL = /* wgsl */`
+struct Params {
+    numLines: vec3<u32>,
+    numTS: u32,
+    shift: vec3<i32>,
+    _pad: u32,
+};
+
+struct ADEParams {
+    numCells: u32,
+    hasLorentz: u32,
+    direction: u32,
+    componentStride: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> volt: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@group(1) @binding(0) var<uniform> ade: ADEParams;
+@group(1) @binding(1) var<storage, read_write> volt_ADE: array<f32>;
+@group(1) @binding(2) var<storage, read_write> volt_Lor_ADE: array<f32>;
+@group(1) @binding(3) var<storage, read> v_int_ADE: array<f32>;
+@group(1) @binding(4) var<storage, read> v_ext_ADE: array<f32>;
+@group(1) @binding(5) var<storage, read> v_Lor_ADE: array<f32>;
+@group(1) @binding(6) var<storage, read> pos_idx: array<u32>;
+
+@compute @workgroup_size(256)
+fn update_volt_ade(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= ade.numCells) {
+        return;
+    }
+
+    let field_idx = ade.direction * ade.componentStride + pos_idx[i];
+    let V = volt[field_idx];
+
+    if (ade.hasLorentz == 1u) {
+        volt_Lor_ADE[i] += v_Lor_ADE[i] * volt_ADE[i];
+        volt_ADE[i] = v_int_ADE[i] * volt_ADE[i]
+                     + v_ext_ADE[i] * (V - volt_Lor_ADE[i]);
+    } else {
+        volt_ADE[i] = v_int_ADE[i] * volt_ADE[i]
+                     + v_ext_ADE[i] * V;
+    }
+}
+`;
+
+const TFSF_WGSL = /* wgsl */`
+struct Params {
+    numLines: vec3<u32>,
+    numTS: u32,
+    shift: vec3<i32>,
+    _pad: u32,
+};
+
+struct TFSFParams {
+    numTS: u32,
+    period: u32,
+    signalLength: u32,
+    numLowerPoints: u32,
+    numUpperPoints: u32,
+    _pad: vec3<u32>,
+};
+
+@group(0) @binding(0) var<storage, read_write> volt: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@group(1) @binding(0) var<uniform> tfsf: TFSFParams;
+@group(1) @binding(1) var<storage, read> signal: array<f32>;
+@group(1) @binding(2) var<storage, read> delay_int: array<u32>;
+@group(1) @binding(3) var<storage, read> delay_frac: array<f32>;
+@group(1) @binding(4) var<storage, read> amp: array<f32>;
+@group(1) @binding(5) var<storage, read> field_idx: array<u32>;
+
+@compute @workgroup_size(256)
+fn tfsf_apply_voltage(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let n = gid.x;
+    let totalPoints = tfsf.numLowerPoints + tfsf.numUpperPoints;
+    if (n >= totalPoints) {
+        return;
+    }
+
+    var d: i32 = i32(tfsf.numTS) - i32(delay_int[n]);
+    if (d < 0) {
+        return;
+    }
+    if (tfsf.period > 0u) {
+        d = d % i32(tfsf.period);
+    }
+    if (d >= i32(tfsf.signalLength) - 1) {
+        return;
+    }
+
+    let delta = delay_frac[n];
+    let sig = (1.0 - delta) * signal[u32(d)] + delta * signal[u32(d) + 1u];
+
+    volt[field_idx[n]] += amp[n] * sig;
+}
+`;
+
+const LUMPED_RLC_WGSL = /* wgsl */`
+struct Params {
+    numLines: vec3<u32>,
+    numTS: u32,
+    shift: vec3<i32>,
+    _pad: u32,
+};
+
+struct RLCParams {
+    numElements: u32,
+    componentStride: u32,
+    _pad: vec2<u32>,
+};
+
+struct RLCElement {
+    field_idx: u32,
+    direction: u32,
+    type_flag: u32,
+    i2v: f32,
+    ilv: f32,
+    vvd: f32,
+    vv2: f32,
+    vj1: f32,
+    vj2: f32,
+    ib0: f32,
+    b1: f32,
+    b2: f32,
+};
+
+@group(0) @binding(0) var<storage, read_write> volt: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@group(1) @binding(0) var<uniform> rlc: RLCParams;
+@group(1) @binding(1) var<storage, read> elements: array<RLCElement>;
+@group(1) @binding(2) var<storage, read_write> Vdn: array<f32>;
+@group(1) @binding(3) var<storage, read_write> Jn: array<f32>;
+@group(1) @binding(4) var<storage, read_write> v_Il: array<f32>;
+
+@compute @workgroup_size(256)
+fn update_rlc(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let n = gid.x;
+    if (n >= rlc.numElements) {
+        return;
+    }
+
+    let elem = elements[n];
+    let g = elem.direction * rlc.componentStride + elem.field_idx;
+
+    let h0 = n * 3u;
+    let h1 = n * 3u + 1u;
+    let h2 = n * 3u + 2u;
+
+    Vdn[h2] = Vdn[h1];
+    Vdn[h1] = Vdn[h0];
+    Jn[h2] = Jn[h1];
+    Jn[h1] = Jn[h0];
+
+    Vdn[h0] = volt[g];
+
+    if (elem.type_flag == 0u) {
+        v_Il[n] += elem.i2v * elem.ilv * Vdn[h1];
+    } else {
+        let Il = v_Il[n];
+        Vdn[h0] = elem.vvd * (Vdn[h0] - Il
+                 + elem.vv2 * Vdn[h2]
+                 + elem.vj1 * Jn[h1]
+                 + elem.vj2 * Jn[h2]);
+
+        Jn[h0] = elem.ib0 * (Vdn[h0] - Vdn[h2])
+                - elem.b1 * elem.ib0 * Jn[h1]
+                - elem.b2 * elem.ib0 * Jn[h2];
+
+        volt[g] = Vdn[h0];
+    }
+}
+`;
+
+const MUR_ABC_WGSL = /* wgsl */`
+struct Params {
+    numLines: vec3<u32>,
+    numTS: u32,
+    shift: vec3<i32>,
+    _pad: u32,
+};
+
+struct MurParams {
+    numPoints: u32,
+    _pad: vec3<u32>,
+};
+
+@group(0) @binding(0) var<storage, read_write> volt: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@group(1) @binding(0) var<uniform> mur: MurParams;
+@group(1) @binding(1) var<storage, read> normal_idx: array<u32>;
+@group(1) @binding(2) var<storage, read> shifted_idx: array<u32>;
+@group(1) @binding(3) var<storage, read_write> saved_volt: array<f32>;
+@group(1) @binding(4) var<storage, read> coeff: array<f32>;
+
+@compute @workgroup_size(256)
+fn mur_pre_voltage(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let n = gid.x;
+    if (n >= mur.numPoints) {
+        return;
+    }
+    saved_volt[n] = volt[shifted_idx[n]] - coeff[n] * volt[normal_idx[n]];
+}
+
+@compute @workgroup_size(256)
+fn mur_post_voltage(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let n = gid.x;
+    if (n >= mur.numPoints) {
+        return;
+    }
+    saved_volt[n] += coeff[n] * volt[shifted_idx[n]];
+}
+
+@compute @workgroup_size(256)
+fn mur_apply(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let n = gid.x;
+    if (n >= mur.numPoints) {
+        return;
+    }
+    volt[normal_idx[n]] = saved_volt[n];
+}
+`;
+
+const STEADY_STATE_WGSL = /* wgsl */`
+struct Params {
+    numLines: vec3<u32>,
+    numTS: u32,
+    shift: vec3<i32>,
+    _pad: u32,
+};
+
+struct SSParams {
+    numProbes: u32,
+    periodSamples: u32,
+    currentSample: u32,
+    recording: u32,
+};
+
+@group(0) @binding(0) var<storage, read> volt: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@group(1) @binding(0) var<uniform> ss: SSParams;
+@group(1) @binding(1) var<storage, read> probe_idx: array<u32>;
+@group(1) @binding(2) var<storage, read_write> energy_period1: array<f32>;
+@group(1) @binding(3) var<storage, read_write> energy_period2: array<f32>;
+
+@compute @workgroup_size(256)
+fn accumulate_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let n = gid.x;
+    if (n >= ss.numProbes || ss.recording == 0u) {
+        return;
+    }
+
+    let v = volt[probe_idx[n]];
+    let e = v * v;
+
+    if (ss.currentSample < ss.periodSamples) {
+        energy_period1[n] += e;
+    } else {
+        energy_period2[n] += e;
+    }
+}
+`;
+
 /**
  * WebGPU FDTD Engine.
  *
@@ -900,4 +1168,7 @@ export class WebGPUEngine {
 }
 
 // Export shader sources for testing/validation
-export { UPDATE_VOLTAGE_WGSL, UPDATE_CURRENT_WGSL, UPDATE_PML_WGSL, EXCITATION_WGSL };
+export {
+    UPDATE_VOLTAGE_WGSL, UPDATE_CURRENT_WGSL, UPDATE_PML_WGSL, EXCITATION_WGSL,
+    LORENTZ_ADE_WGSL, TFSF_WGSL, LUMPED_RLC_WGSL, MUR_ABC_WGSL, STEADY_STATE_WGSL,
+};
