@@ -1,19 +1,25 @@
 {
   "name": "antenna-prop",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "directories": {
-    "doc": "docs",
-    "test": "tests"
-  },
+  "description": "openEMS electromagnetic FDTD solver for the browser (WASM + WebGPU)",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npm run test:wasm && npm run test:api && npm run test:gpu",
+    "test:wasm": "node tests/test_wasm.mjs",
+    "test:api": "node tests/test_api.mjs",
+    "test:gpu": "node tests/test_webgpu.mjs",
+    "test:browser": "node tests/test_webgpu_browser.mjs",
+    "test:browser:all": "node tests/browser/run-all.mjs",
+    "test:all": "npm run test && npm run test:browser && npm run test:browser:all",
+    "bench": "node tests/test_wasm.mjs -- --bench",
+    "bench:native": "python3 tests/bench_native.py",
+    "bench:browser": "node tests/test_webgpu_browser.mjs",
+    "build": "bash scripts/build-wasm.sh",
+    "build:deps": "bash scripts/build-wasm-deps.sh",
+    "build:wasm64": "bash scripts/build-wasm64.sh",
+    "fixtures": "python3 tests/generate_fixtures.py"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
+  "keywords": ["fdtd", "electromagnetic", "openems", "wasm", "webgpu"],
+  "license": "GPL-3.0",
   "dependencies": {
     "playwright": "^1.58.2"
   }

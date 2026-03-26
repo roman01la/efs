@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -434,8 +436,7 @@ async function testWasmModule() {
 
   let createOpenEMS;
   try {
-    const moduleFactory = await import(join(ROOT, 'build-wasm/openems.js'));
-    createOpenEMS = moduleFactory.default || moduleFactory;
+    createOpenEMS = require(join(ROOT, 'build-wasm/openems.js'));
   } catch (e) {
     console.log(`  SKIP: WASM module not available (${e.message})`);
     return null;
