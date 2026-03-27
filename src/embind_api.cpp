@@ -2,6 +2,7 @@
 #include <fstream>
 #include <sstream>
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 #include <atomic>
 #include <dirent.h>
@@ -346,6 +347,60 @@ public:
     }
 
     /**
+     * Copy field data from a staging buffer (allocated via _malloc) into the
+     * engine's voltage and current arrays.  This avoids SharedArrayBuffer
+     * visibility issues by doing the copy entirely in C++.
+     */
+    /**
+     * Copy field data from a staging buffer into the engine using virtual
+     * SetVolt/SetCurr (works with basic, SSE, and SSE-compressed engines).
+     * Layout: flat NIJK order — [n][x][y][z] for n=0..2, matching GPU output.
+     */
+    void copyFieldsFromStaging(uintptr_t voltSrc, uintptr_t currSrc, unsigned int count) {
+        auto* eng = getEngine();
+        if (!eng) return;
+        Operator* op = getOperator();
+        if (!op) return;
+        unsigned int Nx = op->GetNumberOfLines(0);
+        unsigned int Ny = op->GetNumberOfLines(1);
+        unsigned int Nz = op->GetNumberOfLines(2);
+        const float* vSrc = reinterpret_cast<const float*>(voltSrc);
+        const float* cSrc = reinterpret_cast<const float*>(currSrc);
+        unsigned int idx = 0;
+        for (unsigned int n = 0; n < 3; n++)
+            for (unsigned int x = 0; x < Nx; x++)
+                for (unsigned int y = 0; y < Ny; y++)
+                    for (unsigned int z = 0; z < Nz; z++, idx++) {
+                        eng->SetVolt(n, x, y, z, vSrc[idx]);
+                        eng->SetCurr(n, x, y, z, cSrc[idx]);
+                    }
+    }
+
+    /**
+     * Debug: return peak absolute value in the engine's voltage array.
+     * Used to verify JS→WASM memory writes are visible to C++.
+     */
+    float debugVoltPeak() {
+        auto* eng = getEngine();
+        if (!eng) return -1;
+        Operator* op = getOperator();
+        if (!op) return -2;
+        unsigned int Nx = op->GetNumberOfLines(0);
+        unsigned int Ny = op->GetNumberOfLines(1);
+        unsigned int Nz = op->GetNumberOfLines(2);
+        float peak = 0;
+        for (unsigned int n = 0; n < 3; n++)
+            for (unsigned int x = 0; x < Nx; x++)
+                for (unsigned int y = 0; y < Ny; y++)
+                    for (unsigned int z = 0; z < Nz; z++) {
+                        float v = eng->GetVolt(n, x, y, z);
+                        if (v < 0) v = -v;
+                        if (v > peak) peak = v;
+                    }
+        return peak;
+    }
+
+    /**
      * Finalize the run (post-processing flush).
      */
     void finalizeRun() {
@@ -435,7 +490,8 @@ public:
             unsigned int x = acc->getVoltIndex(0)[i];
             unsigned int y = acc->getVoltIndex(1)[i];
             unsigned int z = acc->getVoltIndex(2)[i];
-            float pos = (float)(d * Nx * Ny * Nz + x * Ny * Nz + y * Nz + z);
+            // Position WITHOUT direction — shader adds dir*Nx*Ny*Nz separately
+            float pos = (float)(x * Ny * Nz + y * Nz + z);
             result.push_back(pos);
         }
 
@@ -858,6 +914,8 @@ EMSCRIPTEN_BINDINGS(openems) {
         .function("setVoltages", &OpenEMSWrapper::setVoltages)
         .function("setCurrents", &OpenEMSWrapper::setCurrents)
         .function("setTimestepCount", &OpenEMSWrapper::setTimestepCount)
+        .function("copyFieldsFromStaging", &OpenEMSWrapper::copyFieldsFromStaging)
+        .function("debugVoltPeak", &OpenEMSWrapper::debugVoltPeak)
         .function("finalizeRun", &OpenEMSWrapper::finalizeRun)
         // Extension data extraction for GPU
         .function("getExcitationSignal", &OpenEMSWrapper::getExcitationSignal)

@@ -617,33 +617,53 @@ async function runWebGPU(Module, ems, simPath) {
   if (config.pmlRegions.length > 0) gpuEngine.configurePML(config.pmlRegions);
   if (config.murRegions.length > 0) gpuEngine.configureMur(config.murRegions);
   logConsole('WebGPU engine initialized.');
+  logConsole(`  Excitation: ${config.excitation?.pos?.length || 0} sources`);
 
   // Hybrid loop: GPU iterates, WASM processes probes
-  let step = ems.initRun();
+  const step0 = ems.initRun();
+  if (step0 <= 0) { ems.finalizeRun(); gpuEngine.destroy(); return 0; }
   const maxTS = ems.getMaxTimesteps();
   let totalSteps = 0;
 
-  while (step > 0 && totalSteps < maxTS) {
-    await gpuEngine.iterate(step);
-    totalSteps += step;
+  // Process probes at every openEMS processing step (step0).
+  const probeInterval = step0;  // typically 24 steps
 
-    // Read fields back from GPU and write directly to WASM engine memory
-    const fields = await gpuEngine.getFields();
-    const voltInfo = ems.getVoltagePtr();
-    const currInfo = ems.getCurrentPtr();
-    const voltPtr = voltInfo.get(0);
-    const currPtr = currInfo.get(0);
-    voltInfo.delete();
-    currInfo.delete();
+  while (totalSteps < maxTS) {
+    // Run exactly probeInterval steps on GPU, then readback + process
+    const stepsThisBatch = Math.min(probeInterval, maxTS - totalSteps);
+    await gpuEngine.iterate(stepsThisBatch);
+    totalSteps += stepsThisBatch;
 
-    // Zero-copy write: set WASM HEAPF32 directly from GPU readback
-    Module.HEAPF32.set(fields.volt, voltPtr / 4);
-    Module.HEAPF32.set(fields.curr, currPtr / 4);
+    // Yield to browser to prevent GPU watchdog
+    await new Promise(r => setTimeout(r, 0));
 
-    ems.setTimestepCount(totalSteps);
-    step = ems.doProcess();
+    {
+      const fields = await gpuEngine.getFields();
 
-    statusTs.textContent = String(totalSteps);
+      // Write GPU fields into the C++ engine's field arrays.
+      // Module.HEAPF32 is backed by SharedArrayBuffer (pthreads). Individual
+      // indexed writes are atomic and visible on the same thread.
+      // Write GPU fields to C++ engine via malloc'd staging buffer
+      if (!window._voltStage) {
+        const n = fields.volt.length * 4;
+        window._voltStage = Module._malloc(n);
+        window._currStage = Module._malloc(n);
+      }
+      // Copy Float32Array → staging buffer in WASM heap
+      Module.HEAPF32.set(fields.volt, window._voltStage >> 2);
+      Module.HEAPF32.set(fields.curr, window._currStage >> 2);
+      // C++ memcpy from staging to engine field arrays
+      ems.copyFieldsFromStaging(window._voltStage, window._currStage, fields.volt.length);
+
+      ems.setTimestepCount(totalSteps);
+
+      const nextStep = ems.doProcess();
+
+      statusTs.textContent = String(totalSteps);
+      if (totalSteps % 1000 < probeInterval) logConsole(`  Step ${totalSteps}/${maxTS}`);
+
+      if (nextStep <= 0) break;
+    }
   }
 
   ems.finalizeRun();
