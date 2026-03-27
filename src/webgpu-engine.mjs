@@ -1720,6 +1720,9 @@ export class WebGPUEngine {
         const useFastPath = this._canUseSimpleCorePassFastPath();
 
         for (let step = 0; step < numSteps; step++) {
+            // writeBuffer calls are queued and execute in order before
+            // the next submitted command buffer, so updating uniforms
+            // then submitting works correctly even without await.
             this._updateParams();
             if (this.excitationConfigured) {
                 this._updateExcParams();
