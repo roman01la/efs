@@ -617,57 +617,100 @@ async function runWebGPU(Module, ems, simPath) {
   if (config.pmlRegions.length > 0) gpuEngine.configurePML(config.pmlRegions);
   if (config.murRegions.length > 0) gpuEngine.configureMur(config.murRegions);
   logConsole('WebGPU engine initialized.');
-  logConsole(`  Excitation: ${config.excitation?.pos?.length || 0} sources`);
+  // --- GPU Probe Setup ---
+  const probeDefs = ems.getProbeDefinitions();
+  const numProbes = probeDefs.get(0) | 0;
+  logConsole(`  ${config.excitation?.pos?.length || 0} excitation sources, ${numProbes} GPU probes`);
 
-  // Hybrid loop: GPU iterates, WASM processes probes
+  let probePipeline = null, probeBindGroup = null;
+  let probeResultsBuf = null, probeReadBuf = null;
+  const device = gpuEngine.device;
+
+  if (numProbes > 0) {
+    // Pack probe definitions: 8 values per probe (matching ProbeDef struct in WGSL)
+    const probeData = new ArrayBuffer(numProbes * 32);
+    const probeU32 = new Uint32Array(probeData);
+    const probeF32 = new Float32Array(probeData);
+    for (let i = 0; i < numProbes; i++) {
+      const b = i * 8, s = 1 + i * 10;
+      probeU32[b+0] = probeDefs.get(s+0); probeU32[b+1] = probeDefs.get(s+1); probeU32[b+2] = probeDefs.get(s+2);
+      probeU32[b+3] = probeDefs.get(s+3); probeU32[b+4] = probeDefs.get(s+4); probeU32[b+5] = probeDefs.get(s+5);
+      probeU32[b+6] = probeDefs.get(s+6); probeF32[b+7] = probeDefs.get(s+7);
+    }
+
+    const [Nx, Ny, Nz] = config.gridSize;
+    const paramsBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(paramsBuf, 0, new Uint32Array([numProbes, Nx, Ny, Nz]));
+
+    const defsBuf = device.createBuffer({ size: probeData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(defsBuf, 0, probeData);
+
+    const resSize = Math.max(numProbes * 4, 16);
+    probeResultsBuf = device.createBuffer({ size: resSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    probeReadBuf = device.createBuffer({ size: resSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+
+    const probeWGSL = await (await fetch('/src/shaders/probe.wgsl')).text();
+    probePipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: device.createShaderModule({ code: probeWGSL }), entryPoint: 'probe_fields' },
+    });
+
+    probeBindGroup = device.createBindGroup({
+      layout: probePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: gpuEngine.voltBuffer } },
+        { binding: 1, resource: { buffer: gpuEngine.currBuffer } },
+        { binding: 2, resource: { buffer: paramsBuf } },
+        { binding: 3, resource: { buffer: defsBuf } },
+        { binding: 4, resource: { buffer: probeResultsBuf } },
+      ],
+    });
+  }
+  probeDefs.delete();
+
+  // --- FDTD loop with GPU probes (no full field readback) ---
   const step0 = ems.initRun();
   if (step0 <= 0) { ems.finalizeRun(); gpuEngine.destroy(); return 0; }
   const maxTS = ems.getMaxTimesteps();
   let totalSteps = 0;
-
-  // Process probes periodically. More frequent = more time-domain samples
-  // but slower (each readback stalls GPU pipeline). step0*4 gives ~300+
-  // samples for 30K steps which is enough for accurate DFT post-processing.
-  const probeInterval = step0 * 4;  // ~96 steps between readbacks
+  const probeInterval = step0;
+  const probeStage = numProbes > 0 ? Module._malloc(numProbes * 4) : 0;
 
   while (totalSteps < maxTS) {
-    // Run exactly probeInterval steps on GPU, then readback + process
-    const stepsThisBatch = Math.min(probeInterval, maxTS - totalSteps);
-    await gpuEngine.iterate(stepsThisBatch);
-    totalSteps += stepsThisBatch;
-
-    // Yield to browser to prevent GPU watchdog
+    const batch = Math.min(probeInterval, maxTS - totalSteps);
+    await gpuEngine.iterate(batch);
+    totalSteps += batch;
     await new Promise(r => setTimeout(r, 0));
 
-    {
-      const fields = await gpuEngine.getFields();
+    if (numProbes > 0) {
+      // Dispatch probe shader — reads ~6 field values, not 90K
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(probePipeline);
+      pass.setBindGroup(0, probeBindGroup);
+      pass.dispatchWorkgroups(Math.ceil(numProbes / 64));
+      pass.end();
+      enc.copyBufferToBuffer(probeResultsBuf, 0, probeReadBuf, 0, numProbes * 4);
+      device.queue.submit([enc.finish()]);
 
-      // Write GPU fields into the C++ engine's field arrays.
-      // Module.HEAPF32 is backed by SharedArrayBuffer (pthreads). Individual
-      // indexed writes are atomic and visible on the same thread.
-      // Write GPU fields to C++ engine via malloc'd staging buffer
-      if (!window._voltStage) {
-        const n = fields.volt.length * 4;
-        window._voltStage = Module._malloc(n);
-        window._currStage = Module._malloc(n);
-      }
-      // Copy Float32Array → staging buffer in WASM heap
-      Module.HEAPF32.set(fields.volt, window._voltStage >> 2);
-      Module.HEAPF32.set(fields.curr, window._currStage >> 2);
-      // C++ memcpy from staging to engine field arrays
-      ems.copyFieldsFromStaging(window._voltStage, window._currStage, fields.volt.length);
+      await probeReadBuf.mapAsync(GPUMapMode.READ);
+      const vals = new Float32Array(probeReadBuf.getMappedRange().slice(0));
+      probeReadBuf.unmap();
 
-      ems.setTimestepCount(totalSteps);
-
-      const nextStep = ems.doProcess();
+      // Write probe results to WASM and process
+      Module.HEAPF32.set(vals, probeStage >> 2);
+      const next = ems.processProbeResults(probeStage, numProbes, totalSteps);
 
       statusTs.textContent = String(totalSteps);
-      if (totalSteps % 1000 < probeInterval) logConsole(`  Step ${totalSteps}/${maxTS}`);
-
-      if (nextStep <= 0) break;
+      if (totalSteps % 3000 < probeInterval) logConsole(`  Step ${totalSteps}/${maxTS}`);
+      if (next <= 0) break;
+    } else {
+      ems.setTimestepCount(totalSteps);
+      statusTs.textContent = String(totalSteps);
     }
   }
 
+  if (probeStage) Module._free(probeStage);
   ems.finalizeRun();
   gpuEngine.destroy();
   return totalSteps;

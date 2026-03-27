@@ -9,6 +9,10 @@
 #include <string>
 #include <vector>
 #include "tinyxml.h"
+#include "Common/processing.h"
+#include "Common/processintegral.h"
+#include "Common/processvoltage.h"
+#include "Common/processcurrent.h"
 #include "openems.h"
 #include "FDTD/operator.h"
 #include "FDTD/engine.h"
@@ -76,6 +80,20 @@ public:
     unsigned int* getNumLines() { return m_numLines; }
     ArrayLib::ArrayIJ<FDTD_FLOAT>& getCoeffNyP()  { return m_Mur_Coeff_nyP; }
     ArrayLib::ArrayIJ<FDTD_FLOAT>& getCoeffNyPP() { return m_Mur_Coeff_nyPP; }
+};
+
+// Accessor for Processing protected members (start/stop grid coords)
+class Processing_Accessor : public Processing {
+public:
+    const unsigned int* getStart() const { return start; }
+    const unsigned int* getStop() const { return stop; }
+};
+
+// Accessor for ProcessIntegral protected members (m_Results)
+class ProcessIntegral_Accessor : public ProcessIntegral {
+public:
+    double* getResults() { return m_Results; }
+    void setResult(int idx, double val) { if (m_Results) m_Results[idx] = val; }
 };
 
 static std::atomic<int> g_xmlPathCounter{0};
@@ -374,6 +392,108 @@ public:
                         eng->SetVolt(n, x, y, z, vSrc[idx]);
                         eng->SetCurr(n, x, y, z, cSrc[idx]);
                     }
+    }
+
+    /**
+     * Extract probe definitions for GPU-side evaluation.
+     * Returns flat array: [numProbes, then for each probe 10 floats:
+     *   startX, startY, startZ, stopX, stopY, stopZ, component, sign, weight, type]
+     * type: 0=voltage, 1=current
+     */
+    std::vector<float> getProbeDefinitions() {
+        auto* omsAcc = reinterpret_cast<openEMS_Accessor*>(ems_);
+        ProcessingArray* pa = omsAcc->getPA();
+        if (!pa) return {};
+
+        std::vector<float> result;
+        unsigned int count = 0;
+        result.push_back(0); // placeholder for count
+
+        for (size_t i = 0; i < pa->GetNumberOfProcessings(); i++) {
+            Processing* proc = pa->GetProcessing(i);
+            if (!proc) continue;
+
+            // Only handle voltage and current probes
+            ProcessVoltage* pv = dynamic_cast<ProcessVoltage*>(proc);
+            ProcessCurrent* pc = dynamic_cast<ProcessCurrent*>(proc);
+            if (!pv && !pc) continue;
+
+            auto* procAcc = reinterpret_cast<Processing_Accessor*>(proc);
+            const unsigned int* start = procAcc->getStart();
+            const unsigned int* stop = procAcc->getStop();
+
+            // Determine integration direction and sign
+            int component = -1;
+            float sign = 1.0f;
+            for (int d = 0; d < 3; d++) {
+                if (start[d] != stop[d]) {
+                    component = d;
+                    if (start[d] > stop[d]) sign = -1.0f;
+                    break;
+                }
+            }
+            if (component < 0) continue;
+
+            float weight = proc->GetWeight();
+            float type = pv ? 0.0f : 1.0f;
+
+            result.push_back((float)start[0]);
+            result.push_back((float)start[1]);
+            result.push_back((float)start[2]);
+            result.push_back((float)stop[0]);
+            result.push_back((float)stop[1]);
+            result.push_back((float)stop[2]);
+            result.push_back((float)component);
+            result.push_back(sign);
+            result.push_back(weight);
+            result.push_back(type);
+            count++;
+        }
+        result[0] = (float)count;
+        return result;
+    }
+
+    /**
+     * Inject GPU-computed probe results into the processing pipeline and
+     * advance file writing / FD accumulation / end-criteria checking.
+     *
+     * valuesPtr: pointer to float array of probe integral results (from GPU)
+     *            in the same order as getProbeDefinitions().
+     * Returns: next processing interval, or <=0 if simulation should stop.
+     */
+    int processProbeResults(uintptr_t valuesPtr, unsigned int numProbes, unsigned int timestep) {
+        auto* omsAcc = reinterpret_cast<openEMS_Accessor*>(ems_);
+        auto* eng = getEngine();
+        ProcessingArray* pa = omsAcc->getPA();
+        if (!eng || !pa) return -1;
+
+        const float* values = reinterpret_cast<const float*>(valuesPtr);
+        reinterpret_cast<Engine_Accessor*>(eng)->setNumTS(timestep);
+
+        // Inject results into each matching ProcessIntegral
+        unsigned int probeIdx = 0;
+        for (size_t i = 0; i < pa->GetNumberOfProcessings(); i++) {
+            Processing* proc = pa->GetProcessing(i);
+            ProcessVoltage* pv = dynamic_cast<ProcessVoltage*>(proc);
+            ProcessCurrent* pc = dynamic_cast<ProcessCurrent*>(proc);
+            if (!pv && !pc) continue;
+
+            auto* procAcc = reinterpret_cast<Processing_Accessor*>(proc);
+            const unsigned int* start = procAcc->getStart();
+            const unsigned int* stop = procAcc->getStop();
+            bool hasDir = false;
+            for (int d = 0; d < 3; d++)
+                if (start[d] != stop[d]) hasDir = true;
+            if (!hasDir) continue;
+
+            if (probeIdx < numProbes) {
+                auto* piAcc = reinterpret_cast<ProcessIntegral_Accessor*>(proc);
+                piAcc->setResult(0, (double)values[probeIdx]);
+                probeIdx++;
+            }
+        }
+
+        return pa->Process();
     }
 
     /**
@@ -916,6 +1036,8 @@ EMSCRIPTEN_BINDINGS(openems) {
         .function("setTimestepCount", &OpenEMSWrapper::setTimestepCount)
         .function("copyFieldsFromStaging", &OpenEMSWrapper::copyFieldsFromStaging)
         .function("debugVoltPeak", &OpenEMSWrapper::debugVoltPeak)
+        .function("getProbeDefinitions", &OpenEMSWrapper::getProbeDefinitions)
+        .function("processProbeResults", &OpenEMSWrapper::processProbeResults)
         .function("finalizeRun", &OpenEMSWrapper::finalizeRun)
         // Extension data extraction for GPU
         .function("getExcitationSignal", &OpenEMSWrapper::getExcitationSignal)
