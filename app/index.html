@@ -459,13 +459,6 @@ function executeScript() {
   }
 }
 
-const editorTextarea = {
-  get value() { return generatedXml; },
-  set value(v) {
-    /* no-op: script controls the XML now */
-  },
-  addEventListener() {},
-};
 const exampleSelect = document.getElementById('example-select');
 const btnRun = document.getElementById('btn-run');
 const btnStop = document.getElementById('btn-stop');
@@ -542,10 +535,10 @@ exampleSelect.addEventListener('change', () => {
 });
 
 btnShare.addEventListener('click', async () => {
-  const xml = generatedXml.trim();
-  if (!xml) { logConsole('Nothing to share - no generated XML.'); return; }
+  const script = cmScript.state.doc.toString().trim();
+  if (!script) { logConsole('Nothing to share - editor is empty.'); return; }
   try {
-    const fragment = await shareConfig(xml);
+    const fragment = await shareConfig(script);
     const url = `${location.origin}${location.pathname}#${fragment}`;
     await navigator.clipboard.writeText(url);
     logConsole(`Shareable URL copied to clipboard (${url.length} chars).`);
@@ -556,10 +549,13 @@ btnShare.addEventListener('click', async () => {
 
 async function loadFromURL() {
   try {
-    const xml = await loadSharedConfig();
-    if (xml) {
-      editorTextarea.value = xml;
-      logConsole('Config loaded from URL.');
+    const script = await loadSharedConfig();
+    if (script) {
+      cmScript.dispatch({
+        changes: { from: 0, to: cmScript.state.doc.length, insert: script },
+      });
+      executeScript();
+      logConsole('Script loaded from URL.');
     }
   } catch (e) {
     logConsole(`Failed to load config from URL: ${e.message}`);

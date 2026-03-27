@@ -350,7 +350,7 @@ class Property {
     const fv = (v) => fmtNum(v);
     const point = (tag, xyz) => `<${tag} X="${fv(xyz[0])}" Y="${fv(xyz[1])}" Z="${fv(xyz[2])}"/>`;
     const normalizePoints = (points) => {
-      if (Array.isArray(points[0]) && points.length === 3) {
+      if (Array.isArray(points[0]) && points.length === 3 && points[0].length !== 3) {
         const result = [];
         for (let i = 0; i < points[0].length; i++) {
           result.push([points[0][i], points[1][i], points[2][i]]);
@@ -502,6 +502,8 @@ class OpenEMS {
         let hiIdx = lines.findIndex((v) => Math.abs(v - hi) < 1e-10);
         if (loIdx < 0) loIdx = lines.findIndex((v) => v >= lo);
         if (hiIdx < 0) hiIdx = lines.findIndex((v) => v >= hi);
+        if (loIdx < 0) loIdx = 0;
+        if (hiIdx < 0) hiIdx = lines.length - 1;
         const newLo = loIdx > 1 ? lines[loIdx - 2] : loIdx > 0 ? lines[loIdx - 1] : lines[loIdx];
         const newHi = hiIdx < lines.length - 2 ? lines[hiIdx + 2] : hiIdx < lines.length - 1 ? lines[hiIdx + 1] : lines[hiIdx];
         if (start[i] <= stop[i]) {
@@ -588,7 +590,9 @@ class OpenEMS {
     const xLines = grid.GetLines('x');
     const yLines = grid.GetLines('y');
     const zLines = grid.GetLines('z');
-    const inset = 3;
+    const minLen = Math.min(xLines.length, yLines.length, zLines.length);
+    if (minLen < 7) return;
+    const inset = Math.min(3, Math.floor((minLen - 1) / 2));
 
     const xMin = xLines[inset], xMax = xLines[xLines.length - 1 - inset];
     const yMin = yLines[inset], yMax = yLines[yLines.length - 1 - inset];

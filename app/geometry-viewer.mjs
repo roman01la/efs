@@ -88,7 +88,7 @@ function buildCylinder(el, scale, material) {
 }
 
 function buildSphere(el, scale, material) {
-  const center = parsePoint(el.querySelector('Center')).multiplyScalar(scale);
+  const center = parsePoint(el.querySelector('Center') || el.querySelector('P1')).multiplyScalar(scale);
   const radius = parseFloat(el.getAttribute('Radius') || '1') * scale;
   const geo = new THREE.SphereGeometry(radius, 24, 16);
   const mesh = new THREE.Mesh(geo, material);
@@ -111,7 +111,7 @@ function buildCurve(el, scale, material) {
 function buildWire(el, scale, material) {
   const points = getVertices(el).map(p => parsePoint(p).multiplyScalar(scale));
   if (points.length < 2) return null;
-  const radius = parseFloat(el.getAttribute('Radius') || '0.5') * scale;
+  const radius = parseFloat(el.getAttribute('WireRadius') || el.getAttribute('Radius') || '0.5') * scale;
   const curve = new THREE.CatmullRomCurve3(points, false);
   const geo = new THREE.TubeGeometry(curve, points.length * 8, radius, 8, false);
   return new THREE.Mesh(geo, material);
