@@ -685,8 +685,7 @@ async function runWebGPU(Module, ems, simPath) {
   const step0 = ems.initRun();
   if (step0 <= 0) { ems.finalizeRun(); gpuEngine.destroy(); return 0; }
   const maxTS = ems.getMaxTimesteps();
-  const GPU_CHUNK_SIZE = 500;
-  const totalSnapshots = Math.ceil(maxTS / GPU_CHUNK_SIZE);
+  const totalSnapshots = Math.ceil(maxTS / step0);
   let totalSteps = 0;
 
   // Allocate GPU buffer for ALL probe snapshots upfront
@@ -698,37 +697,34 @@ async function runWebGPU(Module, ems, simPath) {
   }
 
   let snapshotIdx = 0;
-  // Run large GPU chunks between probe snapshots to minimize submits.
-  // Probe snapshots at step0 intervals for correct time-domain sampling.
-  // But run GPU in big batches, then take multiple probe snapshots at
-  // specific timestep points within each batch.
-  const GPU_CHUNK = 500; // timesteps per iterate call (fewer submits)
-  logConsole(`  Running ${maxTS} steps, ${totalSnapshots} snapshots, ${GPU_CHUNK}-step GPU chunks...`);
+  // Probe every step0 for correct time-domain sampling.
+  // But submit iterate+probe as a burst without yielding to minimize overhead.
+  const BURST = 20; // number of (iterate+probe) cycles per yield
+  logConsole(`  Running ${maxTS} steps, ${totalSnapshots} snapshots, burst=${BURST}...`);
 
   while (totalSteps < maxTS) {
-    // Run a big GPU chunk
-    const chunk = Math.min(GPU_CHUNK, maxTS - totalSteps);
-    await gpuEngine.iterate(chunk);
-    totalSteps += chunk;
+    // Run a burst of iterate+probe cycles without yielding
+    for (let b = 0; b < BURST && totalSteps < maxTS; b++) {
+      const chunk = Math.min(step0, maxTS - totalSteps);
+      await gpuEngine.iterate(chunk);
+      totalSteps += chunk;
 
-    if (numProbes > 0) {
-      // Take probe snapshot at end of this chunk
-      const enc = device.createCommandEncoder();
-      const pass = enc.beginComputePass();
-      pass.setPipeline(probePipeline);
-      pass.setBindGroup(0, probeBindGroup);
-      pass.dispatchWorkgroups(Math.ceil(numProbes / 64));
-      pass.end();
-      enc.copyBufferToBuffer(probeResultsBuf, 0, allProbesBuf, snapshotIdx * numProbes * 4, numProbes * 4);
-      device.queue.submit([enc.finish()]);
-      snapshotIdx++;
+      if (numProbes > 0 && snapshotIdx < totalSnapshots) {
+        const enc = device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(probePipeline);
+        pass.setBindGroup(0, probeBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(numProbes / 64));
+        pass.end();
+        enc.copyBufferToBuffer(probeResultsBuf, 0, allProbesBuf, snapshotIdx * numProbes * 4, numProbes * 4);
+        device.queue.submit([enc.finish()]);
+        snapshotIdx++;
+      }
     }
 
-    // Yield periodically
-    if (totalSteps % 3000 < GPU_CHUNK) {
-      await new Promise(r => setTimeout(r, 0));
-      statusTs.textContent = String(totalSteps);
-    }
+    // Yield once per burst
+    await new Promise(r => setTimeout(r, 0));
+    statusTs.textContent = String(totalSteps);
   }
 
   statusTs.textContent = String(totalSteps);
@@ -747,9 +743,8 @@ async function runWebGPU(Module, ems, simPath) {
 
     // Process all snapshots through WASM (file writing + FD accumulation)
     const probeStage = Module._malloc(numProbes * 4);
-    const GPU_CHUNK_POST = 500;
     for (let s = 0; s < snapshotIdx; s++) {
-      const ts = Math.min((s + 1) * GPU_CHUNK_POST, maxTS);
+      const ts = Math.min((s + 1) * step0, maxTS);
       Module.HEAPF32.set(allVals.subarray(s * numProbes, (s + 1) * numProbes), probeStage >> 2);
       ems.processProbeResults(probeStage, numProbes, ts);
     }

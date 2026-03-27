@@ -16,8 +16,7 @@ export const PATCH_ANTENNA = `<?xml version="1.0" encoding="UTF-8"?>
 <openEMS>
   <FDTD NumberOfTimesteps="30000" endCriteria="1e-5" f_max="6e9">
     <Excitation Type="0" f0="3e9" fc="3e9"/>
-    <BoundaryCond xmin="3" xmax="3" ymin="3" ymax="3" zmin="3" zmax="3"
-                  PML_xmin="8" PML_xmax="8" PML_ymin="8" PML_ymax="8" PML_zmin="8" PML_zmax="8"/>
+    <BoundaryCond xmin="2" xmax="2" ymin="2" ymax="2" zmin="2" zmax="2"/>
   </FDTD>
   <ContinuousStructure CoordSystem="0">
     <RectilinearGrid DeltaUnit="1e-3">
