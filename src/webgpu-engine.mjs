@@ -1380,12 +1380,12 @@ export class WebGPUEngine {
             shiftedIdxArr = config.shifted_idx;
         }
 
-        // MurParams uniform: padded to 32 bytes for GPU alignment
+        // MurParams uniform: numPoints(u32) + pad(vec3<u32>) = 16 bytes
         const murParamsBuffer = this.device.createBuffer({
-            size: 32,
+            size: 16,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
-        this.device.queue.writeBuffer(murParamsBuffer, 0, new Uint32Array([numPoints, 0, 0, 0, 0, 0, 0, 0]));
+        this.device.queue.writeBuffer(murParamsBuffer, 0, new Uint32Array([numPoints, 0, 0, 0]));
 
         const normalIdxBuf = this._createAndUploadBuffer(normalIdxArr, GPUBufferUsage.STORAGE);
         const shiftedIdxBuf = this._createAndUploadBuffer(shiftedIdxArr, GPUBufferUsage.STORAGE);
@@ -1409,30 +1409,9 @@ export class WebGPUEngine {
             'mur_apply'
         );
 
-        // Create an explicit bind group layout that includes ALL bindings,
-        // then use it for all three Mur pipelines. This avoids mismatches
-        // from auto-layout optimizing out unused bindings per entry point.
-        const murBGLayout = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-                { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-            ],
-        });
-
-        // Recreate pipelines with explicit layout
-        const coreBGLayout = this.murPrePipeline.getBindGroupLayout(0);
-        const murPipelineLayout = this.device.createPipelineLayout({
-            bindGroupLayouts: [coreBGLayout, murBGLayout],
-        });
-        this.murPrePipeline = this._getOrCreateComputePipeline(MUR_ABC_WGSL, 'mur_pre_voltage', murPipelineLayout);
-        this.murPostPipeline = this._getOrCreateComputePipeline(MUR_ABC_WGSL, 'mur_post_voltage', murPipelineLayout);
-        this.murApplyPipeline = this._getOrCreateComputePipeline(MUR_ABC_WGSL, 'mur_apply', murPipelineLayout);
-
-        const murBindGroup = this.device.createBindGroup({
-            layout: murBGLayout,
+        // All three share the same bind group layout (group 1)
+        this.murBindGroup = this.device.createBindGroup({
+            layout: this.murPrePipeline.getBindGroupLayout(1),
             entries: [
                 { binding: 0, resource: { buffer: murParamsBuffer } },
                 { binding: 1, resource: { buffer: normalIdxBuf } },
@@ -1441,9 +1420,6 @@ export class WebGPUEngine {
                 { binding: 4, resource: { buffer: coeffBuf } },
             ],
         });
-        this.murPreBindGroup = murBindGroup;
-        this.murPostBindGroup = murBindGroup;
-        this.murApplyBindGroup = murBindGroup;
         this._ensureCoreBindGroup(this.murPrePipeline);
         this._ensureCoreBindGroup(this.murPostPipeline);
         this._ensureCoreBindGroup(this.murApplyPipeline);
@@ -1462,7 +1438,7 @@ export class WebGPUEngine {
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.murPrePipeline);
         pass.setBindGroup(0, this._coreBindGroupFor(this.murPrePipeline));
-        pass.setBindGroup(1, this.murPreBindGroup);
+        pass.setBindGroup(1, this.murBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
         pass.end();
     }
@@ -1476,7 +1452,7 @@ export class WebGPUEngine {
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.murPostPipeline);
         pass.setBindGroup(0, this._coreBindGroupFor(this.murPostPipeline));
-        pass.setBindGroup(1, this.murPostBindGroup);
+        pass.setBindGroup(1, this.murBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
         pass.end();
     }
@@ -1490,7 +1466,7 @@ export class WebGPUEngine {
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.murApplyPipeline);
         pass.setBindGroup(0, this._coreBindGroupFor(this.murApplyPipeline));
-        pass.setBindGroup(1, this.murApplyBindGroup);
+        pass.setBindGroup(1, this.murBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
         pass.end();
     }
@@ -1740,13 +1716,13 @@ export class WebGPUEngine {
      *
      * @param {number} numSteps - number of timesteps to run
      */
-    async iterate(numSteps) {
-        const useFastPath = this._canUseSimpleCorePassFastPath();
-
+    /**
+     * Run N complete FDTD timesteps without GPU sync.
+     * Caller must sync (via readProbeGather/computeEnergy/getFields) when needed.
+     */
+    iterate(numSteps) {
         for (let step = 0; step < numSteps; step++) {
-            // writeBuffer calls are queued and execute in order before
-            // the next submitted command buffer, so updating uniforms
-            // then submitting works correctly even without await.
+            // Update uniforms BEFORE encoding so the command buffer sees correct values
             this._updateParams();
             if (this.excitationConfigured) {
                 this._updateExcParams();
@@ -1754,7 +1730,7 @@ export class WebGPUEngine {
 
             const encoder = this.device.createCommandEncoder();
 
-            if (useFastPath) {
+            if (this._canUseSimpleCorePassFastPath()) {
                 const pass = encoder.beginComputePass();
                 this.stepVoltage(null, { pass });
                 if (this.excitationConfigured) {
@@ -1762,45 +1738,46 @@ export class WebGPUEngine {
                 }
                 this.stepCurrent(null, { pass });
                 pass.end();
-            } else {
-                // === PRE-VOLTAGE (C++ DoPreVoltageUpdates) ===
-                this.stepSteadyState(encoder);  // Priority +2M
-                this.stepPML(encoder, 0);       // Priority +1M
-                this.stepVoltADE(encoder);      // Priority 0 — Lorentz/Drude ADE
-                this.stepMurPre(encoder);       // Priority 0 — Mur save boundary
-                this.stepRLC(encoder);          // Priority 0 — RLC (GPU: fused pre+apply kernel)
-
-                // === CORE VOLTAGE UPDATE ===
-                this.stepVoltage(encoder);
-
-                // === POST-VOLTAGE (C++ DoPostVoltageUpdates) ===
-                this.stepPML(encoder, 1);       // Priority +1M
-                this.stepTFSFVoltage(encoder);  // Priority +50K
-                this.stepMurPost(encoder);      // Priority 0 — Mur accumulate
-
-                // === APPLY TO VOLTAGES (C++ Apply2Voltages) ===
-                if (this.excitationConfigured) {
-                    this.applyExcitation(encoder); // Priority -1K
-                }
-                this.stepMurApply(encoder);     // Priority 0 — Mur boundary overwrite
-
-                // === PRE-CURRENT (C++ DoPreCurrentUpdates) ===
-                this.stepPML(encoder, 2);       // Priority +1M
-                this.stepCurrADE(encoder);      // Priority 0 — Lorentz/Drude ADE
-
-                // === CORE CURRENT UPDATE ===
-                this.stepCurrent(encoder);
-
-                // === POST-CURRENT (C++ DoPostCurrentUpdates) ===
-                this.stepPML(encoder, 3);       // Priority +1M
-                this.stepTFSFCurrent(encoder);  // Priority +50K
+                this.device.queue.submit([encoder.finish()]);
+                this.numTS++;
+                continue;
             }
+
+            // === PRE-VOLTAGE (C++ DoPreVoltageUpdates) ===
+            this.stepSteadyState(encoder);  // Priority +2M
+            this.stepPML(encoder, 0);       // Priority +1M
+            this.stepVoltADE(encoder);      // Priority 0 — Lorentz/Drude ADE
+            this.stepMurPre(encoder);       // Priority 0 — Mur save boundary
+            this.stepRLC(encoder);          // Priority 0 — RLC (GPU: fused pre+apply kernel)
+
+            // === CORE VOLTAGE UPDATE ===
+            this.stepVoltage(encoder);
+
+            // === POST-VOLTAGE (C++ DoPostVoltageUpdates) ===
+            this.stepPML(encoder, 1);       // Priority +1M
+            this.stepTFSFVoltage(encoder);  // Priority +50K
+            this.stepMurPost(encoder);      // Priority 0 — Mur accumulate
+
+            // === APPLY TO VOLTAGES (C++ Apply2Voltages) ===
+            if (this.excitationConfigured) {
+                this.applyExcitation(encoder); // Priority -1K
+            }
+            this.stepMurApply(encoder);     // Priority 0 — Mur boundary overwrite
+
+            // === PRE-CURRENT (C++ DoPreCurrentUpdates) ===
+            this.stepPML(encoder, 2);       // Priority +1M
+            this.stepCurrADE(encoder);      // Priority 0 — Lorentz/Drude ADE
+
+            // === CORE CURRENT UPDATE ===
+            this.stepCurrent(encoder);
+
+            // === POST-CURRENT (C++ DoPostCurrentUpdates) ===
+            this.stepPML(encoder, 3);       // Priority +1M
+            this.stepTFSFCurrent(encoder);  // Priority +50K
 
             this.device.queue.submit([encoder.finish()]);
             this.numTS++;
         }
-
-        await this.device.queue.onSubmittedWorkDone();
     }
 
     /**
@@ -1833,16 +1810,31 @@ export class WebGPUEngine {
     async getFields() {
         const bufferSize = 3 * this.totalCells * 4;
 
-        // Read voltage data
-        const voltData = await this._readBuffer(this.voltBuffer, bufferSize);
+        // Copy both volt and curr in a single command submission
+        const voltReadback = this.device.createBuffer({
+            size: bufferSize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+        const currReadback = this.device.createBuffer({
+            size: bufferSize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+        const encoder = this.device.createCommandEncoder();
+        encoder.copyBufferToBuffer(this.voltBuffer, 0, voltReadback, 0, bufferSize);
+        encoder.copyBufferToBuffer(this.currBuffer, 0, currReadback, 0, bufferSize);
+        this.device.queue.submit([encoder.finish()]);
 
-        // Read current data
-        const currData = await this._readBuffer(this.currBuffer, bufferSize);
+        // Map both readback buffers in parallel
+        await Promise.all([
+            voltReadback.mapAsync(GPUMapMode.READ),
+            currReadback.mapAsync(GPUMapMode.READ),
+        ]);
+        const volt = new Float32Array(voltReadback.getMappedRange().slice(0));
+        const curr = new Float32Array(currReadback.getMappedRange().slice(0));
+        voltReadback.unmap(); voltReadback.destroy();
+        currReadback.unmap(); currReadback.destroy();
 
-        return {
-            volt: new Float32Array(voltData),
-            curr: new Float32Array(currData),
-        };
+        return { volt, curr };
     }
 
     /**
@@ -1853,6 +1845,207 @@ export class WebGPUEngine {
     uploadFields(volt, curr) {
         this.device.queue.writeBuffer(this.voltBuffer, 0, volt);
         this.device.queue.writeBuffer(this.currBuffer, 0, curr);
+    }
+
+    /**
+     * Configure probe gather for efficient readback of only probe field indices.
+     * @param {Uint32Array} indices - linear field array indices to gather
+     */
+    configureProbeGather(indices) {
+        if (indices.length === 0) return;
+        this._gatherCount = indices.length;
+
+        // Upload index buffer
+        this._gatherIndexBuffer = this._createAndUploadBuffer(
+            indices, GPUBufferUsage.STORAGE);
+
+        // Output buffer: volt + curr for each index
+        const outSize = indices.length * 2 * 4; // 2 floats per index
+        this._gatherOutBuffer = this.device.createBuffer({
+            size: outSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+
+        // Create gather shader
+        const code = /* wgsl */ `
+@group(0) @binding(0) var<storage, read> volt: array<f32>;
+@group(0) @binding(1) var<storage, read> curr: array<f32>;
+@group(0) @binding(2) var<storage, read> indices: array<u32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+    let i = gid.x;
+    if (i >= arrayLength(&indices)) { return; }
+    let idx = indices[i];
+    output[i * 2u] = volt[idx];
+    output[i * 2u + 1u] = curr[idx];
+}`;
+        const module = this.device.createShaderModule({ code });
+        this._gatherPipeline = this.device.createComputePipeline({
+            layout: 'auto',
+            compute: { module, entryPoint: 'main' },
+        });
+        this._gatherBindGroup = this.device.createBindGroup({
+            layout: this._gatherPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.voltBuffer } },
+                { binding: 1, resource: { buffer: this.currBuffer } },
+                { binding: 2, resource: { buffer: this._gatherIndexBuffer } },
+                { binding: 3, resource: { buffer: this._gatherOutBuffer } },
+            ],
+        });
+    }
+
+    /**
+     * Read only the pre-configured probe field values from GPU.
+     * Much faster than getFields() — reads only the needed indices.
+     * @returns {Promise<Float32Array>} interleaved [volt0, curr0, volt1, curr1, ...]
+     */
+    async readProbeGather() {
+        if (!this._gatherPipeline) return null;
+
+        const encoder = this.device.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this._gatherPipeline);
+        pass.setBindGroup(0, this._gatherBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(this._gatherCount / 64));
+        pass.end();
+        this.device.queue.submit([encoder.finish()]);
+
+        const outSize = this._gatherCount * 2 * 4;
+        const data = await this._readBuffer(this._gatherOutBuffer, outSize);
+        return new Float32Array(data);
+    }
+
+    /**
+     * Compute total field energy on GPU (for end-criteria check).
+     * Returns sum of volt^2 + curr^2 over all cells.
+     * @returns {Promise<number>}
+     */
+    async computeEnergy() {
+        if (!this._energyPipeline) {
+            this._setupEnergyReduction();
+        }
+
+        const encoder = this.device.createCommandEncoder();
+
+        // First pass: per-workgroup partial sums
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this._energyPipeline);
+        pass.setBindGroup(0, this._energyBindGroup);
+        pass.dispatchWorkgroups(this._energyWorkgroups);
+        pass.end();
+
+        // Second pass: reduce partial sums
+        const pass2 = encoder.beginComputePass();
+        pass2.setPipeline(this._energyReducePipeline);
+        pass2.setBindGroup(0, this._energyReduceBindGroup);
+        pass2.dispatchWorkgroups(1);
+        pass2.end();
+
+        this.device.queue.submit([encoder.finish()]);
+
+        const data = await this._readBuffer(this._energyResultBuffer, 4);
+        return new Float32Array(data)[0];
+    }
+
+    _setupEnergyReduction() {
+        const totalCells = this.totalCells; // Nx * Ny * Nz
+        const WG_SIZE = 256;
+        this._energyWorkgroups = Math.ceil(totalCells / WG_SIZE);
+
+        // Partial sums buffer
+        this._energyPartialBuffer = this.device.createBuffer({
+            size: this._energyWorkgroups * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+
+        // Final result buffer
+        this._energyResultBuffer = this.device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+
+        // First pass: compute partial sums per workgroup
+        const code1 = /* wgsl */ `
+@group(0) @binding(0) var<storage, read> volt: array<f32>;
+@group(0) @binding(1) var<storage, read> curr: array<f32>;
+@group(0) @binding(2) var<storage, read_write> partial: array<f32>;
+
+var<workgroup> wg_sums: array<f32, ${WG_SIZE}>;
+
+@compute @workgroup_size(${WG_SIZE})
+fn main(@builtin(global_invocation_id) gid: vec3u,
+        @builtin(local_invocation_id) lid: vec3u,
+        @builtin(workgroup_id) wid: vec3u) {
+    let totalCells = ${totalCells}u;
+    let totalElems = totalCells * 3u;
+    let i = gid.x;
+    var sum: f32 = 0.0;
+    // Each thread sums 3 components for its cell
+    if (i < totalCells) {
+        for (var n = 0u; n < 3u; n = n + 1u) {
+            let idx = n * totalCells + i;
+            let v = volt[idx];
+            let c = curr[idx];
+            sum = sum + v * v + c * c;
+        }
+    }
+    wg_sums[lid.x] = sum;
+    workgroupBarrier();
+
+    // Reduction within workgroup
+    for (var s = ${WG_SIZE >> 1}u; s > 0u; s = s >> 1u) {
+        if (lid.x < s) {
+            wg_sums[lid.x] = wg_sums[lid.x] + wg_sums[lid.x + s];
+        }
+        workgroupBarrier();
+    }
+    if (lid.x == 0u) {
+        partial[wid.x] = wg_sums[0];
+    }
+}`;
+        const mod1 = this.device.createShaderModule({ code: code1 });
+        this._energyPipeline = this.device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: mod1, entryPoint: 'main' },
+        });
+        this._energyBindGroup = this.device.createBindGroup({
+            layout: this._energyPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.voltBuffer } },
+                { binding: 1, resource: { buffer: this.currBuffer } },
+                { binding: 2, resource: { buffer: this._energyPartialBuffer } },
+            ],
+        });
+
+        // Second pass: reduce partial sums to single value
+        const numPartials = this._energyWorkgroups;
+        const code2 = /* wgsl */ `
+@group(0) @binding(0) var<storage, read> partial: array<f32>;
+@group(0) @binding(1) var<storage, read_write> result: array<f32>;
+
+@compute @workgroup_size(1)
+fn main() {
+    var sum: f32 = 0.0;
+    for (var i = 0u; i < ${numPartials}u; i = i + 1u) {
+        sum = sum + partial[i];
+    }
+    result[0] = sum;
+}`;
+        const mod2 = this.device.createShaderModule({ code: code2 });
+        this._energyReducePipeline = this.device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: mod2, entryPoint: 'main' },
+        });
+        this._energyReduceBindGroup = this.device.createBindGroup({
+            layout: this._energyReducePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this._energyPartialBuffer } },
+                { binding: 1, resource: { buffer: this._energyResultBuffer } },
+            ],
+        });
     }
 
     /**
@@ -1898,6 +2091,11 @@ export class WebGPUEngine {
         for (const buf of (this._murBuffers || [])) { if (buf) buf.destroy(); }
         // Destroy steady-state buffers
         for (const buf of (this._ssBuffers || [])) { if (buf) buf.destroy(); }
+        // Destroy gather/energy buffers
+        for (const buf of [this._gatherIndexBuffer, this._gatherOutBuffer,
+                           this._energyPartialBuffer, this._energyResultBuffer]) {
+            if (buf) buf.destroy();
+        }
 
         if (this.device) {
             this.device.destroy();
@@ -2049,9 +2247,9 @@ export class WebGPUEngine {
         return module;
     }
 
-    _getOrCreateComputePipeline(code, entryPoint, explicitLayout) {
+    _getOrCreateComputePipeline(code, entryPoint) {
         this._syncDeviceScopedCaches();
-        const key = this._getPipelineCacheKey(code, entryPoint) + (explicitLayout ? '_explicit' : '');
+        const key = this._getPipelineCacheKey(code, entryPoint);
         const cached = this._computePipelineCache.get(key);
         if (cached) {
             if (typeof cached.then === 'function') {
@@ -2062,7 +2260,7 @@ export class WebGPUEngine {
 
         const module = this._getOrCreateShaderModule(code);
         const pipeline = this.device.createComputePipeline({
-            layout: explicitLayout || 'auto',
+            layout: 'auto',
             compute: { module, entryPoint },
         });
         this._computePipelineCache.set(key, pipeline);

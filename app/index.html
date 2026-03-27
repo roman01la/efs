@@ -48,17 +48,14 @@ header .spacer { flex: 1; }
 .panel-body { flex: 1; overflow: auto; padding: 8px; }
 
 /* Editor panel */
-#editor-textarea {
+#editor-container {
   width: 100%;
   height: 100%;
   min-height: 300px;
-  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-  font-size: 12px;
   border: 1px solid #ccc;
-  padding: 6px;
-  resize: none;
-  tab-size: 2;
 }
+#editor-container .cm-editor { height: 100%; }
+#editor-container .cm-scroller { overflow: auto; }
 #editor-error {
   display: none;
   padding: 4px 8px;
@@ -100,25 +97,10 @@ button.danger:hover { background: #b91c1c; }
 }
 
 /* Results panel */
-.tab-bar {
-  display: flex;
-  gap: 0;
-  border-bottom: 1px solid #ddd;
-  background: #f0f0f0;
-}
-.tab-btn {
-  border: none;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
-  padding: 5px 12px;
-  font-size: 12px;
-  background: transparent;
-  cursor: pointer;
-}
-.tab-btn.active { border-bottom-color: #2563eb; font-weight: 600; }
-.tab-content { display: none; padding: 8px; flex: 1; overflow: auto; }
-.tab-content.active { display: block; }
-.plot-container { width: 100%; min-height: 280px; }
+.result-section { padding: 8px; border-bottom: 1px solid #eee; }
+.result-section:last-child { border-bottom: none; }
+.result-section h3 { font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; }
+.plot-container { width: 100%; min-height: 200px; }
 .plot-container svg { width: 100%; height: auto; }
 
 /* Loading overlay */
@@ -158,15 +140,13 @@ button.danger:hover { background: #b91c1c; }
     <div class="panel-header">
       Editor
       <select id="example-select">
-        <option value="">-- Select Example --</option>
         <option value="patch">Patch Antenna</option>
         <option value="msl">MSL Notch Filter</option>
         <option value="waveguide">Rect Waveguide</option>
       </select>
-      <button id="btn-load-example">Load Example</button>
     </div>
     <div class="panel-body">
-      <textarea id="editor-textarea" spellcheck="false" placeholder="Paste or type openEMS XML config here..."></textarea>
+      <div id="editor-container"></div>
       <div id="editor-error"></div>
     </div>
   </div>
@@ -175,13 +155,6 @@ button.danger:hover { background: #b91c1c; }
   <div class="panel" id="panel-sim">
     <div class="panel-header">
       Simulation
-      <select id="engine-select">
-        <option value="webgpu">WebGPU</option>
-        <option value="2">sse-compressed</option>
-        <option value="0">basic</option>
-        <option value="1">sse</option>
-        <option value="3">multithreaded</option>
-      </select>
       <button id="btn-run" class="primary">Run</button>
       <button id="btn-stop" class="danger" disabled>Stop</button>
     </div>
@@ -197,23 +170,24 @@ button.danger:hover { background: #b91c1c; }
 
   <!-- Right panel: Results -->
   <div class="panel" id="panel-results">
-    <div class="tab-bar">
-      <button class="tab-btn active" data-tab="tab-sparam">S-Parameters</button>
-      <button class="tab-btn" data-tab="tab-impedance">Impedance</button>
-      <button class="tab-btn" data-tab="tab-radiation">Radiation</button>
-      <button class="tab-btn" data-tab="tab-raw">Raw Data</button>
-    </div>
-    <div id="tab-sparam" class="tab-content active">
-      <div id="plot-sparam" class="plot-container"><p style="color:#888;">Run a simulation to see results.</p></div>
-    </div>
-    <div id="tab-impedance" class="tab-content">
-      <div id="plot-impedance" class="plot-container"><p style="color:#888;">Run a simulation to see results.</p></div>
-    </div>
-    <div id="tab-radiation" class="tab-content">
-      <div id="plot-radiation" class="plot-container"><p style="color:#888;">NF2FF data required.</p></div>
-    </div>
-    <div id="tab-raw" class="tab-content">
-      <pre id="raw-data" style="font-size:11px;overflow:auto;max-height:100%;">No data yet.</pre>
+    <div class="panel-header">Results</div>
+    <div class="panel-body">
+      <div class="result-section">
+        <h3>S-Parameters</h3>
+        <div id="plot-sparam" class="plot-container"><p style="color:#888;">Run a simulation to see results.</p></div>
+      </div>
+      <div class="result-section">
+        <h3>Impedance</h3>
+        <div id="plot-impedance" class="plot-container"><p style="color:#888;">Run a simulation to see results.</p></div>
+      </div>
+      <div class="result-section">
+        <h3>Radiation</h3>
+        <div id="plot-radiation" class="plot-container"><p style="color:#888;">NF2FF data required.</p></div>
+      </div>
+      <div class="result-section">
+        <h3>Raw Data</h3>
+        <pre id="raw-data" style="font-size:11px;overflow:auto;max-height:200px;">No data yet.</pre>
+      </div>
     </div>
   </div>
 </div>
@@ -224,6 +198,12 @@ button.danger:hover { background: #b91c1c; }
 import { PATCH_ANTENNA, MSL_NOTCH_FILTER, RECT_WAVEGUIDE } from '/app/examples.mjs';
 import { encodeConfig, decodeConfig, shareConfig, loadSharedConfig } from '/src/url-share.mjs';
 
+// CodeMirror 6 — pin @codemirror/state version across all packages to avoid duplicate instances
+const cmState = 'https://esm.sh/@codemirror/state@6.5.2';
+const { EditorState } = await import(cmState);
+const { EditorView, basicSetup } = await import(`https://esm.sh/codemirror@6.0.1?deps=@codemirror/state@6.5.2`);
+const { xml } = await import(`https://esm.sh/@codemirror/lang-xml@6.1.0?deps=@codemirror/state@6.5.2`);
+
 // ---- Examples map ----
 const EXAMPLES = {
   patch: PATCH_ANTENNA,
@@ -231,14 +211,40 @@ const EXAMPLES = {
   waveguide: RECT_WAVEGUIDE,
 };
 
-// ---- DOM references ----
-const editorTextarea = document.getElementById('editor-textarea');
+// ---- CodeMirror editor ----
+const cmView = new EditorView({
+  state: EditorState.create({
+    doc: PATCH_ANTENNA,
+    extensions: [
+      basicSetup,
+      xml(),
+      EditorView.theme({
+        '&': { fontSize: '12px' },
+        '.cm-content': { fontFamily: "'SF Mono', 'Menlo', 'Consolas', monospace" },
+        '.cm-gutters': { fontSize: '11px' },
+      }),
+      EditorView.updateListener.of(update => {
+        if (update.docChanged) validateXML();
+      }),
+    ],
+  }),
+  parent: document.getElementById('editor-container'),
+});
+
+// Wrapper matching textarea API used by the rest of the code
+const editorTextarea = {
+  get value() { return cmView.state.doc.toString(); },
+  set value(v) {
+    cmView.dispatch({
+      changes: { from: 0, to: cmView.state.doc.length, insert: v },
+    });
+  },
+  addEventListener() {}, // handled by EditorView.updateListener
+};
 const exampleSelect = document.getElementById('example-select');
-const btnLoadExample = document.getElementById('btn-load-example');
 const btnRun = document.getElementById('btn-run');
 const btnStop = document.getElementById('btn-stop');
 const btnShare = document.getElementById('btn-share');
-const engineSelect = document.getElementById('engine-select');
 const statusText = document.getElementById('status-text');
 const statusTs = document.getElementById('status-ts');
 const statusElapsed = document.getElementById('status-elapsed');
@@ -246,12 +252,6 @@ const simConsole = document.getElementById('sim-console');
 const loadingOverlay = document.getElementById('loading-overlay');
 const rawDataPre = document.getElementById('raw-data');
 
-// Remove WebGPU option if not available
-if (!navigator.gpu) {
-  const gpuOpt = engineSelect.querySelector('option[value="webgpu"]');
-  if (gpuOpt) gpuOpt.remove();
-  engineSelect.value = '2';
-}
 
 // ---- XML validation ----
 const editorError = document.getElementById('editor-error');
@@ -272,17 +272,6 @@ function validateXML() {
     editorError.classList.add('visible');
   }
 }
-editorTextarea.addEventListener('input', validateXML);
-
-// ---- Tab switching ----
-document.querySelectorAll('.tab-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById(btn.dataset.tab).classList.add('active');
-  });
-});
 
 // ---- Console log helper ----
 function logConsole(msg) {
@@ -290,8 +279,8 @@ function logConsole(msg) {
   simConsole.scrollTop = simConsole.scrollHeight;
 }
 
-// ---- Load example ----
-btnLoadExample.addEventListener('click', () => {
+// ---- Load example on select ----
+exampleSelect.addEventListener('change', () => {
   const key = exampleSelect.value;
   if (key && EXAMPLES[key]) {
     editorTextarea.value = EXAMPLES[key];
@@ -304,10 +293,8 @@ btnShare.addEventListener('click', async () => {
   const xml = editorTextarea.value.trim();
   if (!xml) { logConsole('Nothing to share - editor is empty.'); return; }
   try {
-    const activeTab = document.querySelector('.tab-btn.active')?.dataset.tab || '';
     const fragment = await shareConfig(xml);
-    const tabParam = activeTab ? `&tab=${activeTab}` : '';
-    const url = `${location.origin}${location.pathname}#${fragment}${tabParam}`;
+    const url = `${location.origin}${location.pathname}#${fragment}`;
     await navigator.clipboard.writeText(url);
     logConsole(`Shareable URL copied to clipboard (${url.length} chars).`);
   } catch (e) {
@@ -322,14 +309,6 @@ async function loadFromURL() {
     if (xml) {
       editorTextarea.value = xml;
       logConsole('Config loaded from URL.');
-    }
-    // Restore tab state from URL
-    const hash = location.hash.slice(1);
-    const params = new URLSearchParams(hash);
-    const tab = params.get('tab');
-    if (tab) {
-      const tabBtn = document.querySelector(`.tab-btn[data-tab="${tab}"]`);
-      if (tabBtn) tabBtn.click();
     }
   } catch (e) {
     logConsole(`Failed to load config from URL: ${e.message}`);
@@ -478,325 +457,92 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// ---- WASM module loading ----
-let wasmModule = null;
+// ---- Simulation worker ----
 
-async function loadWASM() {
-  if (wasmModule) return wasmModule;
-  loadingOverlay.classList.add('visible');
-  try {
-    // openems.js is UMD (var createOpenEMS = ...), load via script tag
-    if (!window.createOpenEMS) {
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = '/build-wasm/openems.js';
-        s.onload = resolve;
-        s.onerror = reject;
-        document.head.appendChild(s);
-      });
-    }
-    wasmModule = await createOpenEMS();
-    logConsole('WASM module loaded.');
-    return wasmModule;
-  } finally {
-    loadingOverlay.classList.remove('visible');
-  }
-}
-
-// ---- Simulation runner ----
 let running = false;
 
-// ---- WebGPU hybrid engine ----
+// All simulation code moved to sim-worker.mjs
+const simWorker = new Worker('/app/sim-worker.js');
 
-function _embindVecToF32(vec) {
-  const arr = new Float32Array(vec.size());
-  for (let i = 0; i < arr.length; i++) arr[i] = vec.get(i);
-  vec.delete();
-  return arr;
-}
+simWorker.onmessage = (e) => {
+  const d = e.data;
+  switch (d.type) {
+    case 'log':
+      logConsole(d.msg);
+      break;
+    case 'status':
+      statusTs.textContent = String(d.step);
+      break;
+    case 'done': {
+      const { nrTS, elapsed, probeData, nf2ffData } = d;
+      statusElapsed.textContent = elapsed + 's';
+      statusTs.textContent = String(nrTS);
+      statusText.textContent = 'Done';
+      logConsole(`Simulation complete. ${nrTS} timesteps in ${elapsed}s.`);
+      logConsole('Reading probe data...');
 
-function _embindVecToU32(vec) {
-  const arr = new Uint32Array(vec.size());
-  for (let i = 0; i < arr.length; i++) arr[i] = vec.get(i);
-  vec.delete();
-  return arr;
-}
-
-function extractGPUConfig(ems) {
-  // Grid + coefficients
-  const gridSizeVec = ems.getGridSize();
-  const gridSize = [gridSizeVec.get(0), gridSizeVec.get(1), gridSizeVec.get(2)];
-  gridSizeVec.delete();
-  const vv = _embindVecToF32(ems.getVV());
-  const vi = _embindVecToF32(ems.getVI());
-  const ii = _embindVecToF32(ems.getII());
-  const iv = _embindVecToF32(ems.getIV());
-
-  // Excitation
-  let excitation = null;
-  const sigVec = ems.getExcitationSignal();
-  if (sigVec.size() > 0) {
-    const signal = _embindVecToF32(sigVec);
-    const excVec = ems.getExcitationVoltages();
-    const count = excVec.get(0) | 0;
-    if (count > 0) {
-      const amp = new Float32Array(count);
-      const delay = new Uint32Array(count);
-      const dir = new Uint32Array(count);
-      const pos = new Uint32Array(count);
-      for (let i = 0; i < count; i++) {
-        amp[i] = excVec.get(1 + i);
-        delay[i] = excVec.get(1 + count + i);
-        dir[i] = excVec.get(1 + 2 * count + i);
-        pos[i] = excVec.get(1 + 3 * count + i);
-      }
-      excitation = { signal, amp, delay, dir, pos, period: ems.getExcitationPeriod() };
-    }
-    excVec.delete();
-  } else {
-    sigVec.delete();
-  }
-
-  // PML regions
-  const pmlRegions = [];
-  const pmlCount = ems.getPMLCount();
-  for (let p = 0; p < pmlCount; p++) {
-    const vec = ems.getPMLRegion(p);
-    const startPos = [vec.get(0), vec.get(1), vec.get(2)];
-    const numLines = [vec.get(3), vec.get(4), vec.get(5)];
-    const total = 3 * numLines[0] * numLines[1] * numLines[2];
-    let off = 6;
-    const extract = () => {
-      const a = new Float32Array(total);
-      for (let i = 0; i < total; i++) a[i] = vec.get(off + i);
-      off += total;
-      return a;
-    };
-    pmlRegions.push({
-      startPos, numLines,
-      vv: extract(), vvfo: extract(), vvfn: extract(),
-      ii: extract(), iifo: extract(), iifn: extract(),
-    });
-    vec.delete();
-  }
-
-  // Mur ABC regions
-  const murRegions = [];
-  const murCount = ems.getMurCount();
-  for (let m = 0; m < murCount; m++) {
-    const vec = ems.getMurRegion(m);
-    const ny = vec.get(0) | 0;
-    const top = vec.get(1) > 0;
-    const lineNr = vec.get(2) | 0;
-    const lineNrShift = vec.get(3) | 0;
-    const n0 = vec.get(4) | 0;
-    const n1 = vec.get(5) | 0;
-    const coeffP = new Float32Array(n0 * n1);
-    const coeffPP = new Float32Array(n0 * n1);
-    for (let i = 0; i < n0 * n1; i++) coeffP[i] = vec.get(6 + i);
-    for (let i = 0; i < n0 * n1; i++) coeffPP[i] = vec.get(6 + n0 * n1 + i);
-    murRegions.push({ ny, top, lineNr, lineNrShift, numLines: [n0, n1], coeffNyP: coeffP, coeffNyPP: coeffPP });
-    vec.delete();
-  }
-
-  return { gridSize, coefficients: { vv, vi, ii, iv }, excitation, pmlRegions, murRegions };
-}
-
-async function runWebGPU(Module, ems, simPath) {
-  logConsole('Extracting coefficients for WebGPU...');
-  const config = extractGPUConfig(ems);
-  logConsole(`Grid: ${config.gridSize.join('x')}, ${config.pmlRegions.length} PML, ${config.murRegions.length} Mur`);
-
-  const { WebGPUEngine } = await import('/src/webgpu-engine.mjs');
-  const gpuEngine = new WebGPUEngine();
-  const gpuOk = await gpuEngine.initGPU();
-  if (!gpuOk) throw new Error('WebGPU not available');
-
-  await gpuEngine.init(config.gridSize, config.coefficients);
-  if (config.excitation) gpuEngine.configureExcitation(config.excitation);
-  if (config.pmlRegions.length > 0) gpuEngine.configurePML(config.pmlRegions);
-  // Mur ABC: convert raw region data to per-point format for WebGPUEngine
-  if (config.murRegions.length > 0) {
-    const [Nx, Ny, Nz] = config.gridSize;
-    const allNormalP = [], allShiftedP = [], allCoeffP = [];
-    const allNormalPP = [], allShiftedPP = [], allCoeffPP = [];
-    for (const r of config.murRegions) {
-      const { ny, top, lineNr, lineNrShift, numLines: [n0, n1], coeffNyP, coeffNyPP } = r;
-      const nyP = (ny + 1) % 3, nyPP = (ny + 2) % 3;
-      const dims = [Nx, Ny, Nz];
-      for (let a = 0; a < n0; a++) {
-        for (let b = 0; b < n1; b++) {
-          const pos = [0, 0, 0];
-          pos[ny] = lineNr;
-          pos[nyP] = a;
-          pos[nyPP] = b;
-          const normalIdx = nyP * Nx * Ny * Nz + pos[0] * Ny * Nz + pos[1] * Nz + pos[2];
-          const posShift = [...pos];
-          posShift[ny] = lineNrShift;
-          const shiftedIdx = nyP * Nx * Ny * Nz + posShift[0] * Ny * Nz + posShift[1] * Nz + posShift[2];
-          allNormalP.push(normalIdx);
-          allShiftedP.push(shiftedIdx);
-          allCoeffP.push(coeffNyP[a * n1 + b]);
-
-          // nyPP component
-          const normalIdxPP = nyPP * Nx * Ny * Nz + pos[0] * Ny * Nz + pos[1] * Nz + pos[2];
-          const shiftedIdxPP = nyPP * Nx * Ny * Nz + posShift[0] * Ny * Nz + posShift[1] * Nz + posShift[2];
-          allNormalPP.push(normalIdxPP);
-          allShiftedPP.push(shiftedIdxPP);
-          allCoeffPP.push(coeffNyPP[a * n1 + b]);
+      // Display raw data
+      if (Object.keys(probeData).length > 0) {
+        let rawText = '';
+        for (const [name, text] of Object.entries(probeData)) {
+          rawText += `=== ${name} ===\n`;
+          const lines = text.split('\n');
+          rawText += lines.slice(0, 20).join('\n');
+          if (lines.length > 20) rawText += `\n... (${lines.length} lines total)`;
+          rawText += '\n\n';
         }
+        rawDataPre.textContent = rawText;
       }
-    }
-    gpuEngine.configureMur({
-      coeff_nyP: new Float32Array(allCoeffP),
-      coeff_nyPP: new Float32Array(allCoeffPP),
-      normal_idx_nyP: new Uint32Array(allNormalP),
-      normal_idx_nyPP: new Uint32Array(allNormalPP),
-      shifted_idx_nyP: new Uint32Array(allShiftedP),
-      shifted_idx_nyPP: new Uint32Array(allShiftedPP),
-    });
-  }
-  logConsole('WebGPU engine initialized.');
-  // --- GPU Probe Setup ---
-  const probeDefs = ems.getProbeDefinitions();
-  const numProbes = probeDefs.get(0) | 0;
-  logConsole(`  ${config.excitation?.pos?.length || 0} excitation sources, ${numProbes} GPU probes`);
 
-  let probePipeline = null, probeBindGroup = null;
-  let probeResultsBuf = null, probeReadBuf = null;
-  const device = gpuEngine.device;
-
-  if (numProbes > 0) {
-    // Pack probe definitions: 12 values per probe (matching ProbeDef struct in WGSL, 48 bytes aligned)
-    // struct ProbeDef { startXYZ, stopXYZ, normDir, sign, type, insideFlags, _pad0, _pad1 }
-    const PROBE_STRIDE = 12; // 12 u32s = 48 bytes (aligned to 16)
-    const probeData = new ArrayBuffer(numProbes * PROBE_STRIDE * 4);
-    const probeU32 = new Uint32Array(probeData);
-    const probeF32 = new Float32Array(probeData);
-    const probeTypes = new Uint32Array(numProbes);
-    for (let i = 0; i < numProbes; i++) {
-      const b = i * PROBE_STRIDE, s = 1 + i * 11;
-      probeU32[b+0] = probeDefs.get(s+0); // startX
-      probeU32[b+1] = probeDefs.get(s+1); // startY
-      probeU32[b+2] = probeDefs.get(s+2); // startZ
-      probeU32[b+3] = probeDefs.get(s+3); // stopX
-      probeU32[b+4] = probeDefs.get(s+4); // stopY
-      probeU32[b+5] = probeDefs.get(s+5); // stopZ
-      probeU32[b+6] = probeDefs.get(s+6); // normDir
-      probeF32[b+7] = probeDefs.get(s+7); // sign
-      probeU32[b+8] = probeDefs.get(s+9); // type (0=voltage, 1=current)
-      probeU32[b+9] = probeDefs.get(s+10);// insideFlags
-      probeU32[b+10] = 0; // pad
-      probeU32[b+11] = 0; // pad
-      probeTypes[i] = probeU32[b+8];
-    }
-
-    const [Nx, Ny, Nz] = config.gridSize;
-    const paramsBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(paramsBuf, 0, new Uint32Array([numProbes, Nx, Ny, Nz]));
-
-    const defsBuf = device.createBuffer({ size: probeData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(defsBuf, 0, probeData);
-
-    const resSize = Math.max(numProbes * 4, 16);
-    probeResultsBuf = device.createBuffer({ size: resSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    probeReadBuf = device.createBuffer({ size: resSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-
-    const probeWGSL = await (await fetch('/src/shaders/probe.wgsl')).text();
-    probePipeline = device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: device.createShaderModule({ code: probeWGSL }), entryPoint: 'probe_fields' },
-    });
-
-    probeBindGroup = device.createBindGroup({
-      layout: probePipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: gpuEngine.voltBuffer } },
-        { binding: 1, resource: { buffer: gpuEngine.currBuffer } },
-        { binding: 2, resource: { buffer: paramsBuf } },
-        { binding: 3, resource: { buffer: defsBuf } },
-        { binding: 4, resource: { buffer: probeResultsBuf } },
-      ],
-    });
-  }
-  probeDefs.delete();
-
-  // --- FDTD loop: all GPU, one readback at the end ---
-  const step0 = ems.initRun();
-  if (step0 <= 0) { ems.finalizeRun(); gpuEngine.destroy(); return 0; }
-  const maxTS = ems.getMaxTimesteps();
-  const totalSnapshots = Math.ceil(maxTS / step0);
-  let totalSteps = 0;
-
-  // Allocate GPU buffer for ALL probe snapshots upfront
-  let allProbesBuf = null, allProbesReadBuf = null;
-  const allProbesSize = numProbes * totalSnapshots * 4;
-  if (numProbes > 0) {
-    allProbesBuf = device.createBuffer({ size: allProbesSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    allProbesReadBuf = device.createBuffer({ size: allProbesSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-  }
-
-  let snapshotIdx = 0;
-  // Probe every step0 for correct time-domain sampling.
-  // But submit iterate+probe as a burst without yielding to minimize overhead.
-  const BURST = 20; // number of (iterate+probe) cycles per yield
-  logConsole(`  Running ${maxTS} steps, ${totalSnapshots} snapshots, burst=${BURST}...`);
-
-  while (totalSteps < maxTS) {
-    // Run a burst of iterate+probe cycles without yielding
-    for (let b = 0; b < BURST && totalSteps < maxTS; b++) {
-      const chunk = Math.min(step0, maxTS - totalSteps);
-      await gpuEngine.iterate(chunk);
-      totalSteps += chunk;
-
-      if (numProbes > 0 && snapshotIdx < totalSnapshots) {
-        const enc = device.createCommandEncoder();
-        const pass = enc.beginComputePass();
-        pass.setPipeline(probePipeline);
-        pass.setBindGroup(0, probeBindGroup);
-        pass.dispatchWorkgroups(Math.ceil(numProbes / 64));
-        pass.end();
-        enc.copyBufferToBuffer(probeResultsBuf, 0, allProbesBuf, snapshotIdx * numProbes * 4, numProbes * 4);
-        device.queue.submit([enc.finish()]);
-        snapshotIdx++;
+      // Parse probes for plotting
+      const parsedProbes = {};
+      for (const [name, text] of Object.entries(probeData)) {
+        const lines = text.split('\n').filter(l => !l.startsWith('%') && l.trim());
+        const time = new Float64Array(lines.length);
+        const values = new Float64Array(lines.length);
+        for (let i = 0; i < lines.length; i++) {
+          const parts = lines[i].trim().split(/\s+/);
+          time[i] = parseFloat(parts[0]);
+          values[i] = parseFloat(parts[1]);
+        }
+        parsedProbes[name] = { time, values };
       }
+      tryPlotSParams(parsedProbes);
+      tryPlotImpedance(parsedProbes);
+
+      // NF2FF radiation pattern
+      if (nf2ffData) {
+        const { thetaDeg, E_norm, Dmax, nPhi } = nf2ffData;
+        let maxE = 0;
+        for (const v of E_norm) if (v > maxE) maxE = v;
+        const nTheta = thetaDeg.length;
+        const DmaxdBi = 10 * Math.log10(Math.max(Dmax, 1e-15));
+        const xzPattern = new Array(nTheta);
+        const yzPattern = new Array(nTheta);
+        for (let i = 0; i < nTheta; i++) {
+          xzPattern[i] = 20 * Math.log10(Math.max(E_norm[i * nPhi + 0] / maxE, 1e-15)) + DmaxdBi;
+          yzPattern[i] = 20 * Math.log10(Math.max(E_norm[i * nPhi + 1] / maxE, 1e-15)) + DmaxdBi;
+        }
+        window._lastNF2FFData = { theta: thetaDeg, xzPattern, yzPattern };
+        tryPlotRadiation();
+      }
+
+      running = false;
+      btnRun.disabled = false;
+      btnStop.disabled = true;
+      break;
     }
-
-    // Yield once per burst
-    await new Promise(r => setTimeout(r, 0));
-    statusTs.textContent = String(totalSteps);
+    case 'error':
+      statusText.textContent = 'Error';
+      logConsole(`Error: ${d.msg}`);
+      running = false;
+      btnRun.disabled = false;
+      btnStop.disabled = true;
+      break;
   }
+};
 
-  statusTs.textContent = String(totalSteps);
-  logConsole(`  GPU FDTD done. Reading ${snapshotIdx} probe snapshots...`);
-
-  // ONE readback of all probe data at the end
-  if (numProbes > 0 && snapshotIdx > 0) {
-    const readSize = snapshotIdx * numProbes * 4;
-    const enc = device.createCommandEncoder();
-    enc.copyBufferToBuffer(allProbesBuf, 0, allProbesReadBuf, 0, readSize);
-    device.queue.submit([enc.finish()]);
-
-    await allProbesReadBuf.mapAsync(GPUMapMode.READ);
-    const allVals = new Float32Array(allProbesReadBuf.getMappedRange(0, readSize).slice(0));
-    allProbesReadBuf.unmap();
-
-    // Process all snapshots through WASM (file writing + FD accumulation)
-    const probeStage = Module._malloc(numProbes * 4);
-    for (let s = 0; s < snapshotIdx; s++) {
-      const ts = Math.min((s + 1) * step0, maxTS);
-      Module.HEAPF32.set(allVals.subarray(s * numProbes, (s + 1) * numProbes), probeStage >> 2);
-      ems.processProbeResults(probeStage, numProbes, ts);
-    }
-    Module._free(probeStage);
-  }
-
-  ems.finalizeRun();
-  gpuEngine.destroy();
-  return totalSteps;
-}
-
-btnRun.addEventListener('click', async () => {
+btnRun.addEventListener('click', () => {
   if (running) return;
   const xml = editorTextarea.value.trim();
   if (!xml) { logConsole('Error: Editor is empty.'); return; }
@@ -804,127 +550,15 @@ btnRun.addEventListener('click', async () => {
   running = true;
   btnRun.disabled = true;
   btnStop.disabled = false;
-  statusText.textContent = 'Loading...';
+  statusText.textContent = 'Running';
   simConsole.textContent = '';
   logConsole('Starting simulation...');
-
-  const engineValue = engineSelect.value;
-  const useWebGPU = engineValue === 'webgpu';
-  const engineType = useWebGPU ? 0 : parseInt(engineValue, 10);
-  const t0 = performance.now();
-
-  try {
-    const Module = await loadWASM();
-    statusText.textContent = 'Running';
-
-    // Create simulation directory
-    const simPath = '/sim_' + Date.now();
-    try { Module.FS.mkdir(simPath); } catch (e) { /* may exist */ }
-    Module.FS.chdir(simPath);
-
-    // Load and setup
-    const ems = new Module.OpenEMS();
-    ems.configure(engineType, 1000000, 1e-5);
-
-    logConsole('Loading XML config...');
-    const loadOk = ems.loadXML(xml);
-    if (!loadOk) throw new Error('Failed to load simulation XML');
-
-    logConsole('Setting up FDTD...');
-    const rc = ems.setup();
-    if (rc !== 0) throw new Error(`SetupFDTD failed with code ${rc}`);
-
-    let nrTS;
-    if (useWebGPU) {
-      logConsole('Running FDTD engine (WebGPU hybrid)...');
-      nrTS = await runWebGPU(Module, ems, simPath);
-    } else {
-      logConsole('Running FDTD engine (type=' + engineType + ')...');
-      ems.run();
-      nrTS = ems.getTimestepCount();
-    }
-
-    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-    statusElapsed.textContent = elapsed + 's';
-    statusTs.textContent = String(nrTS);
-    statusText.textContent = 'Done';
-    logConsole(`Simulation complete. ${nrTS} timesteps in ${elapsed}s.`);
-
-    // ---- Post-processing: read probe data ----
-    logConsole('Reading probe data...');
-    const probeFiles = [];
-    try {
-      const files = Module.FS.readdir(simPath);
-      for (const f of files) {
-        if (f.startsWith('port_') && (f.includes('_ut') || f.includes('_it'))) {
-          probeFiles.push(f);
-        }
-      }
-    } catch (e) {
-      logConsole('Warning: could not read sim directory.');
-    }
-
-    const probeData = {};
-    for (const f of probeFiles) {
-      try {
-        const text = new TextDecoder().decode(Module.FS.readFile(`${simPath}/${f}`));
-        probeData[f] = text;
-      } catch (e) {
-        logConsole(`Warning: could not read ${f}`);
-      }
-    }
-
-    // Display raw data
-    if (Object.keys(probeData).length > 0) {
-      let rawText = '';
-      for (const [name, text] of Object.entries(probeData)) {
-        rawText += `=== ${name} ===\n`;
-        // Show first 20 lines
-        const lines = text.split('\n');
-        rawText += lines.slice(0, 20).join('\n');
-        if (lines.length > 20) rawText += `\n... (${lines.length} lines total)`;
-        rawText += '\n\n';
-      }
-      rawDataPre.textContent = rawText;
-    }
-
-    // Parse probes for plotting
-    const parsedProbes = {};
-    for (const [name, text] of Object.entries(probeData)) {
-      const lines = text.split('\n').filter(l => !l.startsWith('%') && l.trim());
-      const time = new Float64Array(lines.length);
-      const values = new Float64Array(lines.length);
-      for (let i = 0; i < lines.length; i++) {
-        const parts = lines[i].trim().split(/\s+/);
-        time[i] = parseFloat(parts[0]);
-        values[i] = parseFloat(parts[1]);
-      }
-      parsedProbes[name] = { time, values };
-    }
-
-    // Try S-parameter plot if we have port_ut1 and port_it1
-    tryPlotSParams(parsedProbes);
-    tryPlotImpedance(parsedProbes);
-
-    // Try NF2FF far-field computation from HDF5 dump files
-    await tryComputeNF2FF(Module, ems, simPath);
-
-    ems.delete();
-  } catch (e) {
-    statusText.textContent = 'Error';
-    logConsole(`Error: ${e.message}`);
-    console.error(e);
-  } finally {
-    running = false;
-    btnRun.disabled = false;
-    btnStop.disabled = true;
-  }
+  simWorker.postMessage({ type: 'run', xml });
 });
 
 btnStop.addEventListener('click', () => {
-  // WASM runs synchronously in main thread; stop is a no-op for now.
-  // With Web Worker support this would post a stop message.
-  logConsole('Stop requested (note: synchronous WASM cannot be interrupted).');
+  simWorker.postMessage({ type: 'stop' });
+  logConsole('Stop requested.');
 });
 
 function tryPlotSParams(probes) {
@@ -1029,102 +663,6 @@ function tryPlotImpedance(probes) {
     });
     logConsole('Impedance plot updated.');
   }, 0);
-}
-
-async function tryComputeNF2FF(Module, ems, simPath) {
-  // Detect NF2FF dump boxes by scanning for *_E_xn.h5 files
-  let files;
-  try { files = Module.FS.readdir(simPath); } catch (e) { return; }
-
-  const nf2ffBoxes = new Set();
-  for (const f of files) {
-    const m = f.match(/^(.+)_E_xn\.h5$/);
-    if (m) nf2ffBoxes.add(m[1]);
-  }
-  if (nf2ffBoxes.size === 0) return;
-
-  const boxName = [...nf2ffBoxes][0];
-  logConsole(`NF2FF box detected: "${boxName}". Computing far-field...`);
-
-  try {
-    const { readNF2FFSurfaceData, computeNF2FF } = await import('/src/nf2ff.mjs');
-
-    const surfaceData = readNF2FFSurfaceData(ems, simPath, boxName);
-
-    // Find resonance frequency from S11 data if available
-    let freqHz = null;
-    if (window._lastZdata) {
-      const { freqGHz } = window._lastZdata;
-      // Re-derive s11_dB to find minimum
-      const z_re = window._lastZdata.z_re;
-      const z_im = window._lastZdata.z_im;
-      let minS11 = 0, minIdx = 0;
-      for (let i = 0; i < z_re.length; i++) {
-        const zr = z_re[i], zi = z_im[i];
-        const gnr = zr - 50, gdr = zr + 50;
-        const gd2 = gdr * gdr + zi * zi;
-        const gr = (gnr * gdr + zi * zi) / gd2;
-        const gi = (zi * gdr - gnr * zi) / gd2;
-        const mag = Math.sqrt(gr * gr + gi * gi);
-        const s11 = 20 * Math.log10(Math.max(mag, 1e-15));
-        if (s11 < minS11) { minS11 = s11; minIdx = i; }
-      }
-      if (minS11 < -10) {
-        freqHz = freqGHz[minIdx] * 1e9;
-      }
-    }
-
-    // Fallback: use center frequency from XML excitation
-    if (!freqHz) {
-      const parser = new DOMParser();
-      const xmlDoc = parser.parseFromString(editorTextarea.value, 'text/xml');
-      const exc = xmlDoc.querySelector('Excitation');
-      if (exc) {
-        const f0 = parseFloat(exc.getAttribute('f0') || '0');
-        const fc = parseFloat(exc.getAttribute('fc') || '0');
-        if (f0 > 0) freqHz = f0;
-        else if (fc > 0) freqHz = fc;
-      }
-    }
-
-    if (!freqHz) {
-      logConsole('NF2FF: could not determine frequency. Skipping far-field.');
-      return;
-    }
-
-    // Compute far-field: theta from -180 to 180 in 2-deg steps, xz and yz planes
-    const thetaRad = [];
-    const thetaDeg = [];
-    for (let t = -180; t < 180; t += 2) {
-      thetaDeg.push(t);
-      thetaRad.push(t * Math.PI / 180);
-    }
-    const phiRad = [0, Math.PI / 2];
-
-    const result = computeNF2FF(surfaceData, freqHz, thetaRad, phiRad, [0, 0, 0]);
-    const E_norm = result.E_norm[0];
-    const Dmax = result.Dmax[0];
-    let maxE = 0;
-    for (let i = 0; i < E_norm.length; i++) {
-      if (E_norm[i] > maxE) maxE = E_norm[i];
-    }
-
-    const nTheta = thetaRad.length;
-    const xzPattern = new Array(nTheta);
-    const yzPattern = new Array(nTheta);
-    const DmaxdBi = 10 * Math.log10(Math.max(Dmax, 1e-15));
-    for (let i = 0; i < nTheta; i++) {
-      xzPattern[i] = 20 * Math.log10(Math.max(E_norm[i] / maxE, 1e-15)) + DmaxdBi;
-      yzPattern[i] = 20 * Math.log10(Math.max(E_norm[nTheta + i] / maxE, 1e-15)) + DmaxdBi;
-    }
-
-    window._lastNF2FFData = { theta: thetaDeg, xzPattern, yzPattern };
-    logConsole(`Far-field computed: Dmax = ${DmaxdBi.toFixed(1)} dBi at ${(freqHz / 1e9).toFixed(3)} GHz`);
-    tryPlotRadiation();
-  } catch (e) {
-    logConsole(`NF2FF computation failed: ${e.message}`);
-    console.error(e);
-  }
 }
 
 function tryPlotRadiation(probes) {

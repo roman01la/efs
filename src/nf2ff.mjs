@@ -630,11 +630,17 @@ export function readNF2FFSurfaceData(wasmEms, simPath, boxName, opts = {}) {
     if (!directions[fi]) continue;
 
     const suffix = faceSuffixes[fi];
-    const eFile = `${simPath}/${boxName}_E_${suffix}.h5`;
-    const hFile = `${simPath}/${boxName}_H_${suffix}.h5`;
+    // Try C++ numbered naming first (_0, _1, ...), then Python face suffix (_xn, _xp, ...)
+    let eFile = `${simPath}/${boxName}_E_${fi}.h5`;
+    let hFile = `${simPath}/${boxName}_H_${fi}.h5`;
+    let meshX = _vectorToArray(wasmEms.readHDF5Mesh(eFile, 0));
+    if (meshX.length === 0) {
+      eFile = `${simPath}/${boxName}_E_${suffix}.h5`;
+      hFile = `${simPath}/${boxName}_H_${suffix}.h5`;
+      meshX = _vectorToArray(wasmEms.readHDF5Mesh(eFile, 0));
+    }
 
     // Read mesh from E-field file (same mesh for H)
-    const meshX = _vectorToArray(wasmEms.readHDF5Mesh(eFile, 0));
     const meshY = _vectorToArray(wasmEms.readHDF5Mesh(eFile, 1));
     const meshZ = _vectorToArray(wasmEms.readHDF5Mesh(eFile, 2));
 
