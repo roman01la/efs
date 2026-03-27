@@ -1380,12 +1380,12 @@ export class WebGPUEngine {
             shiftedIdxArr = config.shifted_idx;
         }
 
-        // MurParams uniform: numPoints(u32) + pad(vec3<u32>) = 16 bytes
+        // MurParams uniform: padded to 32 bytes for GPU alignment
         const murParamsBuffer = this.device.createBuffer({
-            size: 16,
+            size: 32,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
-        this.device.queue.writeBuffer(murParamsBuffer, 0, new Uint32Array([numPoints, 0, 0, 0]));
+        this.device.queue.writeBuffer(murParamsBuffer, 0, new Uint32Array([numPoints, 0, 0, 0, 0, 0, 0, 0]));
 
         const normalIdxBuf = this._createAndUploadBuffer(normalIdxArr, GPUBufferUsage.STORAGE);
         const shiftedIdxBuf = this._createAndUploadBuffer(shiftedIdxArr, GPUBufferUsage.STORAGE);
@@ -1409,31 +1409,41 @@ export class WebGPUEngine {
             'mur_apply'
         );
 
-        // Each Mur entry point may optimize out different bindings, so create
-        // separate bind groups per pipeline using their auto-generated layouts.
-        const allEntries = [
-            { binding: 0, resource: { buffer: murParamsBuffer } },
-            { binding: 1, resource: { buffer: normalIdxBuf } },
-            { binding: 2, resource: { buffer: shiftedIdxBuf } },
-            { binding: 3, resource: { buffer: savedVoltBuf } },
-            { binding: 4, resource: { buffer: coeffBuf } },
-        ];
-        const makeBindGroup = (pipeline) => {
-            const layout = pipeline.getBindGroupLayout(1);
-            // Filter entries to only include bindings that exist in this layout.
-            // We try all entries; if createBindGroup fails, we remove entries one by one.
-            // Simpler: just try-catch and remove unused bindings.
-            for (let mask = 0x1F; mask >= 0; mask--) {
-                const filtered = allEntries.filter((_, i) => mask & (1 << i));
-                try {
-                    return this.device.createBindGroup({ layout, entries: filtered });
-                } catch (e) { continue; }
-            }
-            return this.device.createBindGroup({ layout, entries: allEntries });
-        };
-        this.murPreBindGroup = makeBindGroup(this.murPrePipeline);
-        this.murPostBindGroup = makeBindGroup(this.murPostPipeline);
-        this.murApplyBindGroup = makeBindGroup(this.murApplyPipeline);
+        // Create an explicit bind group layout that includes ALL bindings,
+        // then use it for all three Mur pipelines. This avoids mismatches
+        // from auto-layout optimizing out unused bindings per entry point.
+        const murBGLayout = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+            ],
+        });
+
+        // Recreate pipelines with explicit layout
+        const coreBGLayout = this.murPrePipeline.getBindGroupLayout(0);
+        const murPipelineLayout = this.device.createPipelineLayout({
+            bindGroupLayouts: [coreBGLayout, murBGLayout],
+        });
+        this.murPrePipeline = this._getOrCreateComputePipeline(MUR_ABC_WGSL, 'mur_pre_voltage', murPipelineLayout);
+        this.murPostPipeline = this._getOrCreateComputePipeline(MUR_ABC_WGSL, 'mur_post_voltage', murPipelineLayout);
+        this.murApplyPipeline = this._getOrCreateComputePipeline(MUR_ABC_WGSL, 'mur_apply', murPipelineLayout);
+
+        const murBindGroup = this.device.createBindGroup({
+            layout: murBGLayout,
+            entries: [
+                { binding: 0, resource: { buffer: murParamsBuffer } },
+                { binding: 1, resource: { buffer: normalIdxBuf } },
+                { binding: 2, resource: { buffer: shiftedIdxBuf } },
+                { binding: 3, resource: { buffer: savedVoltBuf } },
+                { binding: 4, resource: { buffer: coeffBuf } },
+            ],
+        });
+        this.murPreBindGroup = murBindGroup;
+        this.murPostBindGroup = murBindGroup;
+        this.murApplyBindGroup = murBindGroup;
         this._ensureCoreBindGroup(this.murPrePipeline);
         this._ensureCoreBindGroup(this.murPostPipeline);
         this._ensureCoreBindGroup(this.murApplyPipeline);
@@ -2039,9 +2049,9 @@ export class WebGPUEngine {
         return module;
     }
 
-    _getOrCreateComputePipeline(code, entryPoint) {
+    _getOrCreateComputePipeline(code, entryPoint, explicitLayout) {
         this._syncDeviceScopedCaches();
-        const key = this._getPipelineCacheKey(code, entryPoint);
+        const key = this._getPipelineCacheKey(code, entryPoint) + (explicitLayout ? '_explicit' : '');
         const cached = this._computePipelineCache.get(key);
         if (cached) {
             if (typeof cached.then === 'function') {
@@ -2052,7 +2062,7 @@ export class WebGPUEngine {
 
         const module = this._getOrCreateShaderModule(code);
         const pipeline = this.device.createComputePipeline({
-            layout: 'auto',
+            layout: explicitLayout || 'auto',
             compute: { module, entryPoint },
         });
         this._computePipelineCache.set(key, pipeline);
