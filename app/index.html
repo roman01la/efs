@@ -681,78 +681,73 @@ async function runWebGPU(Module, ems, simPath) {
   }
   probeDefs.delete();
 
-  // --- FDTD loop with batched GPU probes ---
+  // --- FDTD loop: all GPU, one readback at the end ---
   const step0 = ems.initRun();
   if (step0 <= 0) { ems.finalizeRun(); gpuEngine.destroy(); return 0; }
   const maxTS = ems.getMaxTimesteps();
+  const totalSnapshots = Math.ceil(maxTS / step0);
   let totalSteps = 0;
-  const probeStage = numProbes > 0 ? Module._malloc(numProbes * 4) : 0;
 
-  // Accumulate probe results on GPU across BATCH_PROBES processing intervals,
-  // then do ONE readback. This reduces mapAsync calls from ~1250 to ~13.
-  const BATCH_PROBES = 100; // number of probe snapshots per GPU readback
-  const batchBufSize = numProbes * BATCH_PROBES * 4;
-  let probeBatchBuf = null, probeBatchReadBuf = null;
+  // Allocate GPU buffer for ALL probe snapshots upfront
+  let allProbesBuf = null, allProbesReadBuf = null;
+  const allProbesSize = numProbes * totalSnapshots * 4;
   if (numProbes > 0) {
-    probeBatchBuf = device.createBuffer({ size: batchBufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    probeBatchReadBuf = device.createBuffer({ size: batchBufSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    allProbesBuf = device.createBuffer({ size: allProbesSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    allProbesReadBuf = device.createBuffer({ size: allProbesSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   }
 
-  let batchIdx = 0; // current position in batch buffer
-  let batchStartStep = 0; // timestep at start of current batch
+  let snapshotIdx = 0;
+  logConsole(`  Running ${maxTS} steps, ${totalSnapshots} probe snapshots...`);
 
   while (totalSteps < maxTS) {
-    // Run one processing interval on GPU
     const batch = Math.min(step0, maxTS - totalSteps);
     await gpuEngine.iterate(batch);
     totalSteps += batch;
 
     if (numProbes > 0) {
-      // Dispatch probe shader and copy results to batch buffer at offset
+      // Probe shader + copy to accumulation buffer — no readback, no await
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();
       pass.setPipeline(probePipeline);
       pass.setBindGroup(0, probeBindGroup);
       pass.dispatchWorkgroups(Math.ceil(numProbes / 64));
       pass.end();
-      // Copy probe results to batch accumulation buffer at current offset
-      enc.copyBufferToBuffer(probeResultsBuf, 0, probeBatchBuf, batchIdx * numProbes * 4, numProbes * 4);
+      enc.copyBufferToBuffer(probeResultsBuf, 0, allProbesBuf, snapshotIdx * numProbes * 4, numProbes * 4);
       device.queue.submit([enc.finish()]);
-      batchIdx++;
+      snapshotIdx++;
+    }
 
-      // When batch is full OR simulation ending, readback ALL accumulated results
-      if (batchIdx >= BATCH_PROBES || totalSteps >= maxTS) {
-        await new Promise(r => setTimeout(r, 0)); // yield once per batch
-
-        // One readback for all accumulated probe snapshots
-        const readSize = batchIdx * numProbes * 4;
-        const enc2 = device.createCommandEncoder();
-        enc2.copyBufferToBuffer(probeBatchBuf, 0, probeBatchReadBuf, 0, readSize);
-        device.queue.submit([enc2.finish()]);
-
-        await probeBatchReadBuf.mapAsync(GPUMapMode.READ);
-        const allVals = new Float32Array(probeBatchReadBuf.getMappedRange(0, readSize).slice(0));
-        probeBatchReadBuf.unmap();
-
-        // Process each snapshot through WASM
-        const snapshotStep = totalSteps - (batchIdx - 1) * step0;
-        for (let s = 0; s < batchIdx; s++) {
-          const ts = snapshotStep + s * step0;
-          Module.HEAPF32.set(allVals.subarray(s * numProbes, (s + 1) * numProbes), probeStage >> 2);
-          ems.processProbeResults(probeStage, numProbes, ts);
-        }
-
-        statusTs.textContent = String(totalSteps);
-        logConsole(`  Step ${totalSteps}/${maxTS}`);
-        batchIdx = 0;
-      }
-    } else {
-      ems.setTimestepCount(totalSteps);
+    // Yield periodically to prevent GPU watchdog
+    if (totalSteps % 3000 < step0) {
+      await new Promise(r => setTimeout(r, 0));
       statusTs.textContent = String(totalSteps);
     }
   }
 
-  if (probeStage) Module._free(probeStage);
+  statusTs.textContent = String(totalSteps);
+  logConsole(`  GPU FDTD done. Reading ${snapshotIdx} probe snapshots...`);
+
+  // ONE readback of all probe data at the end
+  if (numProbes > 0 && snapshotIdx > 0) {
+    const readSize = snapshotIdx * numProbes * 4;
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(allProbesBuf, 0, allProbesReadBuf, 0, readSize);
+    device.queue.submit([enc.finish()]);
+
+    await allProbesReadBuf.mapAsync(GPUMapMode.READ);
+    const allVals = new Float32Array(allProbesReadBuf.getMappedRange(0, readSize).slice(0));
+    allProbesReadBuf.unmap();
+
+    // Process all snapshots through WASM (file writing + FD accumulation)
+    const probeStage = Module._malloc(numProbes * 4);
+    for (let s = 0; s < snapshotIdx; s++) {
+      const ts = (s + 1) * step0;
+      Module.HEAPF32.set(allVals.subarray(s * numProbes, (s + 1) * numProbes), probeStage >> 2);
+      ems.processProbeResults(probeStage, numProbes, Math.min(ts, maxTS));
+    }
+    Module._free(probeStage);
+  }
+
   ems.finalizeRun();
   gpuEngine.destroy();
   return totalSteps;
