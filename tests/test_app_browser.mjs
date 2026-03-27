@@ -81,9 +81,16 @@ try {
   assert(editorValue.includes('patch') || editorValue.includes('Patch'), 'Editor has patch antenna config');
   assert(editorValue.length > 500, `Editor XML has ${editorValue.length} chars`);
 
-  console.log('\n=== 3. Run Simulation ===');
-  // Select sse-compressed engine for speed (WebGPU probe output not supported)
-  await page.selectOption('#engine-select', '2');
+  console.log('\n=== 3. Run Simulation (WebGPU) ===');
+  // Use WebGPU if available, fallback to sse-compressed
+  const hasWebGPU = await page.evaluate(() => !!navigator.gpu);
+  if (hasWebGPU) {
+    await page.selectOption('#engine-select', 'webgpu');
+    console.log('  Engine: WebGPU');
+  } else {
+    await page.selectOption('#engine-select', '2');
+    console.log('  Engine: sse-compressed (WebGPU not available)');
+  }
   await page.click('#btn-run');
 
   // Wait for simulation to complete (check console for "Done" or S-param plot)
