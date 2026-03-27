@@ -19,57 +19,46 @@ struct Params {
 @group(1) @binding(0) var<storage, read> vv: array<f32>;
 @group(1) @binding(1) var<storage, read> vi: array<f32>;
 
-fn idx(n: u32, x: u32, y: u32, z: u32) -> u32 {
-    let Ny = params.numLines.y;
-    let Nz = params.numLines.z;
-    return n * params.numLines.x * Ny * Nz + x * Ny * Nz + y * Nz + z;
-}
-
-fn idx_ym1(n: u32, x: u32, y: u32, z: u32) -> u32 {
-    if (y == 0u) {
-        return idx(n, x, y, z);
-    }
-    return idx(n, x, y - 1u, z);
-}
-
-fn idx_zm1(n: u32, x: u32, y: u32, z: u32) -> u32 {
-    if (z == 0u) {
-        return idx(n, x, y, z);
-    }
-    return idx(n, x, y, z - 1u);
-}
-
-fn idx_xm1(n: u32, x: u32, y: u32, z: u32) -> u32 {
-    if (x == 0u) {
-        return idx(n, x, y, z);
-    }
-    return idx(n, x - 1u, y, z);
-}
-
 @compute @workgroup_size(4, 4, 4)
 fn update_voltages(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
     let y = gid.y;
     let z = gid.z;
+    let numLines = params.numLines;
 
-    if (x >= params.numLines.x || y >= params.numLines.y || z >= params.numLines.z) {
+    if (x >= numLines.x || y >= numLines.y || z >= numLines.z) {
         return;
     }
 
-    let ex_idx = idx(0u, x, y, z);
-    let ex_curl = curr[idx(2u, x, y, z)] - curr[idx_ym1(2u, x, y, z)]
-                - curr[idx(1u, x, y, z)] + curr[idx_zm1(1u, x, y, z)];
-    volt[ex_idx] = vv[ex_idx] * volt[ex_idx] + vi[ex_idx] * ex_curl;
+    let planeStride = params.numLines.y * params.numLines.z;
+    let componentStride = params.numLines.x * planeStride;
+    let baseIndex = x * planeStride + y * numLines.z + z;
 
-    let ey_idx = idx(1u, x, y, z);
-    let ey_curl = curr[idx(0u, x, y, z)] - curr[idx_zm1(0u, x, y, z)]
-                - curr[idx(2u, x, y, z)] + curr[idx_xm1(2u, x, y, z)];
-    volt[ey_idx] = vv[ey_idx] * volt[ey_idx] + vi[ey_idx] * ey_curl;
+    let exIdx = baseIndex;
+    let eyIdx = componentStride + baseIndex;
+    let ezIdx = 2u * componentStride + baseIndex;
 
-    let ez_idx = idx(2u, x, y, z);
-    let ez_curl = curr[idx(1u, x, y, z)] - curr[idx_xm1(1u, x, y, z)]
-                - curr[idx(0u, x, y, z)] + curr[idx_ym1(0u, x, y, z)];
-    volt[ez_idx] = vv[ez_idx] * volt[ez_idx] + vi[ez_idx] * ez_curl;
+    let hxIdx = baseIndex;
+    let hyIdx = componentStride + baseIndex;
+    let hzIdx = 2u * componentStride + baseIndex;
+
+    let hzYm1Idx = select(hzIdx - numLines.z, hzIdx, y == 0u);
+    let hyZm1Idx = select(hyIdx - 1u, hyIdx, z == 0u);
+    let exCurl = curr[hzIdx] - curr[hzYm1Idx]
+               - curr[hyIdx] + curr[hyZm1Idx];
+    volt[exIdx] = vv[exIdx] * volt[exIdx] + vi[exIdx] * exCurl;
+
+    let hxZm1Idx = select(hxIdx - 1u, hxIdx, z == 0u);
+    let hzXm1Idx = select(hzIdx - planeStride, hzIdx, x == 0u);
+    let eyCurl = curr[hxIdx] - curr[hxZm1Idx]
+               - curr[hzIdx] + curr[hzXm1Idx];
+    volt[eyIdx] = vv[eyIdx] * volt[eyIdx] + vi[eyIdx] * eyCurl;
+
+    let hyXm1Idx = select(hyIdx - planeStride, hyIdx, x == 0u);
+    let hxYm1Idx = select(hxIdx - numLines.z, hxIdx, y == 0u);
+    let ezCurl = curr[hyIdx] - curr[hyXm1Idx]
+               - curr[hxIdx] + curr[hxYm1Idx];
+    volt[ezIdx] = vv[ezIdx] * volt[ezIdx] + vi[ezIdx] * ezCurl;
 }
 `;
 
@@ -88,37 +77,47 @@ struct Params {
 @group(2) @binding(0) var<storage, read> ii_coeff: array<f32>;
 @group(2) @binding(1) var<storage, read> iv_coeff: array<f32>;
 
-fn idx(n: u32, x: u32, y: u32, z: u32) -> u32 {
-    let Ny = params.numLines.y;
-    let Nz = params.numLines.z;
-    return n * params.numLines.x * Ny * Nz + x * Ny * Nz + y * Nz + z;
-}
-
 @compute @workgroup_size(4, 4, 4)
 fn update_currents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
     let y = gid.y;
     let z = gid.z;
+    let numLines = params.numLines;
 
     // X is also Nx-1 because Hy/Hz curl stencils read volt at x+1.
-    if (x >= params.numLines.x - 1u || y >= params.numLines.y - 1u || z >= params.numLines.z - 1u) {
+    if (x >= numLines.x - 1u || y >= numLines.y - 1u || z >= numLines.z - 1u) {
         return;
     }
 
-    let hx_idx = idx(0u, x, y, z);
-    let hx_curl = volt[idx(2u, x, y, z)] - volt[idx(2u, x, y + 1u, z)]
-                - volt[idx(1u, x, y, z)] + volt[idx(1u, x, y, z + 1u)];
-    curr[hx_idx] = ii_coeff[hx_idx] * curr[hx_idx] + iv_coeff[hx_idx] * hx_curl;
+    let planeStride = params.numLines.y * params.numLines.z;
+    let componentStride = params.numLines.x * planeStride;
+    let baseIndex = x * planeStride + y * numLines.z + z;
 
-    let hy_idx = idx(1u, x, y, z);
-    let hy_curl = volt[idx(0u, x, y, z)] - volt[idx(0u, x, y, z + 1u)]
-                - volt[idx(2u, x, y, z)] + volt[idx(2u, x + 1u, y, z)];
-    curr[hy_idx] = ii_coeff[hy_idx] * curr[hy_idx] + iv_coeff[hy_idx] * hy_curl;
+    let exIdx = baseIndex;
+    let eyIdx = componentStride + baseIndex;
+    let ezIdx = 2u * componentStride + baseIndex;
 
-    let hz_idx = idx(2u, x, y, z);
-    let hz_curl = volt[idx(1u, x, y, z)] - volt[idx(1u, x + 1u, y, z)]
-                - volt[idx(0u, x, y, z)] + volt[idx(0u, x, y + 1u, z)];
-    curr[hz_idx] = ii_coeff[hz_idx] * curr[hz_idx] + iv_coeff[hz_idx] * hz_curl;
+    let hxIdx = baseIndex;
+    let hyIdx = componentStride + baseIndex;
+    let hzIdx = 2u * componentStride + baseIndex;
+
+    let ezYp1Idx = ezIdx + numLines.z;
+    let eyZp1Idx = eyIdx + 1u;
+    let hxCurl = volt[ezIdx] - volt[ezYp1Idx]
+               - volt[eyIdx] + volt[eyZp1Idx];
+    curr[hxIdx] = ii_coeff[hxIdx] * curr[hxIdx] + iv_coeff[hxIdx] * hxCurl;
+
+    let exZp1Idx = exIdx + 1u;
+    let ezXp1Idx = ezIdx + planeStride;
+    let hyCurl = volt[exIdx] - volt[exZp1Idx]
+               - volt[ezIdx] + volt[ezXp1Idx];
+    curr[hyIdx] = ii_coeff[hyIdx] * curr[hyIdx] + iv_coeff[hyIdx] * hyCurl;
+
+    let eyXp1Idx = eyIdx + planeStride;
+    let exYp1Idx = exIdx + numLines.z;
+    let hzCurl = volt[eyIdx] - volt[eyXp1Idx]
+               - volt[exIdx] + volt[exYp1Idx];
+    curr[hzIdx] = ii_coeff[hzIdx] * curr[hzIdx] + iv_coeff[hzIdx] * hzCurl;
 }
 `;
 
@@ -522,6 +521,16 @@ fn accumulate_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+function apply3DWorkgroupSize(code, workgroupSize) {
+    const [wgX, wgY, wgZ] = workgroupSize;
+    return code.replace(
+        '@compute @workgroup_size(4, 4, 4)',
+        `@compute @workgroup_size(${wgX}, ${wgY}, ${wgZ})`,
+    );
+}
+
+const PML_WORKGROUP_SIZE_3D = [4, 4, 4];
+
 /**
  * WebGPU FDTD Engine.
  *
@@ -598,14 +607,25 @@ export class WebGPUEngine {
         this.excitationPipeline = null;
 
         // Bind groups
-        // Core bind groups created lazily via _coreBindGroupFor()
+        // Core bind groups are pre-created for the active buffers/pipelines and
+        // lazily extended only for alternate binding signatures.
         this.voltCoeffBindGroup = null;
         this.currCoeffBindGroup = null;
         this.excBindGroup = null;
 
         // Workgroup size constants
-        this.WG_SIZE_3D = [4, 4, 4];
+        this.WG_SIZE_3D = [4, 1, 16];
+        this.WG_SIZE_3D_VOLTAGE = null;
+        this.WG_SIZE_3D_CURRENT = null;
         this.WG_SIZE_EXC = 256;
+
+        this._shaderModuleCache = new Map();
+        this._computePipelineCache = new Map();
+        this._coreBindGroupCache = new Map();
+        this._cacheDevice = null;
+        this._lastParamsTS = null;
+        this._lastExcParamsTS = null;
+        this._lastTFSFParamsTS = null;
     }
 
     /**
@@ -637,6 +657,7 @@ export class WebGPUEngine {
         this.device.lost.then((info) => {
             console.error('WebGPU device lost:', info.message);
         });
+        this._invalidatePipelineCaches();
 
         return true;
     }
@@ -657,6 +678,8 @@ export class WebGPUEngine {
         this.totalCells = Nx * Ny * Nz;
         const bufferSize = 3 * this.totalCells * 4; // 3 components * cells * f32
         this.numTS = 0;
+        this._lastParamsTS = null;
+        this._coreBindGroupCache.clear();
 
         // Create field buffers (read-write, initially zeroed)
         this.voltBuffer = this.device.createBuffer({
@@ -723,6 +746,7 @@ export class WebGPUEngine {
         this._excSignalLength = excitation.signal.length;
         this._excPeriod = excitation.period || 0;
         this._excCount = numExc;
+        this._lastExcParamsTS = null;
 
         this.excitationConfigured = true;
 
@@ -806,7 +830,7 @@ export class WebGPUEngine {
                 })
             );
 
-            const [wgX, wgY, wgZ] = this.WG_SIZE_3D;
+            const [wgX, wgY, wgZ] = PML_WORKGROUP_SIZE_3D;
             return {
                 startPos: region.startPos,
                 numLines: region.numLines,
@@ -834,19 +858,19 @@ export class WebGPUEngine {
     stepPML(encoder, mode) {
         if (!this.pmlConfigured) return;
 
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.pmlPipeline);
+        pass.setBindGroup(0, this._coreBindGroupFor(this.pmlPipeline));
         for (const region of this.pmlRegions) {
             // Use the pre-created bind group for this mode.
             // Each mode has its own params buffer with the mode value baked in,
             // avoiding the writeBuffer race condition where multiple writeBuffer
             // calls to the same buffer within a single command encoder all
             // resolve to the last-written value.
-            const pass = encoder.beginComputePass();
-            pass.setPipeline(this.pmlPipeline);
-            pass.setBindGroup(0, this._coreBindGroupFor(this.pmlPipeline));
             pass.setBindGroup(3, region.bindGroups[mode]);
             pass.dispatchWorkgroups(...region.dispatch);
-            pass.end();
         }
+        pass.end();
     }
 
     // -----------------------------------------------------------------------
@@ -863,19 +887,17 @@ export class WebGPUEngine {
         if (!this.device) throw new Error('WebGPU device not initialized.');
 
         // Voltage ADE pipeline (reuses the embedded LORENTZ_ADE_WGSL which has update_volt_ade)
-        const voltAdeModule = this.device.createShaderModule({ code: LORENTZ_ADE_WGSL });
-        const voltAdePipeline = this.device.createComputePipeline({
-            layout: 'auto',
-            compute: { module: voltAdeModule, entryPoint: 'update_volt_ade' },
-        });
+        const voltAdePipeline = this._getOrCreateComputePipeline(
+            LORENTZ_ADE_WGSL,
+            'update_volt_ade'
+        );
 
         // Current ADE pipeline — same shader structure but operates on curr buffer.
         // We reuse the same shader code but with a separate bind group pointing to curr.
-        const currAdeModule = this.device.createShaderModule({ code: LORENTZ_ADE_WGSL });
-        const currAdePipeline = this.device.createComputePipeline({
-            layout: 'auto',
-            compute: { module: currAdeModule, entryPoint: 'update_volt_ade' },
-        });
+        const currAdePipeline = this._getOrCreateComputePipeline(
+            LORENTZ_ADE_WGSL,
+            'update_volt_ade'
+        );
 
         this.adeOrders = [];
         this.adeCurrOrders = [];
@@ -986,16 +1008,16 @@ export class WebGPUEngine {
      */
     stepVoltADE(encoder) {
         if (!this.adeConfigured) return;
+        const pass = encoder.beginComputePass();
         for (const order of this.adeOrders) {
+            pass.setPipeline(order.pipeline);
+            pass.setBindGroup(0, this._coreBindGroupFor(order.pipeline));
             for (const d of order.directions) {
-                const pass = encoder.beginComputePass();
-                pass.setPipeline(order.pipeline);
-                pass.setBindGroup(0, this._coreBindGroupFor(this.pmlPipeline));
                 pass.setBindGroup(1, d.bindGroup);
                 pass.dispatchWorkgroups(d.dispatch, 1, 1);
-                pass.end();
             }
         }
+        pass.end();
     }
 
     /**
@@ -1004,16 +1026,16 @@ export class WebGPUEngine {
      */
     stepCurrADE(encoder) {
         if (!this.adeConfigured) return;
+        const pass = encoder.beginComputePass();
         for (const order of this.adeCurrOrders) {
+            pass.setPipeline(order.pipeline);
+            pass.setBindGroup(0, this._coreBindGroupFor(order.pipeline));
             for (const d of order.directions) {
-                const pass = encoder.beginComputePass();
-                pass.setPipeline(order.pipeline);
-                pass.setBindGroup(0, this._coreBindGroupFor(this.pmlPipeline));
                 pass.setBindGroup(1, d.bindGroup);
                 pass.dispatchWorkgroups(d.dispatch, 1, 1);
-                pass.end();
             }
         }
+        pass.end();
     }
 
     // -----------------------------------------------------------------------
@@ -1048,6 +1070,7 @@ export class WebGPUEngine {
         const currPts = config.currentPoints || [];
         this._tfsfNumVoltPoints = voltPts.length;
         this._tfsfNumCurrPoints = currPts.length;
+        this._lastTFSFParamsTS = null;
 
         // Combine lower (voltage) and upper (current) points for the voltage shader
         const allVoltPts = voltPts;
@@ -1070,11 +1093,10 @@ export class WebGPUEngine {
             const fieldIdxBuf = this._createAndUploadBuffer(fieldIdxArr, GPUBufferUsage.STORAGE);
 
             // Create voltage TFSF pipeline
-            const tfsfVoltModule = this.device.createShaderModule({ code: TFSF_WGSL });
-            this.tfsfVoltPipeline = this.device.createComputePipeline({
-                layout: 'auto',
-                compute: { module: tfsfVoltModule, entryPoint: 'tfsf_apply_voltage' },
-            });
+            this.tfsfVoltPipeline = this._getOrCreateComputePipeline(
+                TFSF_WGSL,
+                'tfsf_apply_voltage'
+            );
 
             this.tfsfVoltBindGroup = this.device.createBindGroup({
                 layout: this.tfsfVoltPipeline.getBindGroupLayout(1),
@@ -1087,6 +1109,7 @@ export class WebGPUEngine {
                     { binding: 5, resource: { buffer: fieldIdxBuf } },
                 ],
             });
+            this._ensureCoreBindGroup(this.tfsfVoltPipeline);
         }
 
         // Current points — reuse same shader structure (operates on volt buffer in shader,
@@ -1112,11 +1135,10 @@ export class WebGPUEngine {
             // For current injection, we need a separate TFSF shader that writes to curr instead of volt.
             // Reuse the TFSF_WGSL with volt binding pointing to curr buffer.
             // We create a second pipeline with the same shader but different core bind group.
-            const tfsfCurrModule = this.device.createShaderModule({ code: TFSF_WGSL });
-            this.tfsfCurrPipeline = this.device.createComputePipeline({
-                layout: 'auto',
-                compute: { module: tfsfCurrModule, entryPoint: 'tfsf_apply_voltage' },
-            });
+            this.tfsfCurrPipeline = this._getOrCreateComputePipeline(
+                TFSF_WGSL,
+                'tfsf_apply_voltage'
+            );
 
             // Create a separate TFSF params buffer for current
             this._tfsfCurrParamsBuffer = this.device.createBuffer({
@@ -1154,6 +1176,10 @@ export class WebGPUEngine {
      * Update TFSF params uniform with current timestep.
      */
     _updateTFSFParams() {
+        if (this._lastTFSFParamsTS === this.numTS) {
+            return;
+        }
+
         // TFSFParams: numTS(u32) + period(u32) + signalLength(u32) + numLowerPoints(u32) +
         //             numUpperPoints(u32) + pad(vec3<u32>) = 32 bytes
         const data = new Uint32Array(8);
@@ -1176,6 +1202,8 @@ export class WebGPUEngine {
             currData[4] = 0;
             this.device.queue.writeBuffer(this._tfsfCurrParamsBuffer, 0, currData);
         }
+
+        this._lastTFSFParamsTS = this.numTS;
     }
 
     /**
@@ -1271,11 +1299,10 @@ export class WebGPUEngine {
         });
 
         // Create pipeline
-        const rlcModule = this.device.createShaderModule({ code: LUMPED_RLC_WGSL });
-        this.rlcPipeline = this.device.createComputePipeline({
-            layout: 'auto',
-            compute: { module: rlcModule, entryPoint: 'update_rlc' },
-        });
+        this.rlcPipeline = this._getOrCreateComputePipeline(
+            LUMPED_RLC_WGSL,
+            'update_rlc'
+        );
 
         this.rlcBindGroup = this.device.createBindGroup({
             layout: this.rlcPipeline.getBindGroupLayout(1),
@@ -1287,6 +1314,7 @@ export class WebGPUEngine {
                 { binding: 4, resource: { buffer: vilBuffer } },
             ],
         });
+        this._ensureCoreBindGroup(this.rlcPipeline);
 
         this._rlcCount = n;
         this._rlcBuffers = [rlcParamsBuffer, elemBuffer, vdnBuffer, jnBuffer, vilBuffer];
@@ -1368,19 +1396,18 @@ export class WebGPUEngine {
         const coeffBuf = this._createAndUploadBuffer(coeffArr, GPUBufferUsage.STORAGE);
 
         // Create three pipelines for the three entry points
-        const murModule = this.device.createShaderModule({ code: MUR_ABC_WGSL });
-        this.murPrePipeline = this.device.createComputePipeline({
-            layout: 'auto',
-            compute: { module: murModule, entryPoint: 'mur_pre_voltage' },
-        });
-        this.murPostPipeline = this.device.createComputePipeline({
-            layout: 'auto',
-            compute: { module: murModule, entryPoint: 'mur_post_voltage' },
-        });
-        this.murApplyPipeline = this.device.createComputePipeline({
-            layout: 'auto',
-            compute: { module: murModule, entryPoint: 'mur_apply' },
-        });
+        this.murPrePipeline = this._getOrCreateComputePipeline(
+            MUR_ABC_WGSL,
+            'mur_pre_voltage'
+        );
+        this.murPostPipeline = this._getOrCreateComputePipeline(
+            MUR_ABC_WGSL,
+            'mur_post_voltage'
+        );
+        this.murApplyPipeline = this._getOrCreateComputePipeline(
+            MUR_ABC_WGSL,
+            'mur_apply'
+        );
 
         // All three share the same bind group layout (group 1)
         this.murBindGroup = this.device.createBindGroup({
@@ -1393,6 +1420,9 @@ export class WebGPUEngine {
                 { binding: 4, resource: { buffer: coeffBuf } },
             ],
         });
+        this._ensureCoreBindGroup(this.murPrePipeline);
+        this._ensureCoreBindGroup(this.murPostPipeline);
+        this._ensureCoreBindGroup(this.murApplyPipeline);
 
         this._murNumPoints = numPoints;
         this._murBuffers = [murParamsBuffer, normalIdxBuf, shiftedIdxBuf, savedVoltBuf, coeffBuf];
@@ -1475,11 +1505,10 @@ export class WebGPUEngine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
         });
 
-        const ssModule = this.device.createShaderModule({ code: STEADY_STATE_WGSL });
-        this.ssPipeline = this.device.createComputePipeline({
-            layout: 'auto',
-            compute: { module: ssModule, entryPoint: 'accumulate_energy' },
-        });
+        this.ssPipeline = this._getOrCreateComputePipeline(
+            STEADY_STATE_WGSL,
+            'accumulate_energy'
+        );
 
         this.ssBindGroup = this.device.createBindGroup({
             layout: this.ssPipeline.getBindGroupLayout(1),
@@ -1490,6 +1519,7 @@ export class WebGPUEngine {
                 { binding: 3, resource: { buffer: energy2Buf } },
             ],
         });
+        this._ensureCoreBindGroup(this.ssPipeline);
 
         this._ssNumProbes = numProbes;
         this._ssPeriodSamples = config.periodSamples;
@@ -1531,23 +1561,18 @@ export class WebGPUEngine {
      * @param {GPUCommandEncoder} [encoder] - optional shared encoder
      * @returns {GPUCommandEncoder} the encoder used
      */
-    stepVoltage(encoder) {
-        const enc = encoder || this.device.createCommandEncoder();
+    stepVoltage(encoder, options = {}) {
+        const ownsPass = !options.pass;
+        const enc = ownsPass ? (encoder || this.device.createCommandEncoder()) : encoder;
         const [Nx, Ny, Nz] = this.numLines;
-        const [wgX, wgY, wgZ] = this.WG_SIZE_3D;
+        const [wgX, wgY, wgZ] = this._getVoltage3DWorkgroupSize();
+        const pass = options.pass || enc.beginComputePass();
+        this._dispatchVoltageOnPass(pass, [Nx, Ny, Nz], [wgX, wgY, wgZ]);
+        if (ownsPass) {
+            pass.end();
+        }
 
-        const pass = enc.beginComputePass();
-        pass.setPipeline(this.voltagePipeline);
-        pass.setBindGroup(0, this._coreBindGroupFor(this.voltagePipeline));
-        pass.setBindGroup(1, this.voltCoeffBindGroup);
-        pass.dispatchWorkgroups(
-            Math.ceil(Nx / wgX),
-            Math.ceil(Ny / wgY),
-            Math.ceil(Nz / wgZ),
-        );
-        pass.end();
-
-        if (!encoder) {
+        if (ownsPass && !encoder) {
             this.device.queue.submit([enc.finish()]);
         }
         return enc;
@@ -1558,23 +1583,18 @@ export class WebGPUEngine {
      * @param {GPUCommandEncoder} [encoder] - optional shared encoder
      * @returns {GPUCommandEncoder} the encoder used
      */
-    stepCurrent(encoder) {
-        const enc = encoder || this.device.createCommandEncoder();
+    stepCurrent(encoder, options = {}) {
+        const ownsPass = !options.pass;
+        const enc = ownsPass ? (encoder || this.device.createCommandEncoder()) : encoder;
         const [Nx, Ny, Nz] = this.numLines;
-        const [wgX, wgY, wgZ] = this.WG_SIZE_3D;
+        const [wgX, wgY, wgZ] = this._getCurrent3DWorkgroupSize();
+        const pass = options.pass || enc.beginComputePass();
+        this._dispatchCurrentOnPass(pass, [Nx, Ny, Nz], [wgX, wgY, wgZ]);
+        if (ownsPass) {
+            pass.end();
+        }
 
-        const pass = enc.beginComputePass();
-        pass.setPipeline(this.currentPipeline);
-        pass.setBindGroup(0, this._coreBindGroupFor(this.currentPipeline));
-        pass.setBindGroup(2, this.currCoeffBindGroup);
-        pass.dispatchWorkgroups(
-            Math.ceil(Math.max(Nx - 1, 1) / wgX),
-            Math.ceil(Math.max(Ny - 1, 1) / wgY),
-            Math.ceil(Math.max(Nz - 1, 1) / wgZ),
-        );
-        pass.end();
-
-        if (!encoder) {
+        if (ownsPass && !encoder) {
             this.device.queue.submit([enc.finish()]);
         }
         return enc;
@@ -1585,26 +1605,22 @@ export class WebGPUEngine {
      * @param {GPUCommandEncoder} [encoder] - optional shared encoder
      * @returns {GPUCommandEncoder} the encoder used
      */
-    applyExcitation(encoder) {
+    applyExcitation(encoder, options = {}) {
         if (!this.excitationConfigured) return encoder;
 
-        const enc = encoder || this.device.createCommandEncoder();
+        const ownsPass = !options.pass;
+        const enc = ownsPass ? (encoder || this.device.createCommandEncoder()) : encoder;
 
         // Update excitation params with current timestep
         this._updateExcParams();
 
-        const pass = enc.beginComputePass();
-        pass.setPipeline(this.excitationPipeline);
-        pass.setBindGroup(0, this._coreBindGroupFor(this.excitationPipeline, [0, 2]));
-        pass.setBindGroup(1, this.excBindGroup);
-        pass.dispatchWorkgroups(
-            Math.ceil(this._excCount / this.WG_SIZE_EXC),
-            1,
-            1,
-        );
-        pass.end();
+        const pass = options.pass || enc.beginComputePass();
+        this._dispatchExcitationOnPass(pass);
+        if (ownsPass) {
+            pass.end();
+        }
 
-        if (!encoder) {
+        if (ownsPass && !encoder) {
             this.device.queue.submit([enc.finish()]);
         }
         return enc;
@@ -1634,6 +1650,66 @@ export class WebGPUEngine {
         pass.end();
     }
 
+    _dispatchVoltageOnPass(pass, numLines = this.numLines, workgroupSize = this._getVoltage3DWorkgroupSize()) {
+        const [Nx, Ny, Nz] = numLines;
+        const [wgX, wgY, wgZ] = workgroupSize;
+        pass.setPipeline(this.voltagePipeline);
+        pass.setBindGroup(0, this._coreBindGroupFor(this.voltagePipeline));
+        pass.setBindGroup(1, this.voltCoeffBindGroup);
+        pass.dispatchWorkgroups(
+            Math.ceil(Nx / wgX),
+            Math.ceil(Ny / wgY),
+            Math.ceil(Nz / wgZ),
+        );
+    }
+
+    _dispatchCurrentOnPass(pass, numLines = this.numLines, workgroupSize = this._getCurrent3DWorkgroupSize()) {
+        const [Nx, Ny, Nz] = numLines;
+        const [wgX, wgY, wgZ] = workgroupSize;
+        pass.setPipeline(this.currentPipeline);
+        pass.setBindGroup(0, this._coreBindGroupFor(this.currentPipeline));
+        pass.setBindGroup(2, this.currCoeffBindGroup);
+        pass.dispatchWorkgroups(
+            Math.ceil(Math.max(Nx - 1, 1) / wgX),
+            Math.ceil(Math.max(Ny - 1, 1) / wgY),
+            Math.ceil(Math.max(Nz - 1, 1) / wgZ),
+        );
+    }
+
+    _dispatchExcitationOnPass(pass) {
+        pass.setPipeline(this.excitationPipeline);
+        pass.setBindGroup(0, this._coreBindGroupFor(this.excitationPipeline, [0, 2]));
+        pass.setBindGroup(1, this.excBindGroup);
+        pass.dispatchWorkgroups(
+            Math.ceil(this._excCount / this.WG_SIZE_EXC),
+            1,
+            1,
+        );
+    }
+
+    _canUseSimpleCorePassFastPath() {
+        return this.excitationConfigured
+            && !!this.voltagePipeline
+            && !!this.currentPipeline
+            && !!this.voltCoeffBindGroup
+            && !!this.currCoeffBindGroup
+            && (!this.excitationConfigured || (!!this.excitationPipeline && !!this.excBindGroup))
+            && !this.ssRecording
+            && !this.pmlConfigured
+            && !this.adeConfigured
+            && !this.rlcConfigured
+            && !this.murConfigured
+            && !this.tfsfConfigured;
+    }
+
+    _getVoltage3DWorkgroupSize() {
+        return this.WG_SIZE_3D_VOLTAGE || this.WG_SIZE_3D;
+    }
+
+    _getCurrent3DWorkgroupSize() {
+        return this.WG_SIZE_3D_CURRENT || this.WG_SIZE_3D;
+    }
+
     /**
      * Run N complete FDTD timesteps.
      * Each timestep: voltage update -> excitation -> current update -> increment numTS.
@@ -1649,6 +1725,19 @@ export class WebGPUEngine {
             }
 
             const encoder = this.device.createCommandEncoder();
+
+            if (this._canUseSimpleCorePassFastPath()) {
+                const pass = encoder.beginComputePass();
+                this.stepVoltage(null, { pass });
+                if (this.excitationConfigured) {
+                    this.applyExcitation(null, { pass });
+                }
+                this.stepCurrent(null, { pass });
+                pass.end();
+                this.device.queue.submit([encoder.finish()]);
+                this.numTS++;
+                continue;
+            }
 
             // === PRE-VOLTAGE (C++ DoPreVoltageUpdates) ===
             this.stepSteadyState(encoder);  // Priority +2M
@@ -1788,6 +1877,8 @@ export class WebGPUEngine {
         if (this.device) {
             this.device.destroy();
         }
+        this._invalidatePipelineCaches();
+        this._coreBindGroupCache.clear();
     }
 
     // --- Private helpers ---
@@ -1830,6 +1921,10 @@ export class WebGPUEngine {
     }
 
     _updateParams() {
+        if (this._lastParamsTS === this.numTS) {
+            return;
+        }
+
         // Params struct: vec3<u32> numLines (12) + u32 numTS (4) + vec3<i32> shift (12) + u32 _pad (4) = 32
         const data = new ArrayBuffer(32);
         const u32View = new Uint32Array(data);
@@ -1843,9 +1938,14 @@ export class WebGPUEngine {
         i32View[6] = 0; // shift z
         u32View[7] = 0; // padding
         this.device.queue.writeBuffer(this.paramsBuffer, 0, data);
+        this._lastParamsTS = this.numTS;
     }
 
     _updateExcParams() {
+        if (this._lastExcParamsTS === this.numTS) {
+            return;
+        }
+
         // ExcParams struct: 4 x u32 = 16 bytes
         const data = new Uint32Array(4);
         data[0] = this.numTS;
@@ -1853,6 +1953,7 @@ export class WebGPUEngine {
         data[2] = this._excPeriod;
         data[3] = this._excCount;
         this.device.queue.writeBuffer(this.excParamsBuffer, 0, data);
+        this._lastExcParamsTS = this.numTS;
     }
 
     async _createPipelines() {
@@ -1874,27 +1975,123 @@ export class WebGPUEngine {
             return undefined; // placeholder
         };
 
-        const createPipeline = async (code, entryPoint) => {
-            const module = this.device.createShaderModule({ code });
-            return await this.device.createComputePipelineAsync({
-                layout: 'auto',
-                compute: { module, entryPoint },
-            });
-        };
+        const voltageWGSL = apply3DWorkgroupSize(UPDATE_VOLTAGE_WGSL, this._getVoltage3DWorkgroupSize());
+        const currentWGSL = apply3DWorkgroupSize(UPDATE_CURRENT_WGSL, this._getCurrent3DWorkgroupSize());
 
-        this.voltagePipeline = await createPipeline(UPDATE_VOLTAGE_WGSL, 'update_voltages');
-        this.currentPipeline = await createPipeline(UPDATE_CURRENT_WGSL, 'update_currents');
-        this.pmlPipeline = await createPipeline(UPDATE_PML_WGSL, 'update_pml');
-        this.excitationPipeline = await createPipeline(EXCITATION_WGSL, 'apply_excitation');
+        this.voltagePipeline = await this._getOrCreateComputePipelineAsync(
+            voltageWGSL,
+            'update_voltages'
+        );
+        this.currentPipeline = await this._getOrCreateComputePipelineAsync(
+            currentWGSL,
+            'update_currents'
+        );
+        this.pmlPipeline = await this._getOrCreateComputePipelineAsync(
+            UPDATE_PML_WGSL,
+            'update_pml'
+        );
+        this.excitationPipeline = await this._getOrCreateComputePipelineAsync(
+            EXCITATION_WGSL,
+            'apply_excitation'
+        );
+    }
+
+    _getPipelineCacheKey(code, entryPoint) {
+        return `${entryPoint}\u0000${code}`;
+    }
+
+    _invalidatePipelineCaches() {
+        this._shaderModuleCache.clear();
+        this._computePipelineCache.clear();
+        this._cacheDevice = this.device;
+    }
+
+    _syncDeviceScopedCaches() {
+        if (this._cacheDevice !== this.device) {
+            this._invalidatePipelineCaches();
+            this._coreBindGroupCache.clear();
+        }
+    }
+
+    _getOrCreateShaderModule(code) {
+        this._syncDeviceScopedCaches();
+        if (this._shaderModuleCache.has(code)) {
+            return this._shaderModuleCache.get(code);
+        }
+
+        const module = this.device.createShaderModule({ code });
+        this._shaderModuleCache.set(code, module);
+        return module;
+    }
+
+    _getOrCreateComputePipeline(code, entryPoint) {
+        this._syncDeviceScopedCaches();
+        const key = this._getPipelineCacheKey(code, entryPoint);
+        const cached = this._computePipelineCache.get(key);
+        if (cached) {
+            if (typeof cached.then === 'function') {
+                throw new Error(`Pipeline ${entryPoint} is still initializing asynchronously`);
+            }
+            return cached;
+        }
+
+        const module = this._getOrCreateShaderModule(code);
+        const pipeline = this.device.createComputePipeline({
+            layout: 'auto',
+            compute: { module, entryPoint },
+        });
+        this._computePipelineCache.set(key, pipeline);
+        return pipeline;
+    }
+
+    async _getOrCreateComputePipelineAsync(code, entryPoint) {
+        this._syncDeviceScopedCaches();
+        const key = this._getPipelineCacheKey(code, entryPoint);
+        const cached = this._computePipelineCache.get(key);
+        if (cached) {
+            return await cached;
+        }
+
+        const module = this._getOrCreateShaderModule(code);
+        const pending = this.device.createComputePipelineAsync({
+            layout: 'auto',
+            compute: { module, entryPoint },
+        }).then((pipeline) => {
+            this._computePipelineCache.set(key, pipeline);
+            return pipeline;
+        }).catch((error) => {
+            this._computePipelineCache.delete(key);
+            throw error;
+        });
+
+        this._computePipelineCache.set(key, pending);
+        return await pending;
     }
 
     _coreBindGroupFor(pipeline, bindings) {
-        // With layout:'auto', each pipeline has its own group 0 layout.
-        // The auto layout only includes bindings the shader actually uses.
-        // Pass bindings=[0,1,2] for most pipelines, [0,2] for excitation.
-        if (!this._coreBindGroupCache) this._coreBindGroupCache = new Map();
-        const key = pipeline;
-        if (this._coreBindGroupCache.has(key)) return this._coreBindGroupCache.get(key);
+        const signature = this._getCoreBindGroupSignature(bindings);
+        const pipelineCache = this._coreBindGroupCache.get(pipeline);
+        if (pipelineCache && pipelineCache.has(signature)) {
+            return pipelineCache.get(signature);
+        }
+
+        return this._ensureCoreBindGroup(pipeline, bindings);
+    }
+
+    _getCoreBindGroupSignature(bindings) {
+        return (bindings || [0, 1, 2]).join(',');
+    }
+
+    _ensureCoreBindGroup(pipeline, bindings) {
+        const signature = this._getCoreBindGroupSignature(bindings);
+        let pipelineCache = this._coreBindGroupCache.get(pipeline);
+        if (!pipelineCache) {
+            pipelineCache = new Map();
+            this._coreBindGroupCache.set(pipeline, pipelineCache);
+        }
+        if (pipelineCache.has(signature)) {
+            return pipelineCache.get(signature);
+        }
 
         const bufferMap = {
             0: this.voltBuffer,
@@ -1910,11 +2107,16 @@ export class WebGPUEngine {
             layout: pipeline.getBindGroupLayout(0),
             entries,
         });
-        this._coreBindGroupCache.set(key, bg);
+        pipelineCache.set(signature, bg);
         return bg;
     }
 
     _createBindGroups() {
+        this._coreBindGroupCache.clear();
+        this._ensureCoreBindGroup(this.voltagePipeline);
+        this._ensureCoreBindGroup(this.currentPipeline);
+        this._ensureCoreBindGroup(this.pmlPipeline);
+
         // Bind Group 1: Voltage coefficients
         this.voltCoeffBindGroup = this.device.createBindGroup({
             layout: this.voltagePipeline.getBindGroupLayout(1),
@@ -1935,6 +2137,7 @@ export class WebGPUEngine {
     }
 
     _createExcitationBindGroup() {
+        this._ensureCoreBindGroup(this.excitationPipeline, [0, 2]);
         this.excBindGroup = this.device.createBindGroup({
             layout: this.excitationPipeline.getBindGroupLayout(1),
             entries: [

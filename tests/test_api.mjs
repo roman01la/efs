@@ -18,6 +18,15 @@ import { computeLocalSAR, computeAveragedSAR, findPeakSAR } from '../src/sar.mjs
 import { meshHintFromBox, meshCombine, meshEstimateCflTimestep, smoothMeshLines } from '../src/automesh.mjs';
 import { prepareSParamData, prepareSmithData, prepareRadiationPattern, prepareImpedanceData, prepareTimeDomainData } from '../src/visualization.mjs';
 
+// Normalize CSXCAD XML float precision (full double → 6-digit) for test assertions
+function normFloats(s) {
+  return s.replace(/"(-?\d+\.\d{7,}e[+-]\d+)"/g, (_, n) => {
+    const e = parseFloat(n).toExponential(6);
+    // Ensure two-digit exponent to match CSXCAD 6-digit format (e.g. e+1 → e+01)
+    return `"${e.replace(/e([+-])(\d)$/, 'e$10$2')}"`;
+  });
+}
+
 // Load WASM module once — required for all Simulation tests (CSXCAD native)
 let Module = null;
 async function loadModule() {
@@ -326,7 +335,7 @@ function testCylinderXML() {
   const metal = sim.addMetal('conductor');
   metal.addCylinder([0, 0, 0], [0, 0, 1], 0.005, 10);
 
-  const xml = sim.toXML();
+  const xml = normFloats(sim.toXML());
   // Native CSXCAD uses exponential notation for attributes
   assert(xml.includes('<Cylinder Priority="10" Radius="5.000000e-03"'), 'XML has Cylinder with Radius attribute');
 }
@@ -541,7 +550,7 @@ async function testWasmCoaxWithPort() {
   assert(port.I_filenames.length === 1, 'Port has current probe');
 
   // Generate XML and verify
-  const xml = sim.toXML();
+  const xml = normFloats(sim.toXML());
   assert(xml.includes('LumpedElement'), 'Coax XML has LumpedElement');
   // Native CSXCAD uses exponential notation for R attribute
   assert(xml.includes('R="5.000000e+01"'), 'Coax XML has R=50');
@@ -1086,7 +1095,7 @@ function testCylindricalShellXML() {
   const metal = sim.addMetal('shield');
   sim.addCylindricalShell('shield', 10, [0, 0, 0], [0, 0, 1], 0.5, 0.01);
 
-  const xml = sim.toXML();
+  const xml = normFloats(sim.toXML());
   assert(xml.includes('<CylindricalShell'), 'XML has CylindricalShell');
   // Native CSXCAD uses exponential notation for attributes
   assert(xml.includes('Radius="5.000000e-01"'), 'CylindricalShell has Radius');
@@ -1229,7 +1238,7 @@ function testSphereXML() {
   const metal = sim.addMetal('ball');
   metal.addSphere([0.5, 0.5, 0.5], 0.25, 10);
 
-  const xml = sim.toXML();
+  const xml = normFloats(sim.toXML());
   // Native CSXCAD uses exponential notation for attributes
   assert(xml.includes('<Sphere Priority="10" Radius="2.500000e-01"'), 'XML has Sphere with Priority and Radius');
   assert(xml.includes('X="5.000000e-01" Y="5.000000e-01" Z="5.000000e-01"'), 'Sphere has Center element');
@@ -1250,7 +1259,7 @@ function testSphericalShellXML() {
   const metal = sim.addMetal('shell');
   metal.addSphericalShell([0, 0, 0], 1.0, 0.05, 8);
 
-  const xml = sim.toXML();
+  const xml = normFloats(sim.toXML());
   // Native CSXCAD uses exponential notation for attributes
   assert(xml.includes('<SphericalShell Priority="8" Radius="1.000000e+00" ShellWidth="5.000000e-02"'), 'XML has SphericalShell with attributes');
   assert(xml.includes('X="0.000000e+00" Y="0.000000e+00" Z="0.000000e+00"'), 'SphericalShell has Center');
@@ -1271,7 +1280,7 @@ function testPolygonXML() {
   const metal = sim.addMetal('patch');
   metal.addPolygon([[0, 0], [1, 0], [1, 1], [0, 1]], 2, 0.5, 10);
 
-  const xml = sim.toXML();
+  const xml = normFloats(sim.toXML());
   // Native CSXCAD uses exponential notation and different vertex attribute names (X1/X2)
   assert(xml.includes('<Polygon Priority="10"') && xml.includes('Elevation="5.000000e-01"') && xml.includes('NormDir="2"'), 'XML has Polygon with attributes');
   assert(xml.includes('<Vertex X1="0.000000e+00" X2="0.000000e+00"'), 'Polygon has 2D Vertex');
@@ -1296,7 +1305,7 @@ function testLinPolyXML() {
   const metal = sim.addMetal('extrusion');
   metal.addLinPoly([[0, 0], [1, 0], [0.5, 1]], 2, 0, 0.5, 5);
 
-  const xml = sim.toXML();
+  const xml = normFloats(sim.toXML());
   // Native CSXCAD uses exponential notation for attributes
   assert(xml.includes('<LinPoly Priority="5"') && xml.includes('NormDir="2"') && xml.includes('Elevation="0.000000e+00"') && xml.includes('Length="5.000000e-01"'), 'XML has LinPoly with attributes');
   assert(xml.includes('</LinPoly>'), 'LinPoly has closing tag');
@@ -1320,7 +1329,7 @@ function testRotPolyXML() {
   const metal = sim.addMetal('revolved');
   metal.addRotPoly([[0.5, 0], [1, 0], [1, 1], [0.5, 1]], 2, 0, Math.PI, 7);
 
-  const xml = sim.toXML();
+  const xml = normFloats(sim.toXML());
   // Native CSXCAD uses exponential notation and Angles Start/Stop instead of RotAngle
   assert(xml.includes('<RotPoly Priority="7"') && xml.includes('NormDir="2"') && xml.includes('Elevation="0.000000e+00"'), 'XML has RotPoly with attributes');
   assert(xml.includes('<Angles Start="0.000000e+00" Stop="3.141593e+00"'), 'RotPoly has RotAngle');
@@ -1345,7 +1354,7 @@ function testWireXML() {
   const metal = sim.addMetal('antenna_wire');
   metal.addWire([[0, 0, 0], [0, 0, 0.5], [0.5, 0, 0.5]], 0.001, 10);
 
-  const xml = sim.toXML();
+  const xml = normFloats(sim.toXML());
   // Native CSXCAD uses exponential notation for attributes
   assert(xml.includes('<Wire Priority="10" WireRadius="1.000000e-03"'), 'XML has Wire with WireRadius');
   assert(xml.includes('</Wire>'), 'Wire has closing tag');

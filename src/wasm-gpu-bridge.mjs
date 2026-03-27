@@ -96,36 +96,43 @@ export class WASMGPUBridge {
             );
         }
 
-        // Extract grid size from WASM (returns embind vector)
-        const gridSizeVec = emsInstance.getGridSize();
-        if (!gridSizeVec || gridSizeVec.size() < 3) {
-            throw new Error(
-                'getGridSize() returned empty or incomplete result. ' +
-                'Ensure SetupFDTD() has been called before configureFromWASM().'
-            );
+        let gridSizeVec;
+        let vvVec;
+        let viVec;
+        let iiVec;
+        let ivVec;
+
+        try {
+            // Extract grid size from WASM (returns embind vector)
+            gridSizeVec = emsInstance.getGridSize();
+            if (!gridSizeVec || gridSizeVec.size() < 3) {
+                throw new Error(
+                    'getGridSize() returned empty or incomplete result. ' +
+                    'Ensure SetupFDTD() has been called before configureFromWASM().'
+                );
+            }
+            const gridSize = [gridSizeVec.get(0), gridSizeVec.get(1), gridSizeVec.get(2)];
+
+            // Extract coefficient arrays from WASM (returns embind vectors)
+            vvVec = emsInstance.getVV();
+            viVec = emsInstance.getVI();
+            iiVec = emsInstance.getII();
+            ivVec = emsInstance.getIV();
+
+            // Convert embind vectors to Float32Arrays
+            const vv = _embindVectorToFloat32Array(vvVec);
+            const vi = _embindVectorToFloat32Array(viVec);
+            const ii = _embindVectorToFloat32Array(iiVec);
+            const iv = _embindVectorToFloat32Array(ivVec);
+
+            this.configure({ gridSize, coefficients: { vv, vi, ii, iv } });
+        } finally {
+            if (gridSizeVec) gridSizeVec.delete();
+            if (vvVec) vvVec.delete();
+            if (viVec) viVec.delete();
+            if (iiVec) iiVec.delete();
+            if (ivVec) ivVec.delete();
         }
-        const gridSize = [gridSizeVec.get(0), gridSizeVec.get(1), gridSizeVec.get(2)];
-
-        // Extract coefficient arrays from WASM (returns embind vectors)
-        const vvVec = emsInstance.getVV();
-        const viVec = emsInstance.getVI();
-        const iiVec = emsInstance.getII();
-        const ivVec = emsInstance.getIV();
-
-        // Convert embind vectors to Float32Arrays
-        const vv = _embindVectorToFloat32Array(vvVec);
-        const vi = _embindVectorToFloat32Array(viVec);
-        const ii = _embindVectorToFloat32Array(iiVec);
-        const iv = _embindVectorToFloat32Array(ivVec);
-
-        // Clean up embind vectors
-        gridSizeVec.delete();
-        vvVec.delete();
-        viVec.delete();
-        iiVec.delete();
-        ivVec.delete();
-
-        this.configure({ gridSize, coefficients: { vv, vi, ii, iv } });
     }
 
     /**
@@ -237,6 +244,11 @@ export class WASMGPUBridge {
  * @returns {Float32Array}
  */
 function _embindVectorToFloat32Array(vec) {
+    if (typeof vec.toFloat32Array === 'function') {
+        const data = vec.toFloat32Array();
+        return data instanceof Float32Array ? data : new Float32Array(data);
+    }
+
     const len = vec.size();
     const arr = new Float32Array(len);
     for (let i = 0; i < len; i++) {

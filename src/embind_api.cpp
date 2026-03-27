@@ -10,6 +10,15 @@
 #include "tinyxml.h"
 #include "openems.h"
 #include "FDTD/operator.h"
+#include "FDTD/engine.h"
+#include "FDTD/excitation.h"
+#include "FDTD/extensions/operator_ext_excitation.h"
+#include "FDTD/extensions/operator_ext_upml.h"
+#include "FDTD/extensions/engine_ext_upml.h"
+#include "FDTD/extensions/operator_ext_mur_abc.h"
+#include "FDTD/engine_interface_fdtd.h"
+#include "Common/processfields.h"
+#include "Common/processing.h"
 #include "ContinuousStructure.h"
 #include "tools/hdf5_file_reader.h"
 
@@ -20,6 +29,52 @@ using namespace emscripten;
 class openEMS_Accessor : public openEMS {
 public:
     Operator* getFDTD_Op() const { return FDTD_Op; }
+    Engine* getFDTD_Eng() const { return FDTD_Eng; }
+    ProcessingArray* getPA() const { return PA; }
+    unsigned int getNrTS() const { return NrTS; }
+    double getEndCrit() const { return endCrit; }
+    Excitation* getExc() const { return m_Exc; }
+    Engine_Ext_SteadyState* getEngExtSSD() const { return Eng_Ext_SSD; }
+};
+
+// Helper to access protected engine fields (volt_ptr, curr_ptr, numTS).
+class Engine_Accessor : public Engine {
+public:
+    ArrayLib::ArrayNIJK<FDTD_FLOAT>* getVoltPtr() const { return volt_ptr; }
+    ArrayLib::ArrayNIJK<FDTD_FLOAT>* getCurrPtr() const { return curr_ptr; }
+    void setNumTS(unsigned int ts) { numTS = ts; }
+};
+
+// Accessors for protected extension fields.
+class UPML_Accessor : public Operator_Ext_UPML {
+public:
+    unsigned int* startPos() { return m_StartPos; }
+    unsigned int* numLines() { return m_numLines; }
+    ArrayLib::ArrayNIJK<FDTD_FLOAT>& getVV()   { return vv; }
+    ArrayLib::ArrayNIJK<FDTD_FLOAT>& getVVFO() { return vvfo; }
+    ArrayLib::ArrayNIJK<FDTD_FLOAT>& getVVFN() { return vvfn; }
+    ArrayLib::ArrayNIJK<FDTD_FLOAT>& getII()   { return ii; }
+    ArrayLib::ArrayNIJK<FDTD_FLOAT>& getIIFO() { return iifo; }
+    ArrayLib::ArrayNIJK<FDTD_FLOAT>& getIIFN() { return iifn; }
+};
+
+class Excitation_Accessor : public Operator_Ext_Excitation {
+public:
+    FDTD_FLOAT* getVoltAmp() const { return Volt_amp; }
+    unsigned int* getVoltDelay() const { return Volt_delay; }
+    unsigned short* getVoltDir() const { return Volt_dir; }
+    unsigned int* getVoltIndex(int dim) const { return Volt_index[dim]; }
+};
+
+class Mur_Accessor : public Operator_Ext_Mur_ABC {
+public:
+    int getNY() const { return m_ny; }
+    bool getTop() const { return m_top; }
+    unsigned int getLineNr() const { return m_LineNr; }
+    int getLineNrShift() const { return m_LineNr_Shift; }
+    unsigned int* getNumLines() { return m_numLines; }
+    ArrayLib::ArrayIJ<FDTD_FLOAT>& getCoeffNyP()  { return m_Mur_Coeff_nyP; }
+    ArrayLib::ArrayIJ<FDTD_FLOAT>& getCoeffNyPP() { return m_Mur_Coeff_nyPP; }
 };
 
 static std::atomic<int> g_xmlPathCounter{0};
@@ -148,6 +203,365 @@ public:
 
     std::vector<float> getIV() {
         return extractCoeffArray(3);
+    }
+
+    // -----------------------------------------------------------------------
+    // Hybrid GPU/WASM stepping API
+    // -----------------------------------------------------------------------
+
+    /**
+     * Initialize the FDTD run loop (mirrors the setup part of RunFDTD).
+     * Returns the first processing step interval.
+     * After this, caller runs GPU iterations, then calls doProcess() in a loop.
+     */
+    int initRun() {
+        auto* acc = reinterpret_cast<openEMS_Accessor*>(ems_);
+        Engine* eng = acc->getFDTD_Eng();
+        ProcessingArray* pa = acc->getPA();
+        Operator* op = acc->getFDTD_Op();
+
+        if (!eng || !pa || !op) return -1;
+
+        // Mirror RunFDTD setup: add end-criteria field processing
+        procField_ = new ProcessFields(acc->NewEngineInterface());
+        pa->AddProcessing(procField_);
+        maxEnergy_ = 0;
+        energyChange_ = 1;
+
+        pa->InitAll();
+
+        unsigned int maxExcite = op->GetExcitationSignal()->GetMaxExcitationTimestep();
+        procField_->AddStep(maxExcite);
+
+        pa->PreProcess();
+        int step = pa->Process();
+        unsigned int NrTS = acc->getNrTS();
+        if ((step < 0) || (step > (int)NrTS)) step = NrTS;
+
+        return step;
+    }
+
+    /**
+     * Run one processing cycle after GPU has advanced the fields.
+     * Returns the next step interval, or 0 if simulation should end.
+     */
+    int doProcess() {
+        auto* acc = reinterpret_cast<openEMS_Accessor*>(ems_);
+        Engine* eng = acc->getFDTD_Eng();
+        ProcessingArray* pa = acc->getPA();
+        unsigned int NrTS = acc->getNrTS();
+        double endCrit = acc->getEndCrit();
+
+        int step = pa->Process();
+
+        // Check end criteria via energy estimate
+        if (procField_ && procField_->CheckTimestep()) {
+            double currE = procField_->CalcTotalEnergyEstimate();
+            if (currE > maxEnergy_) maxEnergy_ = currE;
+            if (maxEnergy_ > 0) energyChange_ = currE / maxEnergy_;
+        }
+
+        unsigned int currTS = eng->GetNumberOfTimesteps();
+        if ((step < 0) || (step > (int)(NrTS - currTS))) step = NrTS - currTS;
+
+        // Check if done
+        if (currTS >= NrTS || energyChange_ <= endCrit) return 0;
+
+        return step;
+    }
+
+    unsigned int getTimestepCount() {
+        auto* eng = getEngine();
+        return eng ? eng->GetNumberOfTimesteps() : 0;
+    }
+
+    unsigned int getMaxTimesteps() {
+        auto* acc = reinterpret_cast<openEMS_Accessor*>(ems_);
+        return acc->getNrTS();
+    }
+
+    /**
+     * Get the WASM heap pointer and size of the voltage field array.
+     * JS can write directly to HEAPF32 at this offset for zero-copy transfer.
+     * Returns [pointer, count] where pointer is byte offset into WASM memory.
+     */
+    std::vector<unsigned int> getVoltagePtr() {
+        auto* eng = getEngine();
+        if (!eng) return {};
+        auto* engAcc = reinterpret_cast<Engine_Accessor*>(eng);
+        auto* voltArr = engAcc->getVoltPtr();
+        if (!voltArr || !voltArr->valid()) return {};
+        return { (unsigned int)(uintptr_t)voltArr->data(), (unsigned int)voltArr->size() };
+    }
+
+    /**
+     * Get the WASM heap pointer and size of the current field array.
+     */
+    std::vector<unsigned int> getCurrentPtr() {
+        auto* eng = getEngine();
+        if (!eng) return {};
+        auto* engAcc = reinterpret_cast<Engine_Accessor*>(eng);
+        auto* currArr = engAcc->getCurrPtr();
+        if (!currArr || !currArr->valid()) return {};
+        return { (unsigned int)(uintptr_t)currArr->data(), (unsigned int)currArr->size() };
+    }
+
+    /**
+     * Write voltage field data from GPU back into the C++ engine.
+     * Input: flat float array in NIJK layout (3 * Nx * Ny * Nz).
+     */
+    void setVoltages(const std::vector<float>& data) {
+        auto* eng = getEngine();
+        if (!eng) return;
+        auto* engAcc = reinterpret_cast<Engine_Accessor*>(eng);
+        auto* voltArr = engAcc->getVoltPtr();
+        if (!voltArr || !voltArr->valid()) return;
+        FDTD_FLOAT* dst = voltArr->data();
+        size_t count = std::min(data.size(), (size_t)voltArr->size());
+        for (size_t i = 0; i < count; i++) dst[i] = data[i];
+    }
+
+    /**
+     * Write current field data from GPU back into the C++ engine.
+     * Input: flat float array in NIJK layout (3 * Nx * Ny * Nz).
+     */
+    void setCurrents(const std::vector<float>& data) {
+        auto* eng = getEngine();
+        if (!eng) return;
+        auto* engAcc = reinterpret_cast<Engine_Accessor*>(eng);
+        auto* currArr = engAcc->getCurrPtr();
+        if (!currArr || !currArr->valid()) return;
+        FDTD_FLOAT* dst = currArr->data();
+        size_t count = std::min(data.size(), (size_t)currArr->size());
+        for (size_t i = 0; i < count; i++) dst[i] = data[i];
+    }
+
+    /**
+     * Set the engine's internal timestep counter (so processing knows the time).
+     */
+    void setTimestepCount(unsigned int ts) {
+        auto* eng = getEngine();
+        if (!eng) return;
+        reinterpret_cast<Engine_Accessor*>(eng)->setNumTS(ts);
+    }
+
+    /**
+     * Finalize the run (post-processing flush).
+     */
+    void finalizeRun() {
+        auto* acc = reinterpret_cast<openEMS_Accessor*>(ems_);
+        ProcessingArray* pa = acc->getPA();
+        if (pa) {
+            pa->FlushNext();
+            pa->Process();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Extension data extraction for GPU engine configuration
+    // -----------------------------------------------------------------------
+
+    /**
+     * Extract excitation signal (time-domain waveform).
+     * Returns [length, signal[0], signal[1], ...].
+     */
+    std::vector<float> getExcitationSignal() {
+        Operator* op = getOperator();
+        if (!op) return {};
+        Excitation* exc = op->GetExcitationSignal();
+        if (!exc) return {};
+        unsigned int len = exc->GetLength();
+        FDTD_FLOAT* sig = exc->GetVoltageSignal();
+        if (!sig || len == 0) return {};
+        std::vector<float> result(sig, sig + len);
+        return result;
+    }
+
+    /**
+     * Get excitation signal period (0 if not periodic).
+     */
+    float getExcitationPeriod() {
+        Operator* op = getOperator();
+        if (!op) return 0;
+        Excitation* exc = op->GetExcitationSignal();
+        return exc ? (float)exc->GetSignalPeriod() : 0;
+    }
+
+    /**
+     * Extract voltage excitation point data from the operator extension.
+     * Returns flat arrays: [count, amp0, amp1, ..., delay0, delay1, ...,
+     *                       dir0, dir1, ..., posX0, posX1, ..., posY0, ..., posZ0, ...]
+     * JS side unpacks these into separate typed arrays.
+     */
+    std::vector<float> getExcitationVoltages() {
+        Operator* op = getOperator();
+        if (!op) return {};
+
+        // Find the excitation extension
+        Operator_Ext_Excitation* excExt = nullptr;
+        for (size_t i = 0; i < op->GetNumberOfExtentions(); i++) {
+            excExt = dynamic_cast<Operator_Ext_Excitation*>(op->GetExtension(i));
+            if (excExt) break;
+        }
+        if (!excExt) return {};
+
+        auto* acc = reinterpret_cast<Excitation_Accessor*>(excExt);
+        unsigned int count = excExt->GetVoltCount();
+        if (count == 0) return {};
+
+        // Pack: [count, amp[count], delay[count], dir[count], pos[count]]
+        std::vector<float> result;
+        result.reserve(1 + 4 * count);
+        result.push_back((float)count);
+
+        // Amplitudes
+        FDTD_FLOAT* amp = acc->getVoltAmp();
+        for (unsigned int i = 0; i < count; i++)
+            result.push_back(amp[i]);
+        // Delays
+        unsigned int* delay = acc->getVoltDelay();
+        for (unsigned int i = 0; i < count; i++)
+            result.push_back((float)delay[i]);
+        // Directions
+        unsigned short* dir = acc->getVoltDir();
+        for (unsigned int i = 0; i < count; i++)
+            result.push_back((float)dir[i]);
+        // Linear positions in NIJK layout
+        unsigned int Nx = op->GetNumberOfLines(0);
+        unsigned int Ny = op->GetNumberOfLines(1);
+        unsigned int Nz = op->GetNumberOfLines(2);
+        for (unsigned int i = 0; i < count; i++) {
+            unsigned int d = dir[i];
+            unsigned int x = acc->getVoltIndex(0)[i];
+            unsigned int y = acc->getVoltIndex(1)[i];
+            unsigned int z = acc->getVoltIndex(2)[i];
+            float pos = (float)(d * Nx * Ny * Nz + x * Ny * Nz + y * Nz + z);
+            result.push_back(pos);
+        }
+
+        return result;
+    }
+
+    /**
+     * Get number of PML regions (UPML extensions).
+     */
+    unsigned int getPMLCount() {
+        Operator* op = getOperator();
+        if (!op) return 0;
+        unsigned int count = 0;
+        for (size_t i = 0; i < op->GetNumberOfExtentions(); i++) {
+            if (dynamic_cast<Operator_Ext_UPML*>(op->GetExtension(i)))
+                count++;
+        }
+        return count;
+    }
+
+    /**
+     * Extract PML region data for a specific PML index.
+     * Returns flat array: [startX, startY, startZ, numX, numY, numZ,
+     *                       vv[3*nx*ny*nz], vvfo[...], vvfn[...], ii[...], iifo[...], iifn[...]]
+     */
+    std::vector<float> getPMLRegion(unsigned int pmlIdx) {
+        Operator* op = getOperator();
+        if (!op) return {};
+
+        unsigned int idx = 0;
+        Operator_Ext_UPML* pml = nullptr;
+        for (size_t i = 0; i < op->GetNumberOfExtentions(); i++) {
+            pml = dynamic_cast<Operator_Ext_UPML*>(op->GetExtension(i));
+            if (pml) {
+                if (idx == pmlIdx) break;
+                idx++;
+                pml = nullptr;
+            }
+        }
+        if (!pml) return {};
+
+        auto* acc = reinterpret_cast<UPML_Accessor*>(pml);
+        std::vector<float> result;
+        // Header: startPos[3], numLines[3]
+        result.push_back((float)acc->startPos()[0]);
+        result.push_back((float)acc->startPos()[1]);
+        result.push_back((float)acc->startPos()[2]);
+        result.push_back((float)acc->numLines()[0]);
+        result.push_back((float)acc->numLines()[1]);
+        result.push_back((float)acc->numLines()[2]);
+
+        unsigned int total = 3 * acc->numLines()[0] * acc->numLines()[1] * acc->numLines()[2];
+
+        // Extract NIJK arrays via data() pointer
+        auto appendArray = [&](ArrayLib::ArrayNIJK<FDTD_FLOAT>& arr) {
+            FDTD_FLOAT* ptr = arr.data();
+            for (unsigned int i = 0; i < total; i++)
+                result.push_back(ptr[i]);
+        };
+
+        appendArray(acc->getVV());
+        appendArray(acc->getVVFO());
+        appendArray(acc->getVVFN());
+        appendArray(acc->getII());
+        appendArray(acc->getIIFO());
+        appendArray(acc->getIIFN());
+
+        return result;
+    }
+
+    /**
+     * Get number of Mur ABC regions.
+     */
+    unsigned int getMurCount() {
+        Operator* op = getOperator();
+        if (!op) return 0;
+        unsigned int count = 0;
+        for (size_t i = 0; i < op->GetNumberOfExtentions(); i++) {
+            if (dynamic_cast<Operator_Ext_Mur_ABC*>(op->GetExtension(i)))
+                count++;
+        }
+        return count;
+    }
+
+    /**
+     * Extract Mur ABC data for a specific index.
+     * Returns: [ny, top, lineNr, lineNr_shift, numLines0, numLines1,
+     *           coeffNyP[n0*n1], coeffNyPP[n0*n1]]
+     */
+    std::vector<float> getMurRegion(unsigned int murIdx) {
+        Operator* op = getOperator();
+        if (!op) return {};
+
+        unsigned int idx = 0;
+        Operator_Ext_Mur_ABC* mur = nullptr;
+        for (size_t i = 0; i < op->GetNumberOfExtentions(); i++) {
+            mur = dynamic_cast<Operator_Ext_Mur_ABC*>(op->GetExtension(i));
+            if (mur) {
+                if (idx == murIdx) break;
+                idx++;
+                mur = nullptr;
+            }
+        }
+        if (!mur) return {};
+
+        auto* acc = reinterpret_cast<Mur_Accessor*>(mur);
+        std::vector<float> result;
+        result.push_back((float)acc->getNY());
+        result.push_back(acc->getTop() ? 1.0f : 0.0f);
+        result.push_back((float)acc->getLineNr());
+        result.push_back((float)acc->getLineNrShift());
+        result.push_back((float)acc->getNumLines()[0]);
+        result.push_back((float)acc->getNumLines()[1]);
+
+        unsigned int n0 = acc->getNumLines()[0];
+        unsigned int n1 = acc->getNumLines()[1];
+
+        // Coefficients stored in ArrayIJ
+        FDTD_FLOAT* coeffP = acc->getCoeffNyP().data();
+        FDTD_FLOAT* coeffPP = acc->getCoeffNyPP().data();
+        for (unsigned int i = 0; i < n0 * n1; i++)
+            result.push_back(coeffP[i]);
+        for (unsigned int i = 0; i < n0 * n1; i++)
+            result.push_back(coeffPP[i]);
+
+        return result;
     }
 
     // -----------------------------------------------------------------------
@@ -371,10 +785,16 @@ public:
 
 private:
     openEMS* ems_;
+    ProcessFields* procField_ = nullptr;
+    double maxEnergy_ = 0;
+    double energyChange_ = 1;
 
     Operator* getOperator() {
-        // Use the accessor to reach the protected FDTD_Op member
         return reinterpret_cast<openEMS_Accessor*>(ems_)->getFDTD_Op();
+    }
+
+    Engine* getEngine() {
+        return reinterpret_cast<openEMS_Accessor*>(ems_)->getFDTD_Eng();
     }
 
     // Extract a full coefficient array (all 3 components, NIJK layout) as a flat vector.
@@ -428,6 +848,25 @@ EMSCRIPTEN_BINDINGS(openems) {
         .function("getVI", &OpenEMSWrapper::getVI)
         .function("getII", &OpenEMSWrapper::getII)
         .function("getIV", &OpenEMSWrapper::getIV)
+        // Hybrid GPU/WASM stepping API
+        .function("initRun", &OpenEMSWrapper::initRun)
+        .function("doProcess", &OpenEMSWrapper::doProcess)
+        .function("getTimestepCount", &OpenEMSWrapper::getTimestepCount)
+        .function("getMaxTimesteps", &OpenEMSWrapper::getMaxTimesteps)
+        .function("getVoltagePtr", &OpenEMSWrapper::getVoltagePtr)
+        .function("getCurrentPtr", &OpenEMSWrapper::getCurrentPtr)
+        .function("setVoltages", &OpenEMSWrapper::setVoltages)
+        .function("setCurrents", &OpenEMSWrapper::setCurrents)
+        .function("setTimestepCount", &OpenEMSWrapper::setTimestepCount)
+        .function("finalizeRun", &OpenEMSWrapper::finalizeRun)
+        // Extension data extraction for GPU
+        .function("getExcitationSignal", &OpenEMSWrapper::getExcitationSignal)
+        .function("getExcitationPeriod", &OpenEMSWrapper::getExcitationPeriod)
+        .function("getExcitationVoltages", &OpenEMSWrapper::getExcitationVoltages)
+        .function("getPMLCount", &OpenEMSWrapper::getPMLCount)
+        .function("getPMLRegion", &OpenEMSWrapper::getPMLRegion)
+        .function("getMurCount", &OpenEMSWrapper::getMurCount)
+        .function("getMurRegion", &OpenEMSWrapper::getMurRegion)
         // HDF5 field data reading for NF2FF
         .function("readHDF5Mesh", &OpenEMSWrapper::readHDF5Mesh)
         .function("getHDF5MeshType", &OpenEMSWrapper::getHDF5MeshType)

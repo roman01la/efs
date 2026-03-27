@@ -112,6 +112,282 @@ function createMockWASMInstance(Nx, Ny, Nz) {
     };
 }
 
+function createTrackedEmbindVector(arr, name, stats, options = {}) {
+    const vec = {
+        size() { return arr.length; },
+        get(i) {
+            stats.getCalls[name] = (stats.getCalls[name] || 0) + 1;
+            return arr[i];
+        },
+        delete() {
+            stats.deleted[name] = true;
+        },
+    };
+
+    if (options.fastPath) {
+        vec.toFloat32Array = function () {
+            if (!options.fastPath) {
+                throw new Error(`Fast path not available for ${name}`);
+            }
+            stats.fastPathUsed = true;
+            return new Float32Array(arr);
+        };
+    }
+
+    return vec;
+}
+
+function createMockWASMInstanceWithStats(Nx, Ny, Nz, options = {}) {
+    const coeffs = createFreeSpaceCoefficients(Nx, Ny, Nz);
+    const stats = {
+        deleted: {},
+        getCalls: {},
+        fastPathUsed: false,
+    };
+
+    const gridSizeVec = createTrackedEmbindVector(new Uint32Array([Nx, Ny, Nz]), 'gridSize', stats);
+    const vvVec = createTrackedEmbindVector(coeffs.vv, 'vv', stats, options);
+    const viVec = createTrackedEmbindVector(coeffs.vi, 'vi', stats, options);
+    const iiVec = createTrackedEmbindVector(coeffs.ii, 'ii', stats, options);
+    const ivVec = createTrackedEmbindVector(coeffs.iv, 'iv', stats, options);
+
+    const instance = {
+        _stats: stats,
+        getGridSize() { return gridSizeVec; },
+        getVV() { return vvVec; },
+        getVI() {
+            if (options.throwOnGetter === 'getVI') {
+                throw new Error('getVI failed');
+            }
+            return viVec;
+        },
+        getII() { return iiVec; },
+        getIV() { return ivVec; },
+    };
+
+    return instance;
+}
+
+function installFakeGPUGlobals() {
+    if (!globalThis.GPUBufferUsage) {
+        globalThis.GPUBufferUsage = {
+            STORAGE: 1,
+            COPY_SRC: 2,
+            COPY_DST: 4,
+            UNIFORM: 8,
+            MAP_READ: 16,
+        };
+    }
+    if (!globalThis.GPUShaderStage) {
+        globalThis.GPUShaderStage = { COMPUTE: 1 };
+    }
+    if (!globalThis.GPUMapMode) {
+        globalThis.GPUMapMode = { READ: 1 };
+    }
+}
+
+let fakeBufferId = 0;
+
+function createFakeBuffer(size) {
+    const mapped = new ArrayBuffer(size || 0);
+    return {
+        _id: ++fakeBufferId,
+        size: size || 0,
+        getMappedRange() { return mapped; },
+        unmap() {},
+        destroy() {},
+        async mapAsync() {},
+    };
+}
+
+function createFakePipeline(label, deviceId = 'device-1') {
+    return {
+        label,
+        _deviceId: deviceId,
+        getBindGroupLayout(index) {
+            return { label, index };
+        },
+    };
+}
+
+function createInstrumentedDevice(stats, deviceId = 'device-1') {
+    return {
+        _deviceId: deviceId,
+        queue: {
+            writeBuffer() {
+                stats.writeBufferCalls++;
+            },
+            submit() {
+                stats.submitCalls++;
+            },
+            async onSubmittedWorkDone() {
+                stats.onSubmittedWorkDoneCalls++;
+            },
+        },
+        createBuffer({ size = 0 }) {
+            stats.createBufferCalls++;
+            return createFakeBuffer(size);
+        },
+        createBindGroupLayout(descriptor) {
+            stats.createBindGroupLayoutCalls++;
+            return { descriptor };
+        },
+        createShaderModule({ code }) {
+            stats.createShaderModuleCalls++;
+            return { code };
+        },
+        async createComputePipelineAsync({ compute }) {
+            stats.createComputePipelineAsyncCalls++;
+            return createFakePipeline(compute.entryPoint, deviceId);
+        },
+        createComputePipeline({ compute }) {
+            stats.createComputePipelineCalls++;
+            return createFakePipeline(compute.entryPoint, deviceId);
+        },
+        createBindGroup({ layout, entries }) {
+            stats.createBindGroupCalls++;
+            return { layout, entries };
+        },
+        createCommandEncoder() {
+            stats.createCommandEncoderCalls++;
+            return {
+                beginComputePass() {
+                    stats.beginComputePassCalls++;
+                    return {
+                        setPipeline() {},
+                        setBindGroup() {},
+                        dispatchWorkgroups(...dims) {
+                            stats.dispatchWorkgroupsCalls++;
+                            stats.dispatchWorkgroupsDims.push(dims);
+                        },
+                        end() {
+                            stats.endComputePassCalls++;
+                        },
+                    };
+                },
+                finish() {
+                    stats.finishCalls++;
+                    return { encoded: true };
+                },
+            };
+        },
+        destroy() {},
+        lost: Promise.resolve({ message: 'ok' }),
+    };
+}
+
+function createInstrumentedEngine({
+    excitation = false,
+    realExcitation = false,
+    tfsf = false,
+    realTfsf = false,
+    realCore = false,
+    deviceId = 'device-1',
+} = {}) {
+    installFakeGPUGlobals();
+    const stats = {
+        writeBufferCalls: 0,
+        submitCalls: 0,
+        onSubmittedWorkDoneCalls: 0,
+        createBufferCalls: 0,
+        createBindGroupLayoutCalls: 0,
+        createShaderModuleCalls: 0,
+        createComputePipelineAsyncCalls: 0,
+        createComputePipelineCalls: 0,
+        createBindGroupCalls: 0,
+        createCommandEncoderCalls: 0,
+        beginComputePassCalls: 0,
+        endComputePassCalls: 0,
+        dispatchWorkgroupsCalls: 0,
+        dispatchWorkgroupsDims: [],
+        finishCalls: 0,
+    };
+    const engine = new WebGPUEngine();
+    engine.device = createInstrumentedDevice(stats, deviceId);
+    engine.numLines = [8, 8, 8];
+    engine.totalCells = 8 * 8 * 8;
+    engine.paramsBuffer = createFakeBuffer(32);
+    engine.excParamsBuffer = createFakeBuffer(16);
+    engine.voltBuffer = createFakeBuffer(16);
+    engine.currBuffer = createFakeBuffer(16);
+    engine.vvBuffer = createFakeBuffer(16);
+    engine.viBuffer = createFakeBuffer(16);
+    engine.iiBuffer = createFakeBuffer(16);
+    engine.ivBuffer = createFakeBuffer(16);
+    engine.numTS = 0;
+    engine.excitationConfigured = excitation;
+    engine._excSignalLength = 8;
+    engine._excPeriod = 0;
+    engine._excCount = 1;
+    engine.excitationPipeline = createFakePipeline('apply_excitation');
+    engine.excBindGroup = { label: 'excitation' };
+    engine.excSignalBuffer = createFakeBuffer(16);
+    engine.excDelayBuffer = createFakeBuffer(16);
+    engine.excAmpBuffer = createFakeBuffer(16);
+    engine.excDirBuffer = createFakeBuffer(16);
+    engine.excPosBuffer = createFakeBuffer(16);
+
+    if (tfsf) {
+        engine.tfsfConfigured = true;
+        engine.tfsfParamsBuffer = createFakeBuffer(32);
+        engine._tfsfCurrParamsBuffer = createFakeBuffer(32);
+        engine.tfsfVoltPipeline = createFakePipeline('tfsf_apply_voltage');
+        engine.tfsfCurrPipeline = createFakePipeline('tfsf_apply_voltage');
+        engine.tfsfVoltBindGroup = { label: 'tfsf-volt' };
+        engine.tfsfCurrBindGroup = { label: 'tfsf-curr' };
+        engine._tfsfCurrCoreBindGroup = { label: 'tfsf-curr-core' };
+        engine._tfsfSignalLength = 8;
+        engine._tfsfPeriod = 0;
+        engine._tfsfNumVoltPoints = 1;
+        engine._tfsfNumCurrPoints = 1;
+    }
+
+    const noop = () => {};
+    engine.stepSteadyState = noop;
+    engine.stepPML = noop;
+    engine.stepVoltADE = noop;
+    engine.stepMurPre = noop;
+    engine.stepRLC = noop;
+    if (!realCore) engine.stepVoltage = noop;
+    if (!realTfsf) engine.stepTFSFVoltage = noop;
+    engine.stepMurPost = noop;
+    if (!realExcitation) engine.applyExcitation = noop;
+    engine.stepMurApply = noop;
+    engine.stepCurrADE = noop;
+    if (!realCore) engine.stepCurrent = noop;
+    if (!realTfsf) engine.stepTFSFCurrent = noop;
+
+    return { engine, stats };
+}
+
+function createLorentzTestConfig() {
+    return {
+        orders: [{
+            numCells: 2,
+            hasLorentz: false,
+            directions: [{
+                dir: 0,
+                pos_idx: new Uint32Array([5, 9]),
+                v_int_ADE: new Float32Array([0.8, 0.85]),
+                v_ext_ADE: new Float32Array([0.2, 0.15]),
+                v_Lor_ADE: new Float32Array(2),
+                i_int_ADE: new Float32Array([0.7, 0.75]),
+                i_ext_ADE: new Float32Array([0.3, 0.25]),
+                i_Lor_ADE: new Float32Array(2),
+            }],
+        }],
+    };
+}
+
+function createTFSFTestConfig() {
+    return {
+        signal: new Float32Array([1, 0.5, 0.25, 0]),
+        period: 0,
+        voltagePoints: [{ field_idx: 3, delay_int: 0, delay_frac: 0, amp: 1 }],
+        currentPoints: [{ field_idx: 7, delay_int: 1, delay_frac: 0.25, amp: 0.5 }],
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: ArrayNIJK indexing
 // ---------------------------------------------------------------------------
@@ -596,10 +872,12 @@ section('WGSL Shader Syntax Validation');
         'Voltage WGSL has bind group 0');
     assert(UPDATE_VOLTAGE_WGSL.includes('@group(1) @binding(0)'),
         'Voltage WGSL has bind group 1');
-    assert(UPDATE_VOLTAGE_WGSL.includes('fn idx('), 'Voltage WGSL has idx function');
-    assert(UPDATE_VOLTAGE_WGSL.includes('fn idx_ym1('), 'Voltage WGSL has idx_ym1 boundary helper');
-    assert(UPDATE_VOLTAGE_WGSL.includes('fn idx_zm1('), 'Voltage WGSL has idx_zm1 boundary helper');
-    assert(UPDATE_VOLTAGE_WGSL.includes('fn idx_xm1('), 'Voltage WGSL has idx_xm1 boundary helper');
+    assert(UPDATE_VOLTAGE_WGSL.includes('let planeStride = params.numLines.y * params.numLines.z;'),
+        'Voltage WGSL precomputes plane stride for index reuse');
+    assert(UPDATE_VOLTAGE_WGSL.includes('let componentStride = params.numLines.x * planeStride;'),
+        'Voltage WGSL precomputes component stride for index reuse');
+    assert(!UPDATE_VOLTAGE_WGSL.includes('fn idx_ym1('),
+        'Voltage WGSL no longer relies on idx_ym1 helper for boundary access');
 
     // Current shader
     assert(UPDATE_CURRENT_WGSL.includes('struct Params'), 'Current WGSL has Params struct');
@@ -609,10 +887,14 @@ section('WGSL Shader Syntax Validation');
         'Current WGSL has update_currents entry point');
     assert(UPDATE_CURRENT_WGSL.includes('@group(2) @binding(0)'),
         'Current WGSL has bind group 2 for ii/iv coefficients');
-    assert(UPDATE_CURRENT_WGSL.includes('params.numLines.y - 1u'),
+    assert(UPDATE_CURRENT_WGSL.includes('numLines.y - 1u'),
         'Current WGSL has Y-1 bound check');
-    assert(UPDATE_CURRENT_WGSL.includes('params.numLines.z - 1u'),
+    assert(UPDATE_CURRENT_WGSL.includes('numLines.z - 1u'),
         'Current WGSL has Z-1 bound check');
+    assert(UPDATE_CURRENT_WGSL.includes('let planeStride = params.numLines.y * params.numLines.z;'),
+        'Current WGSL precomputes plane stride for index reuse');
+    assert(UPDATE_CURRENT_WGSL.includes('let componentStride = params.numLines.x * planeStride;'),
+        'Current WGSL precomputes component stride for index reuse');
 
     // Excitation shader
     assert(EXCITATION_WGSL.includes('struct ExcParams'), 'Excitation WGSL has ExcParams struct');
@@ -2602,6 +2884,431 @@ section('WASM-GPU Bridge — configureFromWASM Full Pipeline');
         if (!isFinite(engine.volt[i])) { allFinite = false; break; }
     }
     assert(allFinite, 'WASM-configured engine: all fields finite');
+}
+
+// ---------------------------------------------------------------------------
+// Perf Harness: instrumentation helpers for later perf-budget assertions
+// ---------------------------------------------------------------------------
+
+section('Perf Harness — WebGPU Instrumentation');
+
+{
+    const { engine } = createInstrumentedEngine();
+
+    assert(JSON.stringify(engine.WG_SIZE_3D) === JSON.stringify([4, 1, 16]),
+        'Default core 3D workgroup shape uses the latest tuned 4x1x16 value');
+    assert(JSON.stringify(engine._getVoltage3DWorkgroupSize()) === JSON.stringify([4, 1, 16]),
+        'Voltage workgroup size defaults to the shared tuned 3D workgroup shape');
+    assert(JSON.stringify(engine._getCurrent3DWorkgroupSize()) === JSON.stringify([4, 1, 16]),
+        'Current workgroup size defaults to the shared tuned 3D workgroup shape');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine({ excitation: true });
+    await engine.iterate(1);
+
+    assert(stats.writeBufferCalls === 2,
+        'Perf harness counts params + excitation writeBuffer calls during iterate(1)');
+    assert(stats.createCommandEncoderCalls === 1,
+        'Perf harness counts command encoder creation during iterate(1)');
+    assert(engine.numTS === 1, 'Perf harness iterate(1) advances timestep count');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine({
+        excitation: true,
+        realExcitation: true,
+        realCore: true,
+    });
+    await engine._createPipelines();
+    engine._createBindGroups();
+    await engine.iterate(1);
+
+    assert(stats.writeBufferCalls === 2,
+        'Excitation path writes params buffers at most once per timestep');
+    assert(stats.beginComputePassCalls === 1,
+        'Core+excitation iterate coalesces no-extension dispatches into one compute pass');
+    assert(stats.createCommandEncoderCalls === 1,
+        'Core+excitation iterate creates only one command encoder in the shared-pass fast path');
+    assert(stats.submitCalls === 1,
+        'Core+excitation iterate submits only one command buffer in the shared-pass fast path');
+    assert(stats.finishCalls === 1,
+        'Core+excitation iterate finishes only one command buffer in the shared-pass fast path');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine();
+    await engine._createPipelines();
+
+    assert(stats.createShaderModuleCalls === 4,
+        'Perf harness observes current shader module creation count');
+    assert(stats.createComputePipelineAsyncCalls === 4,
+        'Perf harness observes current compute pipeline creation count');
+
+    const pipeline = createFakePipeline('core');
+    engine._coreBindGroupFor(pipeline);
+    engine._coreBindGroupFor(pipeline);
+    assert(stats.createBindGroupCalls === 1,
+        'Perf harness observes current core bind-group cache behavior');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine({
+        tfsf: true,
+        realTfsf: true,
+    });
+    await engine.iterate(1);
+
+    assert(stats.writeBufferCalls === 3,
+        'TFSF path updates core + voltage/current TFSF params once per timestep');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine({ realCore: true });
+    await engine._createPipelines();
+    engine._createBindGroups();
+    engine.stepPML = WebGPUEngine.prototype.stepPML.bind(engine);
+
+    const pmlTotal = 3 * 2 * 8 * 8;
+    engine.configurePML([
+        {
+            startPos: [0, 0, 0],
+            numLines: [2, 8, 8],
+            vv: new Float32Array(pmlTotal).fill(0.9),
+            vvfo: new Float32Array(pmlTotal).fill(0.1),
+            vvfn: new Float32Array(pmlTotal).fill(0.95),
+            ii: new Float32Array(pmlTotal).fill(0.9),
+            iifo: new Float32Array(pmlTotal).fill(0.1),
+            iifn: new Float32Array(pmlTotal).fill(0.95),
+        },
+        {
+            startPos: [6, 0, 0],
+            numLines: [2, 8, 8],
+            vv: new Float32Array(pmlTotal).fill(0.9),
+            vvfo: new Float32Array(pmlTotal).fill(0.1),
+            vvfn: new Float32Array(pmlTotal).fill(0.95),
+            ii: new Float32Array(pmlTotal).fill(0.9),
+            iifo: new Float32Array(pmlTotal).fill(0.1),
+            iifn: new Float32Array(pmlTotal).fill(0.95),
+        },
+    ]);
+
+    await engine.iterate(1);
+
+    assert(stats.beginComputePassCalls === 6,
+        'Multi-region PML coalesces each mode into one compute pass during iterate');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine({ realCore: true });
+    await engine._createPipelines();
+    engine._createBindGroups();
+    engine.stepPML = WebGPUEngine.prototype.stepPML.bind(engine);
+    engine.WG_SIZE_3D = [4, 1, 16];
+
+    const pmlTotal = 3 * 2 * 8 * 8;
+    engine.configurePML([
+        {
+            startPos: [0, 0, 0],
+            numLines: [2, 8, 8],
+            vv: new Float32Array(pmlTotal).fill(0.9),
+            vvfo: new Float32Array(pmlTotal).fill(0.1),
+            vvfn: new Float32Array(pmlTotal).fill(0.95),
+            ii: new Float32Array(pmlTotal).fill(0.9),
+            iifo: new Float32Array(pmlTotal).fill(0.1),
+            iifn: new Float32Array(pmlTotal).fill(0.95),
+        },
+    ]);
+
+    const encoder = engine.device.createCommandEncoder();
+    engine.stepPML(encoder, 0);
+
+    assert(JSON.stringify(stats.dispatchWorkgroupsDims[0]) === JSON.stringify([1, 2, 2]),
+        'PML dispatch sizing stays aligned with the fixed 4x4x4 PML shader workgroup');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine({ realCore: true });
+    await engine._createPipelines();
+    engine._createBindGroups();
+    engine.stepVoltADE = WebGPUEngine.prototype.stepVoltADE.bind(engine);
+    engine.stepCurrADE = WebGPUEngine.prototype.stepCurrADE.bind(engine);
+
+    const makeDirection = (dir, offset) => ({
+        dir,
+        pos_idx: new Uint32Array([offset, offset + 1]),
+        v_int_ADE: new Float32Array([0.8, 0.85]),
+        v_ext_ADE: new Float32Array([0.2, 0.15]),
+        v_Lor_ADE: new Float32Array(2),
+        i_int_ADE: new Float32Array([0.7, 0.75]),
+        i_ext_ADE: new Float32Array([0.3, 0.25]),
+        i_Lor_ADE: new Float32Array(2),
+    });
+
+    engine.configureLorentzADE({
+        orders: [
+            { numCells: 2, hasLorentz: false, directions: [makeDirection(0, 5), makeDirection(1, 9), makeDirection(2, 13)] },
+            { numCells: 2, hasLorentz: true, directions: [makeDirection(0, 17), makeDirection(1, 21), makeDirection(2, 25)] },
+        ],
+    });
+
+    await engine.iterate(1);
+
+    assert(stats.beginComputePassCalls === 4,
+        'Multi-direction ADE coalesces voltage and current updates into one pass each during iterate');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine({ realCore: true });
+    await engine._createPipelines();
+    engine._createBindGroups();
+    const bindGroupCallsBeforeIterate = stats.createBindGroupCalls;
+
+    await engine.iterate(1);
+
+    assert(stats.createBindGroupCalls === bindGroupCallsBeforeIterate,
+        'Core iterate path does not allocate bind groups after initialization');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine({
+        excitation: true,
+        realExcitation: true,
+    });
+    await engine._createPipelines();
+    engine._createExcitationBindGroup();
+    const bindGroupCallsBeforeIterate = stats.createBindGroupCalls;
+
+    await engine.iterate(1);
+
+    assert(stats.createBindGroupCalls === bindGroupCallsBeforeIterate,
+        'Excitation iterate path does not allocate special core bind groups during dispatch');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine();
+    await engine._createPipelines();
+    const shaderCallsAfterFirstInit = stats.createShaderModuleCalls;
+    const pipelineCallsAfterFirstInit = stats.createComputePipelineAsyncCalls;
+
+    await engine._createPipelines();
+
+    assert(stats.createShaderModuleCalls === shaderCallsAfterFirstInit,
+        'Core pipeline setup reuses shader modules across repeated initialization');
+    assert(stats.createComputePipelineAsyncCalls === pipelineCallsAfterFirstInit,
+        'Core pipeline setup reuses async pipelines across repeated initialization');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine();
+    await engine._createPipelines();
+    const firstVoltagePipeline = engine.voltagePipeline;
+    const firstCurrentPipeline = engine.currentPipeline;
+    const shaderCallsAfterFirstInit = stats.createShaderModuleCalls;
+    const pipelineCallsAfterFirstInit = stats.createComputePipelineAsyncCalls;
+
+    engine.WG_SIZE_3D = [8, 4, 2];
+    await engine._createPipelines();
+
+    assert(engine.voltagePipeline !== firstVoltagePipeline,
+        'Core pipeline setup creates a distinct voltage pipeline for a new 3D workgroup shape');
+    assert(engine.currentPipeline !== firstCurrentPipeline,
+        'Core pipeline setup creates a distinct current pipeline for a new 3D workgroup shape');
+    assert(stats.createShaderModuleCalls === shaderCallsAfterFirstInit + 2,
+        'Changing core 3D workgroup shape recompiles only the voltage/current shader modules');
+    assert(stats.createComputePipelineAsyncCalls === pipelineCallsAfterFirstInit + 2,
+        'Changing core 3D workgroup shape recreates only the voltage/current async pipelines');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine();
+    await engine._createPipelines();
+    const firstVoltagePipeline = engine.voltagePipeline;
+    const firstCurrentPipeline = engine.currentPipeline;
+    const shaderCallsAfterFirstInit = stats.createShaderModuleCalls;
+    const pipelineCallsAfterFirstInit = stats.createComputePipelineAsyncCalls;
+
+    engine.WG_SIZE_3D_VOLTAGE = [8, 4, 2];
+    await engine._createPipelines();
+
+    assert(engine.voltagePipeline !== firstVoltagePipeline,
+        'Changing only the voltage 3D workgroup shape rebuilds the voltage pipeline');
+    assert(engine.currentPipeline === firstCurrentPipeline,
+        'Changing only the voltage 3D workgroup shape reuses the current pipeline');
+    assert(stats.createShaderModuleCalls === shaderCallsAfterFirstInit + 1,
+        'Changing only the voltage 3D workgroup shape recompiles just the voltage shader module');
+    assert(stats.createComputePipelineAsyncCalls === pipelineCallsAfterFirstInit + 1,
+        'Changing only the voltage 3D workgroup shape recreates just the voltage async pipeline');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine({ realCore: true });
+    await engine._createPipelines();
+    engine._createBindGroups();
+    engine.WG_SIZE_3D_VOLTAGE = [4, 2, 1];
+    engine.WG_SIZE_3D_CURRENT = [2, 1, 4];
+
+    engine.stepVoltage();
+    engine.stepCurrent();
+
+    assert(JSON.stringify(stats.dispatchWorkgroupsDims[0]) === JSON.stringify([2, 4, 8]),
+        'Voltage dispatch uses the configured voltage-specific 3D workgroup shape');
+    assert(JSON.stringify(stats.dispatchWorkgroupsDims[1]) === JSON.stringify([4, 7, 2]),
+        'Current dispatch uses the configured current-specific 3D workgroup shape');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine();
+    const config = createLorentzTestConfig();
+
+    engine.configureLorentzADE(config);
+    const shaderCallsAfterFirstConfigure = stats.createShaderModuleCalls;
+    const pipelineCallsAfterFirstConfigure = stats.createComputePipelineCalls;
+
+    engine.configureLorentzADE(config);
+
+    assert(stats.createShaderModuleCalls === shaderCallsAfterFirstConfigure,
+        'Lorentz ADE reconfiguration reuses shader modules');
+    assert(stats.createComputePipelineCalls === pipelineCallsAfterFirstConfigure,
+        'Lorentz ADE reconfiguration reuses identical pipelines');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine();
+    const config = createTFSFTestConfig();
+
+    engine.configureTFSF(config);
+    const shaderCallsAfterFirstConfigure = stats.createShaderModuleCalls;
+    const pipelineCallsAfterFirstConfigure = stats.createComputePipelineCalls;
+
+    engine.configureTFSF(config);
+
+    assert(stats.createShaderModuleCalls === shaderCallsAfterFirstConfigure,
+        'TFSF reconfiguration reuses shader modules');
+    assert(stats.createComputePipelineCalls === pipelineCallsAfterFirstConfigure,
+        'TFSF reconfiguration reuses identical pipelines');
+}
+
+{
+    const { engine } = createInstrumentedEngine({ realCore: true });
+    await engine._createPipelines();
+    engine._createBindGroups();
+
+    const firstCoreBindGroup = engine._coreBindGroupFor(engine.voltagePipeline);
+    const firstVoltBufferId = firstCoreBindGroup.entries[0].resource.buffer._id;
+
+    engine.voltBuffer = createFakeBuffer(16);
+    engine.currBuffer = createFakeBuffer(16);
+    engine.paramsBuffer = createFakeBuffer(32);
+    engine._createBindGroups();
+
+    const refreshedCoreBindGroup = engine._coreBindGroupFor(engine.voltagePipeline);
+    assert(refreshedCoreBindGroup.entries[0].resource.buffer === engine.voltBuffer,
+        'Core bind-group cache refreshes voltage buffer after buffer replacement');
+    assert(refreshedCoreBindGroup.entries[1].resource.buffer === engine.currBuffer,
+        'Core bind-group cache refreshes current buffer after buffer replacement');
+    assert(refreshedCoreBindGroup.entries[2].resource.buffer === engine.paramsBuffer,
+        'Core bind-group cache refreshes params buffer after buffer replacement');
+    assert(refreshedCoreBindGroup.entries[0].resource.buffer._id !== firstVoltBufferId,
+        'Core bind-group cache does not retain stale voltage buffer identity');
+}
+
+{
+    const { engine, stats } = createInstrumentedEngine({ deviceId: 'device-a' });
+    await engine._createPipelines();
+    const firstVoltagePipeline = engine.voltagePipeline;
+
+    engine.device = createInstrumentedDevice(stats, 'device-b');
+    await engine._createPipelines();
+
+    assert(engine.voltagePipeline !== firstVoltagePipeline,
+        'Pipeline cache is invalidated when device changes');
+    assert(engine.voltagePipeline._deviceId === 'device-b',
+        'Pipeline cache rebuilds pipelines for the current device');
+}
+
+section('Perf Regression Gate');
+
+{
+    const { engine: excitationEngine, stats: excitationStats } = createInstrumentedEngine({
+        excitation: true,
+        realExcitation: true,
+    });
+    await excitationEngine.iterate(1);
+
+    const { engine: tfsfEngine, stats: tfsfStats } = createInstrumentedEngine({
+        tfsf: true,
+        realTfsf: true,
+    });
+    await tfsfEngine.iterate(1);
+
+    const { engine: coreEngine, stats: coreStats } = createInstrumentedEngine({ realCore: true });
+    await coreEngine._createPipelines();
+    coreEngine._createBindGroups();
+    const coreBindGroupBaseline = coreStats.createBindGroupCalls;
+    await coreEngine.iterate(1);
+
+    assert(excitationStats.writeBufferCalls <= 2,
+        'Perf gate: excitation path stays within 2 uniform writes per timestep');
+    assert(tfsfStats.writeBufferCalls <= 3,
+        'Perf gate: TFSF path stays within 3 uniform writes per timestep');
+    assert(coreStats.createBindGroupCalls === coreBindGroupBaseline,
+        'Perf gate: initialized core path allocates no bind groups during iterate');
+}
+
+// ---------------------------------------------------------------------------
+// Test: configureFromWASM cleans up embind vectors on mid-extraction failure
+// ---------------------------------------------------------------------------
+
+section('WASM-GPU Bridge — Cleanup on Getter Failure');
+
+{
+    const mockEms = createMockWASMInstanceWithStats(4, 3, 3, { throwOnGetter: 'getVI' });
+    const bridge = new WASMGPUBridge();
+
+    let threw = false;
+    let message = '';
+    try {
+        bridge.configureFromWASM(mockEms);
+    } catch (e) {
+        threw = true;
+        message = e.message;
+    }
+
+    assert(threw, 'configureFromWASM throws when a later coefficient getter fails');
+    assert(message.includes('getVI failed'), 'configureFromWASM preserves original getter failure');
+    assert(mockEms._stats.deleted.gridSize === true,
+        'configureFromWASM releases gridSize vector on getter failure');
+    assert(mockEms._stats.deleted.vv === true,
+        'configureFromWASM releases already-created coefficient vectors on getter failure');
+}
+
+// ---------------------------------------------------------------------------
+// Test: configureFromWASM uses fast bulk conversion path when available
+// ---------------------------------------------------------------------------
+
+section('WASM-GPU Bridge — Fast Vector Conversion Path');
+
+{
+    const fastMock = createMockWASMInstanceWithStats(4, 3, 3, { fastPath: true });
+    const bridge = new WASMGPUBridge();
+    bridge.configureFromWASM(fastMock);
+
+    assert(fastMock._stats.fastPathUsed === true,
+        'configureFromWASM prefers vector bulk-conversion fast path when available');
+    assert((fastMock._stats.getCalls.vv || 0) === 0,
+        'configureFromWASM fast path avoids per-element vv.get(i) calls');
+}
+
+{
+    const fallbackMock = createMockWASMInstanceWithStats(4, 3, 3);
+    const bridge = new WASMGPUBridge();
+    bridge.configureFromWASM(fallbackMock);
+
+    assert(fallbackMock._stats.fastPathUsed === false,
+        'configureFromWASM fallback path remains available when fast path is absent');
+    assert((fallbackMock._stats.getCalls.vv || 0) > 0,
+        'configureFromWASM fallback path still reads vv values correctly');
 }
 
 // ---------------------------------------------------------------------------

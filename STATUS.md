@@ -11,22 +11,32 @@ openEMS electromagnetic FDTD solver running entirely client-side in a browser vi
 ```bash
 npm run build:deps    # one-time: cross-compile dependencies (~10 min)
 npm run build         # build WASM module (~2 min)
-npm test              # run all tests (667 tests)
+npm test              # run all tests (787 tests)
 npm run test:browser  # headless Chrome WebGPU tests (52 tests)
 ```
 
 ## Test Suite
 
 ```
-npm test                 # 715 tests — all Node.js suites
+npm test                 # 787 tests — all Node.js suites
   npm run test:wasm      # 101 — WASM FDTD, native comparison, engine equivalence, HDF5
-  npm run test:api       # 326 — simulation API, ports, NF2FF, SAR, readFromXML, visualization
-  npm run test:gpu       # 288 — CPU FDTD reference, extensions, dispatch order parity
+  npm run test:api       # 322 — simulation API, ports, NF2FF, SAR, readFromXML, visualization
+  npm run test:gpu       # 342 — CPU FDTD reference, extensions, dispatch order parity, perf guards
+  npm run test:examples  #  22 — patch antenna (4), MSL notch filter (8), rect waveguide (10)
 npm run test:browser     #  52 — Chrome headless: shaders, GPU-vs-CPU, benchmarks
 npm run test:browser:all # 207 — unified browser suite: all modules in Chrome
 npm run test:count       # validate test counts match STATUS.md
 npm run test:all         # everything
 ```
+
+## Performance Safeguards
+
+- `tests/test_webgpu.mjs` now includes structural perf regression gates for:
+  - WASM bridge fast-path extraction and cleanup safety
+  - WebGPU shader/pipeline cache reuse
+  - no duplicate excitation/TFSF uniform uploads in the same timestep
+  - no core bind-group allocation during `iterate()` after initialization
+- These checks use deterministic operation counts instead of timing-only thresholds.
 
 ## Performance (Chrome 146, Apple Silicon)
 
@@ -66,8 +76,9 @@ GPU vs CPU: max diff **2.4e-7** (f32 precision limit).
 - 3 ported examples: Patch Antenna, MSL Notch Filter, Rect Waveguide
   - Each with standalone HTML page, SVG plots, validation test
 - Browser UX shell (`app/index.html`): 3-panel editor/simulation/results
-  - Example selector, engine type picker, run/stop, console log
-  - S-parameter and impedance SVG plots, tabbed results
+  - Example selector, engine type picker (WebGPU/WASM), run/stop, console log
+  - WebGPU hybrid engine: GPU FDTD loop + WASM probe/dump processing
+  - S-parameter, impedance, and radiation pattern SVG plots, tabbed results
 - URL sharing (`src/url-share.mjs`): deflate+base64url for small configs,
   IndexedDB fallback for large configs, back/forward navigation
 

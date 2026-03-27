@@ -10,8 +10,8 @@ import { execSync } from 'node:child_process';
 
 const suites = [
   { name: 'test:wasm', cmd: 'node tests/test_wasm.mjs', expectedMin: 101 },
-  { name: 'test:api', cmd: 'node tests/test_api.mjs', expectedMin: 326 },
-  { name: 'test:gpu', cmd: 'node tests/test_webgpu.mjs', expectedMin: 288 },
+  { name: 'test:api', cmd: 'node tests/test_api.mjs', expectedMin: 322 },
+  { name: 'test:gpu', cmd: 'node tests/test_webgpu.mjs', expectedMin: 342 },
 ];
 
 let allOk = true;
