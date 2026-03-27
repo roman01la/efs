@@ -1717,8 +1717,9 @@ export class WebGPUEngine {
      * @param {number} numSteps - number of timesteps to run
      */
     async iterate(numSteps) {
+        const useFastPath = this._canUseSimpleCorePassFastPath();
+
         for (let step = 0; step < numSteps; step++) {
-            // Update uniforms BEFORE encoding so the command buffer sees correct values
             this._updateParams();
             if (this.excitationConfigured) {
                 this._updateExcParams();
@@ -1726,7 +1727,7 @@ export class WebGPUEngine {
 
             const encoder = this.device.createCommandEncoder();
 
-            if (this._canUseSimpleCorePassFastPath()) {
+            if (useFastPath) {
                 const pass = encoder.beginComputePass();
                 this.stepVoltage(null, { pass });
                 if (this.excitationConfigured) {
@@ -1734,42 +1735,39 @@ export class WebGPUEngine {
                 }
                 this.stepCurrent(null, { pass });
                 pass.end();
-                this.device.queue.submit([encoder.finish()]);
-                this.numTS++;
-                continue;
+            } else {
+                // === PRE-VOLTAGE (C++ DoPreVoltageUpdates) ===
+                this.stepSteadyState(encoder);  // Priority +2M
+                this.stepPML(encoder, 0);       // Priority +1M
+                this.stepVoltADE(encoder);      // Priority 0 — Lorentz/Drude ADE
+                this.stepMurPre(encoder);       // Priority 0 — Mur save boundary
+                this.stepRLC(encoder);          // Priority 0 — RLC (GPU: fused pre+apply kernel)
+
+                // === CORE VOLTAGE UPDATE ===
+                this.stepVoltage(encoder);
+
+                // === POST-VOLTAGE (C++ DoPostVoltageUpdates) ===
+                this.stepPML(encoder, 1);       // Priority +1M
+                this.stepTFSFVoltage(encoder);  // Priority +50K
+                this.stepMurPost(encoder);      // Priority 0 — Mur accumulate
+
+                // === APPLY TO VOLTAGES (C++ Apply2Voltages) ===
+                if (this.excitationConfigured) {
+                    this.applyExcitation(encoder); // Priority -1K
+                }
+                this.stepMurApply(encoder);     // Priority 0 — Mur boundary overwrite
+
+                // === PRE-CURRENT (C++ DoPreCurrentUpdates) ===
+                this.stepPML(encoder, 2);       // Priority +1M
+                this.stepCurrADE(encoder);      // Priority 0 — Lorentz/Drude ADE
+
+                // === CORE CURRENT UPDATE ===
+                this.stepCurrent(encoder);
+
+                // === POST-CURRENT (C++ DoPostCurrentUpdates) ===
+                this.stepPML(encoder, 3);       // Priority +1M
+                this.stepTFSFCurrent(encoder);  // Priority +50K
             }
-
-            // === PRE-VOLTAGE (C++ DoPreVoltageUpdates) ===
-            this.stepSteadyState(encoder);  // Priority +2M
-            this.stepPML(encoder, 0);       // Priority +1M
-            this.stepVoltADE(encoder);      // Priority 0 — Lorentz/Drude ADE
-            this.stepMurPre(encoder);       // Priority 0 — Mur save boundary
-            this.stepRLC(encoder);          // Priority 0 — RLC (GPU: fused pre+apply kernel)
-
-            // === CORE VOLTAGE UPDATE ===
-            this.stepVoltage(encoder);
-
-            // === POST-VOLTAGE (C++ DoPostVoltageUpdates) ===
-            this.stepPML(encoder, 1);       // Priority +1M
-            this.stepTFSFVoltage(encoder);  // Priority +50K
-            this.stepMurPost(encoder);      // Priority 0 — Mur accumulate
-
-            // === APPLY TO VOLTAGES (C++ Apply2Voltages) ===
-            if (this.excitationConfigured) {
-                this.applyExcitation(encoder); // Priority -1K
-            }
-            this.stepMurApply(encoder);     // Priority 0 — Mur boundary overwrite
-
-            // === PRE-CURRENT (C++ DoPreCurrentUpdates) ===
-            this.stepPML(encoder, 2);       // Priority +1M
-            this.stepCurrADE(encoder);      // Priority 0 — Lorentz/Drude ADE
-
-            // === CORE CURRENT UPDATE ===
-            this.stepCurrent(encoder);
-
-            // === POST-CURRENT (C++ DoPostCurrentUpdates) ===
-            this.stepPML(encoder, 3);       // Priority +1M
-            this.stepTFSFCurrent(encoder);  // Priority +50K
 
             this.device.queue.submit([encoder.finish()]);
             this.numTS++;

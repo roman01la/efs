@@ -625,8 +625,10 @@ async function runWebGPU(Module, ems, simPath) {
   const maxTS = ems.getMaxTimesteps();
   let totalSteps = 0;
 
-  // Process probes at every openEMS processing step (step0).
-  const probeInterval = step0;  // typically 24 steps
+  // Process probes periodically. More frequent = more time-domain samples
+  // but slower (each readback stalls GPU pipeline). step0*4 gives ~300+
+  // samples for 30K steps which is enough for accurate DFT post-processing.
+  const probeInterval = step0 * 4;  // ~96 steps between readbacks
 
   while (totalSteps < maxTS) {
     // Run exactly probeInterval steps on GPU, then readback + process
