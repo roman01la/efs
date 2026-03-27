@@ -19,6 +19,7 @@
 #include "FDTD/extensions/operator_ext_mur_abc.h"
 #include "FDTD/engine_interface_fdtd.h"
 #include "Common/processfields.h"
+#include "Common/processfields_fd.h"
 #include "Common/processing.h"
 #include "Common/processvoltage.h"
 #include "Common/processcurrent.h"
@@ -94,6 +95,18 @@ public:
 class ProcessIntegral_Accessor : public ProcessIntegral {
 public:
     int getNormDir() const { return m_normDir; }
+};
+
+class ProcessFields_Accessor : public ProcessFields {
+public:
+    unsigned int* getNumLines() { return numLines; }
+    unsigned int** getPosLines() { return posLines; }    // posLines[3][numLines[n]] = grid indices
+    double** getDiscLines() { return discLines; }        // discLines[3][numLines[n]] = physical coords
+    bool getDualTime() { return m_dualTime; }
+    bool getDualMesh() { return m_dualMesh; }
+    int getDumpType() { return (int)m_DumpType; }
+    std::vector<double>& getFDSamples() { return m_FD_Samples; }
+    unsigned int getFDInterval() { return m_FD_Interval; }
 };
 
 static std::atomic<int> g_xmlPathCounter{0};
@@ -429,6 +442,16 @@ public:
             pa->Process();
             pa->PostProcess(); // Flush FD dump data to HDF5
         }
+    }
+
+    /**
+     * Initialize all processing objects (probes, dump boxes) without running.
+     * Must be called after setup() before extracting dump box info.
+     */
+    void initProcessing() {
+        auto* acc = reinterpret_cast<openEMS_Accessor*>(ems_);
+        ProcessingArray* pa = acc->getPA();
+        if (pa) pa->InitAll();
     }
 
     // -----------------------------------------------------------------------
@@ -938,6 +961,102 @@ public:
         return names;
     }
 
+    /**
+     * Extract FD dump box metadata for GPU-side NF2FF accumulation.
+     * Returns a flat float vector:
+     * [numBoxes, ...perBoxData]
+     * Per box: [dumpType, dualTime, fdInterval, numFreqs, freq0..freqN,
+     *           numLines[0], numLines[1], numLines[2],
+     *           posLines[0][0..n0-1], posLines[1][0..n1-1], posLines[2][0..n2-1],
+     *           discLines[0][0..n0-1], discLines[1][0..n1-1], discLines[2][0..n2-1]]
+     */
+    std::vector<float> getDumpBoxFDInfo() {
+        auto* acc = reinterpret_cast<openEMS_Accessor*>(ems_);
+        ProcessingArray* pa = acc->getPA();
+        if (!pa) return {0};
+
+        std::vector<float> result;
+        unsigned int count = 0;
+        result.push_back(0); // placeholder for count
+
+        for (size_t i = 0; i < pa->GetNumberOfProcessings(); i++) {
+            Processing* proc = pa->GetProcessing(i);
+            ProcessFieldsFD* fd = dynamic_cast<ProcessFieldsFD*>(proc);
+            if (!fd) continue;
+
+            auto* facc = reinterpret_cast<ProcessFields_Accessor*>(fd);
+
+            result.push_back((float)facc->getDumpType());
+            result.push_back(facc->getDualTime() ? 1.0f : 0.0f);
+            result.push_back((float)facc->getFDInterval());
+
+            std::vector<double>& freqs = facc->getFDSamples();
+            result.push_back((float)freqs.size());
+            for (size_t f = 0; f < freqs.size(); f++)
+                result.push_back((float)freqs[f]);
+
+            unsigned int* nl = facc->getNumLines();
+            result.push_back((float)nl[0]);
+            result.push_back((float)nl[1]);
+            result.push_back((float)nl[2]);
+
+            unsigned int** pl = facc->getPosLines();
+            for (int d = 0; d < 3; d++)
+                for (unsigned int j = 0; j < nl[d]; j++)
+                    result.push_back((float)pl[d][j]);
+
+            double** dl = facc->getDiscLines();
+            for (int d = 0; d < 3; d++)
+                for (unsigned int j = 0; j < nl[d]; j++)
+                    result.push_back((float)dl[d][j]);
+
+            count++;
+        }
+
+        result[0] = (float)count;
+        return result;
+    }
+
+    /**
+     * Get names of FD dump boxes, in order matching getDumpBoxFDInfo().
+     */
+    std::vector<std::string> getDumpBoxFDNames() {
+        auto* acc = reinterpret_cast<openEMS_Accessor*>(ems_);
+        ProcessingArray* pa = acc->getPA();
+        if (!pa) return {};
+
+        std::vector<std::string> names;
+        for (size_t i = 0; i < pa->GetNumberOfProcessings(); i++) {
+            Processing* proc = pa->GetProcessing(i);
+            ProcessFieldsFD* fd = dynamic_cast<ProcessFieldsFD*>(proc);
+            if (!fd) continue;
+            names.push_back(proc->GetName());
+        }
+        return names;
+    }
+
+    /**
+     * Get edge lengths for the full grid in flat NIJK layout.
+     * Needed for computing interpolation weights in GPU NF2FF.
+     */
+    std::vector<float> getEdgeLengths(bool dualMesh) {
+        Operator* op = getOperator();
+        if (!op) return {};
+        unsigned int Nx = op->GetNumberOfLines(0);
+        unsigned int Ny = op->GetNumberOfLines(1);
+        unsigned int Nz = op->GetNumberOfLines(2);
+        std::vector<float> result(3 * Nx * Ny * Nz);
+        unsigned int pos[3];
+        for (unsigned int n = 0; n < 3; n++)
+            for (pos[0] = 0; pos[0] < Nx; pos[0]++)
+                for (pos[1] = 0; pos[1] < Ny; pos[1]++)
+                    for (pos[2] = 0; pos[2] < Nz; pos[2]++) {
+                        unsigned int idx = n*Nx*Ny*Nz + pos[0]*Ny*Nz + pos[1]*Nz + pos[2];
+                        result[idx] = op->GetEdgeLength(n, pos, dualMesh);
+                    }
+        return result;
+    }
+
 private:
     openEMS* ems_;
     ProcessFields* procField_ = nullptr;
@@ -1019,6 +1138,10 @@ EMSCRIPTEN_BINDINGS(openems) {
         .function("getSimDT", &OpenEMSWrapper::getSimDT)
         .function("getProbeInfo", &OpenEMSWrapper::getProbeInfo)
         .function("getProbeNames", &OpenEMSWrapper::getProbeNames)
+        .function("initProcessing", &OpenEMSWrapper::initProcessing)
+        .function("getDumpBoxFDInfo", &OpenEMSWrapper::getDumpBoxFDInfo)
+        .function("getDumpBoxFDNames", &OpenEMSWrapper::getDumpBoxFDNames)
+        .function("getEdgeLengths", &OpenEMSWrapper::getEdgeLengths)
         // Extension data extraction for GPU
         .function("getExcitationSignal", &OpenEMSWrapper::getExcitationSignal)
         .function("getExcitationPeriod", &OpenEMSWrapper::getExcitationPeriod)

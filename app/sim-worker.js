@@ -214,33 +214,216 @@ function computeProbeIntegrals(gathered, probes, probeSlices) {
   return results;
 }
 
-// ---- NF2FF helpers ----
+// ---- GPU FD accumulation setup ----
 
-function readNF2FFData(Module, ems, simPath) {
-  let files;
-  try { files = Module.FS.readdir(simPath); } catch (e) { return null; }
+/**
+ * Parse FD dump box info from C++ and build face descriptors for GPU accumulation.
+ * Each face gets: indices, weights, frequencies, numPoints, numNeighbors, dualTime, fdInterval.
+ */
+function buildFDAccumulationFaces(ems, gridSize, dT) {
+  const infoVec = ems.getDumpBoxFDInfo();
+  const namesVec = ems.getDumpBoxFDNames();
+  const count = infoVec.get(0) | 0;
+  if (count === 0) { infoVec.delete(); namesVec.delete(); return []; }
 
-  const nf2ffBoxes = new Set();
-  for (const f of files) {
-    const m = f.match(/^(.+)_E_(?:xn|0)\.h5$/);
-    if (m) nf2ffBoxes.add(m[1]);
+  const [Nx, Ny, Nz] = gridSize;
+  const cellStride = Nx * Ny * Nz;
+
+  // Get edge lengths for interpolation weights
+  const edgeLenVec = ems.getEdgeLengths(false);
+  const edgeLen = new Float32Array(edgeLenVec.size());
+  for (let i = 0; i < edgeLen.length; i++) edgeLen[i] = edgeLenVec.get(i);
+  edgeLenVec.delete();
+
+  const edgeLenDualVec = ems.getEdgeLengths(true);
+  const edgeLenDual = new Float32Array(edgeLenDualVec.size());
+  for (let i = 0; i < edgeLenDual.length; i++) edgeLenDual[i] = edgeLenDualVec.get(i);
+  edgeLenDualVec.delete();
+
+  const faces = [];
+  let off = 1;
+
+  for (let b = 0; b < count; b++) {
+    const dumpType = infoVec.get(off) | 0; // 0=E, 1=H
+    const dualTime = infoVec.get(off + 1) > 0;
+    const fdInterval = infoVec.get(off + 2) | 0;
+    const numFreqs = infoVec.get(off + 3) | 0;
+    off += 4;
+
+    const frequencies = new Float32Array(numFreqs);
+    for (let f = 0; f < numFreqs; f++) frequencies[f] = infoVec.get(off + f);
+    off += numFreqs;
+
+    const nl = [infoVec.get(off)|0, infoVec.get(off+1)|0, infoVec.get(off+2)|0];
+    off += 3;
+
+    const posLines = [];
+    for (let d = 0; d < 3; d++) {
+      const arr = new Uint32Array(nl[d]);
+      for (let j = 0; j < nl[d]; j++) arr[j] = infoVec.get(off + j) | 0;
+      off += nl[d];
+      posLines.push(arr);
+    }
+
+    const discLines = [];
+    for (let d = 0; d < 3; d++) {
+      const arr = new Float64Array(nl[d]);
+      for (let j = 0; j < nl[d]; j++) arr[j] = infoVec.get(off + j);
+      off += nl[d];
+      discLines.push(arr);
+    }
+
+    const name = namesVec.get(b);
+    const isEField = dumpType === 0;
+    const numNeighbors = isEField ? 4 : 2;
+
+    // Surface points: iterate over the 2D face
+    const numPoints = nl[0] * nl[1] * nl[2];
+    const allIndices = [];
+    const allWeights = [];
+
+    for (let comp = 0; comp < 3; comp++) {
+      const nP = (comp + 1) % 3;
+      const nPP = (comp + 2) % 3;
+
+      for (let i0 = 0; i0 < nl[0]; i0++) {
+        for (let i1 = 0; i1 < nl[1]; i1++) {
+          for (let i2 = 0; i2 < nl[2]; i2++) {
+            const pos = [posLines[0][i0], posLines[1][i1], posLines[2][i2]];
+
+            if (isEField) {
+              // E CELL_INTERPOLATE: average of 4 neighbors, each divided by edge length
+              // Boundary: if any pos[d] >= NumLines[d]-1, field = 0
+              const atBoundary = pos[0] >= Nx-1 || pos[1] >= Ny-1 || pos[2] >= Nz-1;
+
+              const neighbors = [
+                [pos[0], pos[1], pos[2]],
+              ];
+              const p1 = [...pos]; p1[nP]++;
+              neighbors.push(p1);
+              const p2 = [...pos]; p2[nP]++; p2[nPP]++;
+              neighbors.push(p2);
+              const p3 = [...pos]; p3[nPP]++;
+              neighbors.push(p3);
+
+              for (const nb of neighbors) {
+                const idx = comp * cellStride + nb[0] * Ny * Nz + nb[1] * Nz + nb[2];
+                allIndices.push(idx);
+                if (atBoundary || nb[0] >= Nx || nb[1] >= Ny || nb[2] >= Nz) {
+                  allWeights.push(0);
+                } else {
+                  const eLen = edgeLen[comp * cellStride + nb[0] * Ny * Nz + nb[1] * Nz + nb[2]];
+                  allWeights.push(eLen > 0 ? 0.25 / eLen : 0);
+                }
+              }
+            } else {
+              // H CELL_INTERPOLATE: weighted interpolation along comp direction
+              // raw_dual(pos) = curr / edgeLenDual, then weighted blend
+              const atBoundary = pos[comp] >= (comp === 0 ? Nx : comp === 1 ? Ny : Nz) - 1;
+
+              const idx0 = comp * cellStride + pos[0] * Ny * Nz + pos[1] * Nz + pos[2];
+              const pos1 = [...pos]; pos1[comp]++;
+              const idx1 = comp * cellStride + pos1[0] * Ny * Nz + pos1[1] * Nz + pos1[2];
+
+              if (atBoundary) {
+                allIndices.push(idx0, idx0); // dummy second index
+                allWeights.push(0, 0);
+              } else {
+                const delta = edgeLenDual[idx0];
+                const deltaUp = edgeLenDual[idx1];
+                const deltaRel = (delta + deltaUp) > 0 ? delta / (delta + deltaUp) : 0;
+                const w0 = delta > 0 ? (1 - deltaRel) / delta : 0;
+                const w1 = deltaUp > 0 ? deltaRel / deltaUp : 0;
+                allIndices.push(idx0, idx1);
+                allWeights.push(w0, w1);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    faces.push({
+      indices: new Uint32Array(allIndices),
+      weights: new Float32Array(allWeights),
+      numPoints,
+      numNeighbors,
+      numFreqs,
+      frequencies,
+      dualTime,
+      fdInterval,
+      isEField,
+      name,
+      discLines,
+      numLines: nl,
+      dT,
+    });
   }
-  if (nf2ffBoxes.size === 0) return null;
 
-  const boxName = [...nf2ffBoxes][0];
+  infoVec.delete();
+  namesVec.delete();
+  return faces;
+}
 
-  // Read frequency from HDF5
-  let freqHz = null;
-  try {
-    const eFile = files.includes(`${boxName}_E_0.h5`)
-      ? `${simPath}/${boxName}_E_0.h5`
-      : `${simPath}/${boxName}_E_xn.h5`;
-    const freqVec = ems.readHDF5Frequencies(eFile);
-    if (freqVec.size() > 0) freqHz = freqVec.get(0);
-    freqVec.delete();
-  } catch(e) {}
+/**
+ * Build surfaceData for computeNF2FF from GPU FD accumulator readback.
+ * Pairs E and H faces by matching face geometry.
+ */
+function buildNF2FFSurfaceData(fdFaces, fdResults) {
+  // Group faces: E faces and H faces, paired by order
+  const eFaces = [], hFaces = [];
+  for (let i = 0; i < fdFaces.length; i++) {
+    (fdFaces[i].isEField ? eFaces : hFaces).push({ face: fdFaces[i], result: fdResults[i] });
+  }
 
-  return { boxName, freqHz, files };
+  const faces = [];
+  const numPairs = Math.min(eFaces.length, hFaces.length);
+
+  for (let fi = 0; fi < numPairs; fi++) {
+    const eF = eFaces[fi], hF = hFaces[fi];
+    const np = eF.face.numPoints;
+
+    // Determine normal from collapsed dimension (numLines=1)
+    const nl = eF.face.numLines;
+    let normal = [0, 0, 0];
+    for (let d = 0; d < 3; d++) {
+      if (nl[d] === 1) {
+        // Determine sign: negative face if this is an early face in the pair sequence
+        normal[d] = (fi % 2 === 0) ? -1 : 1;
+        break;
+      }
+    }
+
+    // Convert GPU f32 accumulators to Float64Array with interleaved re/im per component
+    const E = [], H = [];
+    for (let comp = 0; comp < 3; comp++) {
+      const eArr = new Float64Array(np * 2);
+      const hArr = new Float64Array(np * 2);
+      for (let p = 0; p < np; p++) {
+        const eIdx = (0 * 3 * np + comp * np + p) * 2;
+        const hIdx = (0 * 3 * np + comp * np + p) * 2;
+        eArr[p * 2] = eF.result.data[eIdx];
+        eArr[p * 2 + 1] = eF.result.data[eIdx + 1];
+        hArr[p * 2] = hF.result.data[hIdx];
+        hArr[p * 2 + 1] = hF.result.data[hIdx + 1];
+      }
+      E.push(eArr);
+      H.push(hArr);
+    }
+
+    faces.push({
+      E, H,
+      mesh: {
+        x: new Float64Array(eF.face.discLines[0]),
+        y: new Float64Array(eF.face.discLines[1]),
+        z: new Float64Array(eF.face.discLines[2]),
+      },
+      normal,
+      meshType: 0,
+    });
+  }
+
+  return { faces };
 }
 
 // ---- Main simulation ----
@@ -288,14 +471,15 @@ async function runSimulation(xml) {
   gpuEngine.configureProbeGather(indices);
   log(`  Probes: ${probes.length} (${indices.length} gather indices)`);
 
-  // Parse XML for dump boxes and FDTD params
-  // DOMParser not available in workers — use regex
-  const hasDumpBoxes = /<DumpBox\b/i.test(xml);
-  let cppProcessInterval = 0;
-  if (hasDumpBoxes) {
-    const step0 = ems.initRun();
-    if (step0 > 0) cppProcessInterval = step0;
-    log(`  Dump boxes detected: C++ processing every ${cppProcessInterval} steps`);
+  // Configure GPU-side FD accumulation for NF2FF dump boxes
+  // Initialize processing objects (needed for dump box numLines/posLines)
+  ems.initProcessing();
+  const fdFaces = buildFDAccumulationFaces(ems, config.gridSize, dT);
+  let fdInterval = 0;
+  if (fdFaces.length > 0) {
+    gpuEngine.configureFDAccumulation(fdFaces);
+    fdInterval = fdFaces[0].fdInterval;
+    log(`  NF2FF: ${fdFaces.length} FD faces, accumulating every ${fdInterval} steps`);
   }
 
   const maxTS = ems.getMaxTimesteps();
@@ -311,34 +495,19 @@ async function runSimulation(xml) {
   const maxProbeSteps = fMax > 0 ? Math.floor(0.5 / (fMax * dT)) : baseInterval * 10;
   const probeMult = Math.max(1, Math.floor(maxProbeSteps / baseInterval));
   const sampleInterval = baseInterval * probeMult;
-
-  const stepSize = cppProcessInterval > 0
-    ? Math.min(cppProcessInterval, sampleInterval)
-    : sampleInterval;
+  const stepSize = sampleInterval;
 
   let maxEnergy = 0;
   const energyCheckInterval = 1000;
-  let _voltStage = 0, _currStage = 0;
 
   while (totalSteps < maxTS && !stopRequested) {
     const stepsThisBatch = Math.min(stepSize, maxTS - totalSteps);
     gpuEngine.iterate(stepsThisBatch);
     totalSteps += stepsThisBatch;
 
-    // C++ processing for dump boxes
-    if (cppProcessInterval > 0 && totalSteps % cppProcessInterval === 0) {
-      const fields = await gpuEngine.getFields();
-      if (!_voltStage) {
-        const n = fields.volt.length * 4;
-        _voltStage = Module._malloc(n);
-        _currStage = Module._malloc(n);
-      }
-      Module.HEAPF32.set(fields.volt, _voltStage >> 2);
-      Module.HEAPF32.set(fields.curr, _currStage >> 2);
-      ems.copyFieldsFromStaging(_voltStage, _currStage, fields.volt.length);
-      ems.setTimestepCount(totalSteps);
-      const nextStep = ems.doProcess();
-      if (nextStep <= 0) break;
+    // GPU FD accumulation for NF2FF (no readback, just a compute dispatch)
+    if (fdInterval > 0) {
+      gpuEngine.accumulateFD(totalSteps);
     }
 
     // Probe gather
@@ -356,7 +525,7 @@ async function runSimulation(xml) {
     }
 
     // Energy end-criteria
-    if (cppProcessInterval === 0 && totalSteps % energyCheckInterval < stepSize) {
+    if (totalSteps % energyCheckInterval < stepSize) {
       const energy = await gpuEngine.computeEnergy();
       if (energy > maxEnergy) maxEnergy = energy;
       if (maxEnergy > 0 && (energy / maxEnergy) <= endCrit) {
@@ -368,8 +537,6 @@ async function runSimulation(xml) {
     status(totalSteps, maxTS);
     if (totalSteps % 1000 < stepSize) log(`  Step ${totalSteps}/${maxTS}`);
   }
-
-  if (cppProcessInterval > 0) ems.finalizeRun();
 
   // Write probe data to WASM FS
   for (let p = 0; p < probes.length; p++) {
@@ -386,29 +553,16 @@ async function runSimulation(xml) {
     } catch (e) {}
   }
 
-  gpuEngine.destroy();
-
-  // Collect results
-  const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-
-  // Read probe files
-  const probeData = {};
-  try {
-    const files = Module.FS.readdir(simPath);
-    for (const f of files) {
-      if (f.startsWith('port_') && (f.includes('_ut') || f.includes('_it'))) {
-        probeData[f] = new TextDecoder().decode(Module.FS.readFile(`${simPath}/${f}`));
-      }
-    }
-  } catch (e) {}
-
-  // NF2FF data
+  // Read FD accumulators from GPU and compute NF2FF
   let nf2ffData = null;
-  const nf2ffInfo = readNF2FFData(Module, ems, simPath);
-  if (nf2ffInfo?.freqHz) {
+  if (fdFaces.length > 0) {
     try {
-      const { readNF2FFSurfaceData, computeNF2FF } = await import('/src/nf2ff.mjs');
-      const surfaceData = readNF2FFSurfaceData(ems, simPath, nf2ffInfo.boxName, { frequency: nf2ffInfo.freqHz });
+      const fdResults = await gpuEngine.readFDAccumulators();
+      const surfaceData = buildNF2FFSurfaceData(fdFaces, fdResults);
+      const { computeNF2FF } = await import('/src/nf2ff.mjs');
+
+      // Use the first frequency from the FD faces
+      const freqHz = fdFaces[0].frequencies[0];
 
       const thetaRad = [], thetaDeg = [];
       for (let t = -180; t < 180; t += 2) {
@@ -416,7 +570,7 @@ async function runSimulation(xml) {
         thetaRad.push(t * Math.PI / 180);
       }
       const phiRad = [0, Math.PI / 2];
-      const result = computeNF2FF(surfaceData, nf2ffInfo.freqHz, thetaRad, phiRad, [0, 0, 0]);
+      const result = computeNF2FF(surfaceData, freqHz, thetaRad, phiRad, [0, 0, 0]);
       const nAngles = thetaRad.length * phiRad.length;
       const E_norm = new Float64Array(nAngles);
       for (let i = 0; i < nAngles; i++) {
@@ -426,16 +580,31 @@ async function runSimulation(xml) {
         );
       }
       nf2ffData = {
-        freqHz: nf2ffInfo.freqHz,
-        thetaDeg, E_norm: Array.from(E_norm),
+        freqHz, thetaDeg, E_norm: Array.from(E_norm),
         Dmax: result.Dmax, nPhi: phiRad.length,
       };
       const DmaxdBi = 10 * Math.log10(Math.max(result.Dmax, 1e-15));
-      log(`Far-field computed: Dmax = ${DmaxdBi.toFixed(1)} dBi at ${(nf2ffInfo.freqHz / 1e9).toFixed(3)} GHz`);
+      log(`Far-field computed: Dmax = ${DmaxdBi.toFixed(1)} dBi at ${(freqHz / 1e9).toFixed(3)} GHz`);
     } catch (e) {
       log(`NF2FF computation failed: ${e.message}`);
     }
   }
+
+  gpuEngine.destroy();
+
+  // Collect results
+  const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+
+  // Read probe files from WASM FS
+  const probeData = {};
+  try {
+    const files = Module.FS.readdir(simPath);
+    for (const f of files) {
+      if (f.startsWith('port_') && (f.includes('_ut') || f.includes('_it'))) {
+        probeData[f] = new TextDecoder().decode(Module.FS.readFile(`${simPath}/${f}`));
+      }
+    }
+  } catch (e) {}
 
   ems.delete();
 
