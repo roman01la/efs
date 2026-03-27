@@ -2,69 +2,203 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>antenna-prop &mdash; openEMS WASM Simulator</title>
+<title>Electromagnetic Field Solver</title>
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: system-ui, -apple-system, sans-serif; font-size: 14px; background: #f5f5f5; color: #222; }
+
+:root {
+  --bg: #0c0c10;
+  --surface: #16161c;
+  --surface-2: #1e1e26;
+  --border: #2a2a35;
+  --border-hover: #3a3a48;
+  --text: #e2e2e8;
+  --text-dim: #8888a0;
+  --text-muted: #55556a;
+  --accent: #6366f1;
+  --accent-hover: #818cf8;
+  --accent-glow: rgba(99, 102, 241, 0.15);
+  --green: #34d399;
+  --red: #f87171;
+  --orange: #fb923c;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --font: 'Inter', system-ui, -apple-system, sans-serif;
+  --mono: 'JetBrains Mono', 'SF Mono', 'Menlo', 'Consolas', monospace;
+}
+
+html, body { height: 100%; }
+body {
+  font-family: var(--font);
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
 #app {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: 1.3fr 0.75fr 1fr;
   grid-template-rows: auto 1fr;
-  gap: 8px;
+  gap: 6px;
   height: 100vh;
-  padding: 8px;
+  padding: 6px;
 }
+
+/* ---- Header ---- */
 header {
   grid-column: 1 / -1;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 6px 12px;
-  background: #1a1a2e;
-  color: #eee;
-  border-radius: 4px;
+  gap: 16px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
-header h1 { font-size: 16px; font-weight: 600; }
+header h1 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #c7d2fe, #6366f1);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+header .subtitle {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 400;
+}
 header .spacer { flex: 1; }
+
+/* ---- Panels ---- */
 .panel {
-  background: #fff;
-  border: 1px solid #ddd;
-  border-radius: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: border-color 0.2s;
 }
+.panel:focus-within { border-color: var(--border-hover); }
+
 .panel-header {
-  padding: 6px 10px;
-  background: #e8e8e8;
-  font-weight: 600;
-  font-size: 13px;
-  border-bottom: 1px solid #ddd;
+  padding: 8px 12px;
+  background: var(--surface-2);
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 10px;
+  flex-shrink: 0;
 }
-.panel-body { flex: 1; overflow: auto; padding: 8px; }
+.panel-body {
+  flex: 1;
+  overflow: auto;
+  padding: 0;
+}
 
-/* Editor tab buttons */
-.tab-group { display: flex; gap: 0; }
-.tab-btn {
-  padding: 3px 10px;
-  border: 1px solid #aaa;
-  border-radius: 3px 3px 0 0;
-  background: #f0f0f0;
-  cursor: pointer;
-  font-size: 12px;
+/* ---- Buttons & Controls ---- */
+select, button {
+  font-family: var(--font);
+  font-size: 11px;
   font-weight: 500;
-  color: #555;
-  border-bottom: 2px solid transparent;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
 }
+select:hover, button:hover {
+  border-color: var(--border-hover);
+  color: var(--text);
+}
+select:focus, button:focus { outline: none; }
+select option { background: var(--surface); color: var(--text); }
+
+button.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+button.primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  box-shadow: 0 0 20px var(--accent-glow);
+}
+button.primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+button.danger {
+  background: transparent;
+  color: var(--red);
+  border-color: rgba(248, 113, 113, 0.3);
+}
+button.danger:hover {
+  background: rgba(248, 113, 113, 0.1);
+  border-color: var(--red);
+}
+button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* ---- Tab buttons ---- */
+.tab-group { display: flex; gap: 2px; }
+.tab-btn {
+  padding: 4px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  transition: all 0.15s;
+}
+.tab-btn:hover { color: var(--text-dim); background: rgba(255,255,255,0.04); }
 .tab-btn.active {
-  background: #fff;
-  color: #222;
-  border-bottom: 2px solid #2563eb;
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 0 10px var(--accent-glow);
 }
+
+/* ---- Editor ---- */
+#editor-container {
+  width: 100%;
+  height: 100%;
+  min-height: 300px;
+}
+#editor-container .cm-editor {
+  height: 100%;
+  background: transparent;
+}
+#editor-container .cm-scroller { overflow: auto; }
+#editor-container .cm-gutters {
+  background: var(--surface) !important;
+  border-right: 1px solid var(--border) !important;
+}
+#editor-error {
+  display: none;
+  padding: 6px 12px;
+  background: rgba(248, 113, 113, 0.08);
+  color: var(--red);
+  font-size: 11px;
+  border-top: 1px solid rgba(248, 113, 113, 0.15);
+  font-family: var(--mono);
+}
+#editor-error.visible { display: block; }
+
+/* ---- 3D Viewer ---- */
 #viewer-3d {
   width: 100%;
   height: 100%;
@@ -73,48 +207,27 @@ header .spacer { flex: 1; }
 }
 #viewer-3d.visible { display: block; }
 
-/* Editor panel */
-#editor-container {
-  width: 100%;
-  height: 100%;
-  min-height: 300px;
-  border: 1px solid #ccc;
-}
-#editor-container .cm-editor { height: 100%; }
-#editor-container .cm-scroller { overflow: auto; }
-#editor-error {
-  display: none;
-  padding: 4px 8px;
-  background: #fef2f2;
-  color: #dc2626;
+/* ---- Simulation ---- */
+#sim-status {
+  padding: 8px 12px;
   font-size: 11px;
-  border-top: 1px solid #fecaca;
-  font-family: monospace;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 16px;
+  font-family: var(--mono);
+  font-weight: 400;
 }
-#editor-error.visible { display: block; }
-select, button {
-  font-size: 12px;
-  padding: 3px 8px;
-  border: 1px solid #aaa;
-  border-radius: 3px;
-  background: #fff;
-  cursor: pointer;
-}
-button:hover { background: #eee; }
-button:active { background: #ddd; }
-button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
-button.primary:hover { background: #1d4ed8; }
-button.danger { background: #dc2626; color: #fff; border-color: #dc2626; }
-button.danger:hover { background: #b91c1c; }
+#sim-status .label { color: var(--text-muted); }
+#sim-status .value { color: var(--text); }
 
-/* Simulation panel */
-#sim-status { font-size: 12px; color: #555; }
 #sim-console {
-  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-family: var(--mono);
   font-size: 11px;
-  background: #1a1a1a;
-  color: #0f0;
-  padding: 6px;
+  line-height: 1.6;
+  background: var(--bg);
+  color: var(--green);
+  padding: 10px 12px;
   flex: 1;
   overflow-y: auto;
   white-space: pre-wrap;
@@ -122,26 +235,47 @@ button.danger:hover { background: #b91c1c; }
   min-height: 200px;
 }
 
-/* Results panel */
-.result-section { padding: 8px; border-bottom: 1px solid #eee; }
+/* ---- Results ---- */
+.result-section {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
 .result-section:last-child { border-bottom: none; }
-.result-section h3 { font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; }
+.result-section h3 {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
 .plot-container { width: 100%; min-height: 200px; }
 .plot-container svg { width: 100%; height: auto; }
+.plot-container p { color: var(--text-muted); font-size: 12px; }
 
-/* Loading overlay */
+/* ---- Loading ---- */
 #loading-overlay {
   display: none;
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,0.5);
+  background: rgba(12, 12, 16, 0.85);
+  backdrop-filter: blur(8px);
   z-index: 1000;
   justify-content: center;
   align-items: center;
-  color: #fff;
-  font-size: 18px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
 }
 #loading-overlay.visible { display: flex; }
+
+/* ---- Scrollbars ---- */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-hover); }
+
+/* ---- Responsive ---- */
 @media (max-width: 1024px) {
   #app { grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr 1fr; }
   #panel-results { grid-column: 1 / -1; }
@@ -155,16 +289,13 @@ button.danger:hover { background: #b91c1c; }
 <body>
 <div id="app">
   <header>
-    <h1>antenna-prop</h1>
-    <span style="font-size:12px;color:#aaa;">openEMS WASM Simulator</span>
+    <span class="subtitle">Electromagnetic Field Solver</span>
     <div class="spacer"></div>
     <button id="btn-share" title="Copy shareable URL to clipboard">Share</button>
   </header>
 
-  <!-- Left panel: Editor -->
   <div class="panel" id="panel-editor">
     <div class="panel-header">
-      Editor
       <div class="tab-group">
         <button class="tab-btn active" data-tab="xml">XML</button>
         <button class="tab-btn" data-tab="3d">3D</button>
@@ -172,6 +303,7 @@ button.danger:hover { background: #b91c1c; }
       <select id="example-select">
         <option value="patch">Patch Antenna</option>
         <option value="msl">MSL Notch Filter</option>
+        <option value="helical">Helical Antenna</option>
         <option value="waveguide">Rect Waveguide</option>
       </select>
     </div>
@@ -182,42 +314,45 @@ button.danger:hover { background: #b91c1c; }
     </div>
   </div>
 
-  <!-- Center panel: Simulation -->
   <div class="panel" id="panel-sim">
     <div class="panel-header">
       Simulation
+      <div style="flex:1"></div>
       <button id="btn-run" class="primary">Run</button>
       <button id="btn-stop" class="danger" disabled>Stop</button>
     </div>
     <div class="panel-body" style="display:flex;flex-direction:column;">
       <div id="sim-status">
-        <span id="status-text">Idle</span> |
-        Timestep: <span id="status-ts">0</span> |
-        Elapsed: <span id="status-elapsed">0.0s</span>
+        <span><span class="label">Status</span> <span class="value" id="status-text">Idle</span></span>
+        <span><span class="label">Step</span> <span class="value" id="status-ts">0</span></span>
+        <span><span class="label">Elapsed</span> <span class="value" id="status-elapsed">0.0s</span></span>
       </div>
       <div id="sim-console"></div>
     </div>
   </div>
 
-  <!-- Right panel: Results -->
   <div class="panel" id="panel-results">
     <div class="panel-header">Results</div>
     <div class="panel-body">
       <div class="result-section">
         <h3>S-Parameters</h3>
-        <div id="plot-sparam" class="plot-container"><p style="color:#888;">Run a simulation to see results.</p></div>
+        <div id="plot-sparam" class="plot-container"><p>Run a simulation to see results.</p></div>
       </div>
       <div class="result-section">
         <h3>Impedance</h3>
-        <div id="plot-impedance" class="plot-container"><p style="color:#888;">Run a simulation to see results.</p></div>
+        <div id="plot-impedance" class="plot-container"><p>Run a simulation to see results.</p></div>
       </div>
-      <div class="result-section">
+      <div class="result-section" id="section-radiation">
         <h3>Radiation</h3>
-        <div id="plot-radiation" class="plot-container"><p style="color:#888;">NF2FF data required.</p></div>
+        <div id="plot-radiation" class="plot-container"><p>NF2FF data required.</p></div>
+      </div>
+      <div class="result-section" id="section-radiation-3d">
+        <h3>3D Radiation Pattern</h3>
+        <div id="plot-radiation-3d" style="width:100%;height:350px;position:relative;"></div>
       </div>
       <div class="result-section">
         <h3>Raw Data</h3>
-        <pre id="raw-data" style="font-size:11px;overflow:auto;max-height:200px;">No data yet.</pre>
+        <pre id="raw-data" style="font-family:var(--mono);font-size:11px;overflow:auto;max-height:200px;color:var(--text-dim);">No data yet.</pre>
       </div>
     </div>
   </div>
@@ -226,45 +361,48 @@ button.danger:hover { background: #b91c1c; }
 <div id="loading-overlay"><span>Loading WASM module...</span></div>
 
 <script type="module">
-import { PATCH_ANTENNA, MSL_NOTCH_FILTER, RECT_WAVEGUIDE } from '/app/examples.mjs';
+import { PATCH_ANTENNA, MSL_NOTCH_FILTER, HELICAL_ANTENNA, RECT_WAVEGUIDE } from '/app/examples.mjs';
 import { encodeConfig, decodeConfig, shareConfig, loadSharedConfig } from '/src/url-share.mjs';
 import { createViewer } from '/app/geometry-viewer.mjs';
+import { createRadiationViewer } from '/app/radiation-viewer.mjs';
 
-// CodeMirror 6 — pin @codemirror/state version across all packages to avoid duplicate instances
 const cmState = 'https://esm.sh/@codemirror/state@6.5.2';
 const { EditorState } = await import(cmState);
 const { EditorView, basicSetup } = await import(`https://esm.sh/codemirror@6.0.1?deps=@codemirror/state@6.5.2`);
 const { xml } = await import(`https://esm.sh/@codemirror/lang-xml@6.1.0?deps=@codemirror/state@6.5.2`);
+const { oneDark } = await import(`https://esm.sh/@codemirror/theme-one-dark@6.1.2?deps=@codemirror/state@6.5.2`);
 
-// ---- Examples map ----
 const EXAMPLES = {
   patch: PATCH_ANTENNA,
   msl: MSL_NOTCH_FILTER,
+  helical: HELICAL_ANTENNA,
   waveguide: RECT_WAVEGUIDE,
 };
 
 let viewerDirty = true;
-// ---- CodeMirror editor ----
+
+const themeOverrides = EditorView.theme({
+  '&': { fontSize: '12px', backgroundColor: 'var(--surface)' },
+  '.cm-content': { fontFamily: "var(--mono)" },
+  '.cm-gutters': { fontSize: '11px', backgroundColor: 'var(--surface)', borderRight: '1px solid var(--border)' },
+}, { dark: true });
+
 const cmView = new EditorView({
   state: EditorState.create({
     doc: PATCH_ANTENNA,
     extensions: [
       basicSetup,
       xml(),
-      EditorView.theme({
-        '&': { fontSize: '12px' },
-        '.cm-content': { fontFamily: "'SF Mono', 'Menlo', 'Consolas', monospace" },
-        '.cm-gutters': { fontSize: '11px' },
-      }),
+      oneDark,
+      themeOverrides,
       EditorView.updateListener.of(update => {
-        if (update.docChanged) { validateXML(); viewerDirty = true; }
+        if (update.docChanged) { validateXML(); viewerDirty = true; updateRadiationVisibility(); }
       }),
     ],
   }),
   parent: document.getElementById('editor-container'),
 });
 
-// Wrapper matching textarea API used by the rest of the code
 const editorTextarea = {
   get value() { return cmView.state.doc.toString(); },
   set value(v) {
@@ -272,7 +410,7 @@ const editorTextarea = {
       changes: { from: 0, to: cmView.state.doc.length, insert: v },
     });
   },
-  addEventListener() {}, // handled by EditorView.updateListener
+  addEventListener() {},
 };
 const exampleSelect = document.getElementById('example-select');
 const btnRun = document.getElementById('btn-run');
@@ -285,8 +423,6 @@ const simConsole = document.getElementById('sim-console');
 const loadingOverlay = document.getElementById('loading-overlay');
 const rawDataPre = document.getElementById('raw-data');
 
-
-// ---- XML validation ----
 const editorError = document.getElementById('editor-error');
 function validateXML() {
   const xml = editorTextarea.value.trim();
@@ -305,6 +441,13 @@ function validateXML() {
     editorError.classList.add('visible');
   }
 }
+
+function updateRadiationVisibility() {
+  const has = /<DumpBox\b/i.test(editorTextarea.value);
+  document.getElementById('section-radiation').style.display = has ? '' : 'none';
+  document.getElementById('section-radiation-3d').style.display = has ? '' : 'none';
+}
+updateRadiationVisibility();
 
 // ---- 3D Geometry Viewer ----
 const viewer3d = createViewer(document.getElementById('viewer-3d'));
@@ -336,13 +479,11 @@ document.querySelector('.tab-group').addEventListener('click', (e) => {
   }
 });
 
-// ---- Console log helper ----
 function logConsole(msg) {
   simConsole.textContent += msg + '\n';
   simConsole.scrollTop = simConsole.scrollHeight;
 }
 
-// ---- Load example on select ----
 exampleSelect.addEventListener('change', () => {
   const key = exampleSelect.value;
   if (key && EXAMPLES[key]) {
@@ -356,7 +497,6 @@ exampleSelect.addEventListener('change', () => {
   }
 });
 
-// ---- Share ----
 btnShare.addEventListener('click', async () => {
   const xml = editorTextarea.value.trim();
   if (!xml) { logConsole('Nothing to share - editor is empty.'); return; }
@@ -370,7 +510,6 @@ btnShare.addEventListener('click', async () => {
   }
 });
 
-// ---- Load from URL on page load ----
 async function loadFromURL() {
   try {
     const xml = await loadSharedConfig();
@@ -383,29 +522,18 @@ async function loadFromURL() {
   }
 }
 
-// ---- Back/forward navigation ----
 window.addEventListener('hashchange', async () => {
   await loadFromURL();
 });
 
 // ---- SVG Plotting ----
 
-/**
- * Render a simple line chart in SVG.
- * @param {HTMLElement} container
- * @param {Object} opts
- * @param {string} opts.title
- * @param {string} opts.xLabel
- * @param {string} opts.yLabel
- * @param {Array<{x: number[], y: number[], label: string, color: string}>} opts.lines
- */
-function plotSVG(container, { title, xLabel, yLabel, lines }) {
+function plotSVG(container, { title, xLabel, yLabel, lines, refLines }) {
   const W = 520, H = 320;
   const margin = { top: 30, right: 20, bottom: 40, left: 55 };
   const pw = W - margin.left - margin.right;
   const ph = H - margin.top - margin.bottom;
 
-  // Compute data bounds
   let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
   for (const line of lines) {
     for (let i = 0; i < line.x.length; i++) {
@@ -423,7 +551,6 @@ function plotSVG(container, { title, xLabel, yLabel, lines }) {
   if (xMin === xMax) { xMin -= 0.5; xMax += 0.5; }
   if (yMin === yMax) { yMin -= 0.5; yMax += 0.5; }
 
-  // Add 5% padding
   const xPad = (xMax - xMin) * 0.05 || 0.1;
   const yPad = (yMax - yMin) * 0.05 || 0.1;
   xMin -= xPad; xMax += xPad;
@@ -432,7 +559,6 @@ function plotSVG(container, { title, xLabel, yLabel, lines }) {
   const sx = (v) => margin.left + ((v - xMin) / (xMax - xMin)) * pw;
   const sy = (v) => margin.top + (1 - (v - yMin) / (yMax - yMin)) * ph;
 
-  // Generate tick values
   function ticks(lo, hi, count) {
     const step = niceStep((hi - lo) / count);
     const start = Math.ceil(lo / step) * step;
@@ -459,37 +585,40 @@ function plotSVG(container, { title, xLabel, yLabel, lines }) {
   const xticks = ticks(xMin, xMax, 6);
   const yticks = ticks(yMin, yMax, 5);
 
-  let svg = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">`;
-  svg += `<rect width="${W}" height="${H}" fill="#fafafa"/>`;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" font-family="'Inter',system-ui,sans-serif">`;
+  svg += `<rect width="${W}" height="${H}" fill="#16161c" rx="6"/>`;
 
-  // Title
-  svg += `<text x="${W / 2}" y="16" text-anchor="middle" font-size="13" font-weight="600">${esc(title)}</text>`;
+  svg += `<text x="${W / 2}" y="18" text-anchor="middle" font-size="12" font-weight="600" fill="#e2e2e8">${esc(title)}</text>`;
 
-  // Grid + axes
-  svg += `<g stroke="#e0e0e0" stroke-width="0.5">`;
+  svg += `<g stroke="#2a2a35" stroke-width="0.5">`;
   for (const v of xticks) svg += `<line x1="${sx(v)}" y1="${margin.top}" x2="${sx(v)}" y2="${margin.top + ph}"/>`;
   for (const v of yticks) svg += `<line x1="${margin.left}" y1="${sy(v)}" x2="${margin.left + pw}" y2="${sy(v)}"/>`;
   svg += `</g>`;
 
-  // Axis lines
-  svg += `<line x1="${margin.left}" y1="${margin.top + ph}" x2="${margin.left + pw}" y2="${margin.top + ph}" stroke="#333" stroke-width="1"/>`;
-  svg += `<line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top + ph}" stroke="#333" stroke-width="1"/>`;
+  svg += `<line x1="${margin.left}" y1="${margin.top + ph}" x2="${margin.left + pw}" y2="${margin.top + ph}" stroke="#3a3a48" stroke-width="1"/>`;
+  svg += `<line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top + ph}" stroke="#3a3a48" stroke-width="1"/>`;
 
-  // X ticks
   for (const v of xticks) {
-    svg += `<text x="${sx(v)}" y="${margin.top + ph + 14}" text-anchor="middle" font-size="10">${fmtNum(v)}</text>`;
+    svg += `<text x="${sx(v)}" y="${margin.top + ph + 14}" text-anchor="middle" font-size="10" fill="#8888a0">${fmtNum(v)}</text>`;
   }
-  // Y ticks
   for (const v of yticks) {
-    svg += `<text x="${margin.left - 5}" y="${sy(v) + 3}" text-anchor="end" font-size="10">${fmtNum(v)}</text>`;
+    svg += `<text x="${margin.left - 5}" y="${sy(v) + 3}" text-anchor="end" font-size="10" fill="#8888a0">${fmtNum(v)}</text>`;
   }
 
-  // Axis labels
-  svg += `<text x="${W / 2}" y="${H - 4}" text-anchor="middle" font-size="11">${esc(xLabel)}</text>`;
-  svg += `<text x="12" y="${H / 2}" text-anchor="middle" font-size="11" transform="rotate(-90,12,${H / 2})">${esc(yLabel)}</text>`;
+  svg += `<text x="${W / 2}" y="${H - 4}" text-anchor="middle" font-size="10" fill="#55556a">${esc(xLabel)}</text>`;
+  svg += `<text x="12" y="${H / 2}" text-anchor="middle" font-size="10" fill="#55556a" transform="rotate(-90,12,${H / 2})">${esc(yLabel)}</text>`;
 
-  // Data lines
-  const colors = ['#2563eb', '#dc2626', '#059669', '#d97706', '#7c3aed', '#0891b2'];
+  if (refLines) {
+    for (const ref of refLines) {
+      const y = sy(ref.value);
+      if (y >= margin.top && y <= margin.top + ph) {
+        svg += `<line x1="${margin.left}" y1="${y}" x2="${margin.left + pw}" y2="${y}" stroke="${ref.color || '#55556a'}" stroke-width="1" stroke-dasharray="4,3"/>`;
+        if (ref.label) svg += `<text x="${margin.left + pw - 2}" y="${y - 4}" text-anchor="end" font-size="9" fill="${ref.color || '#55556a'}">${esc(ref.label)}</text>`;
+      }
+    }
+  }
+
+  const colors = ['#818cf8', '#f87171', '#34d399', '#fb923c', '#a78bfa', '#22d3ee'];
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li];
     const color = line.color || colors[li % colors.length];
@@ -505,14 +634,13 @@ function plotSVG(container, { title, xLabel, yLabel, lines }) {
     svg += `<path d="${path}" fill="none" stroke="${color}" stroke-width="1.5"/>`;
   }
 
-  // Legend
   if (lines.length > 1) {
     const lx = margin.left + 10;
     let ly = margin.top + 14;
     for (let li = 0; li < lines.length; li++) {
       const color = lines[li].color || colors[li % colors.length];
       svg += `<line x1="${lx}" y1="${ly}" x2="${lx + 16}" y2="${ly}" stroke="${color}" stroke-width="2"/>`;
-      svg += `<text x="${lx + 20}" y="${ly + 3}" font-size="10">${esc(lines[li].label || `trace ${li + 1}`)}</text>`;
+      svg += `<text x="${lx + 20}" y="${ly + 3}" font-size="10" fill="#8888a0">${esc(lines[li].label || `trace ${li + 1}`)}</text>`;
       ly += 14;
     }
   }
@@ -528,8 +656,8 @@ function esc(s) {
 // ---- Simulation worker ----
 
 let running = false;
-
-// All simulation code moved to sim-worker.mjs
+let simStartTime = 0;
+let elapsedTimer = null;
 const simWorker = new Worker('/app/sim-worker.js');
 
 simWorker.onmessage = (e) => {
@@ -542,14 +670,13 @@ simWorker.onmessage = (e) => {
       statusTs.textContent = String(d.step);
       break;
     case 'done': {
-      const { nrTS, elapsed, probeData, nf2ffData } = d;
+      const { nrTS, elapsed, probeData, nf2ffData, fMax } = d;
       statusElapsed.textContent = elapsed + 's';
       statusTs.textContent = String(nrTS);
       statusText.textContent = 'Done';
       logConsole(`Simulation complete. ${nrTS} timesteps in ${elapsed}s.`);
       logConsole('Reading probe data...');
 
-      // Display raw data
       if (Object.keys(probeData).length > 0) {
         let rawText = '';
         for (const [name, text] of Object.entries(probeData)) {
@@ -562,7 +689,6 @@ simWorker.onmessage = (e) => {
         rawDataPre.textContent = rawText;
       }
 
-      // Parse probes for plotting
       const parsedProbes = {};
       for (const [name, text] of Object.entries(probeData)) {
         const lines = text.split('\n').filter(l => !l.startsWith('%') && l.trim());
@@ -575,26 +701,16 @@ simWorker.onmessage = (e) => {
         }
         parsedProbes[name] = { time, values };
       }
-      tryPlotSParams(parsedProbes);
+      tryPlotSParams(parsedProbes, fMax);
       tryPlotImpedance(parsedProbes);
 
-      // NF2FF radiation pattern
       if (nf2ffData) {
-        const { thetaDeg, E_norm, Dmax, nPhi } = nf2ffData;
-        let maxE = 0;
-        for (const v of E_norm) if (v > maxE) maxE = v;
-        const nTheta = thetaDeg.length;
-        const DmaxdBi = 10 * Math.log10(Math.max(Dmax, 1e-15));
-        const xzPattern = new Array(nTheta);
-        const yzPattern = new Array(nTheta);
-        for (let i = 0; i < nTheta; i++) {
-          xzPattern[i] = 20 * Math.log10(Math.max(E_norm[i * nPhi + 0] / maxE, 1e-15)) + DmaxdBi;
-          yzPattern[i] = 20 * Math.log10(Math.max(E_norm[i * nPhi + 1] / maxE, 1e-15)) + DmaxdBi;
-        }
-        window._lastNF2FFData = { theta: thetaDeg, xzPattern, yzPattern };
+        window._lastNF2FFData = nf2ffData;
         tryPlotRadiation();
+        tryPlotRadiation3D();
       }
 
+      clearInterval(elapsedTimer);
       running = false;
       btnRun.disabled = false;
       btnStop.disabled = true;
@@ -603,6 +719,7 @@ simWorker.onmessage = (e) => {
     case 'error':
       statusText.textContent = 'Error';
       logConsole(`Error: ${d.msg}`);
+      clearInterval(elapsedTimer);
       running = false;
       btnRun.disabled = false;
       btnStop.disabled = true;
@@ -619,8 +736,20 @@ btnRun.addEventListener('click', () => {
   btnRun.disabled = true;
   btnStop.disabled = false;
   statusText.textContent = 'Running';
+  statusTs.textContent = '0';
+  statusElapsed.textContent = '0.0s';
   simConsole.textContent = '';
+  rawDataPre.textContent = 'No data yet.';
+  document.getElementById('plot-sparam').innerHTML = '<p>Running...</p>';
+  document.getElementById('plot-impedance').innerHTML = '<p>Running...</p>';
+  document.getElementById('plot-radiation').innerHTML = '<p>Running...</p>';
+  window._lastZdata = null;
+  window._lastNF2FFData = null;
   logConsole('Starting simulation...');
+  simStartTime = performance.now();
+  elapsedTimer = setInterval(() => {
+    statusElapsed.textContent = ((performance.now() - simStartTime) / 1000).toFixed(1) + 's';
+  }, 100);
   simWorker.postMessage({ type: 'run', xml });
 });
 
@@ -629,8 +758,7 @@ btnStop.addEventListener('click', () => {
   logConsole('Stop requested.');
 });
 
-function tryPlotSParams(probes) {
-  // Look for voltage/current probe pairs
+function tryPlotSParams(probes, simFMax) {
   const utKeys = Object.keys(probes).filter(k => k.includes('_ut'));
   const itKeys = Object.keys(probes).filter(k => k.includes('_it'));
 
@@ -639,20 +767,17 @@ function tryPlotSParams(probes) {
     return;
   }
 
-  // Simple S11 from first port: S11 = (Z - Z0) / (Z + Z0) via V/I
   const ut = probes[utKeys[0]];
   const it = probes[itKeys[0]];
   if (!ut || !it || ut.time.length < 10) return;
 
-  // Compute DFT and S11
   const N = Math.min(ut.time.length, it.time.length);
   const dt = ut.time[1] - ut.time[0];
-  const fmax = 0.5 / dt;
+  const fmax = simFMax > 0 ? simFMax : 0.5 / dt;
   const nf = 201;
   const freq = new Float64Array(nf);
   for (let i = 0; i < nf; i++) freq[i] = (i / (nf - 1)) * fmax;
 
-  // DFT
   function dft(time, values, freqs) {
     const re = new Float64Array(freqs.length);
     const im = new Float64Array(freqs.length);
@@ -673,7 +798,6 @@ function tryPlotSParams(probes) {
   const Uf = dft(ut.time, ut.values, freq);
   const If = dft(it.time, it.values, freq);
 
-  // Z = U / I, S11 = (Z - 50) / (Z + 50)
   const Z0 = 50;
   const s11_dB = new Float64Array(nf);
   const z_re = new Float64Array(nf);
@@ -687,7 +811,6 @@ function tryPlotSParams(probes) {
     z_re[i] = zr;
     z_im[i] = zi;
 
-    // Gamma = (Z - Z0) / (Z + Z0)
     const gnr = zr - Z0;
     const gni = zi;
     const gdr = zr + Z0;
@@ -699,24 +822,20 @@ function tryPlotSParams(probes) {
     s11_dB[i] = 20 * Math.log10(Math.max(mag, 1e-15));
   }
 
-  // Convert freq to GHz for display
   const freqGHz = Array.from(freq).map(f => f / 1e9);
 
   plotSVG(document.getElementById('plot-sparam'), {
     title: 'S11 (Return Loss)',
     xLabel: 'Frequency (GHz)',
     yLabel: 'S11 (dB)',
-    lines: [{ x: freqGHz, y: Array.from(s11_dB), label: 'S11', color: '#2563eb' }],
+    lines: [{ x: freqGHz, y: Array.from(s11_dB), label: 'S11', color: '#818cf8' }],
   });
 
   logConsole('S-parameter plot updated.');
-
-  // Store for impedance plot
   window._lastZdata = { freqGHz, z_re, z_im };
 }
 
 function tryPlotImpedance(probes) {
-  // Use data computed by tryPlotSParams
   setTimeout(() => {
     if (!window._lastZdata) return;
     const { freqGHz, z_re, z_im } = window._lastZdata;
@@ -725,30 +844,107 @@ function tryPlotImpedance(probes) {
       xLabel: 'Frequency (GHz)',
       yLabel: 'Z (Ohm)',
       lines: [
-        { x: freqGHz, y: Array.from(z_re), label: 'Re(Z)', color: '#2563eb' },
-        { x: freqGHz, y: Array.from(z_im), label: 'Im(Z)', color: '#dc2626' },
+        { x: freqGHz, y: Array.from(z_re), label: 'Re(Z)', color: '#818cf8' },
+        { x: freqGHz, y: Array.from(z_im), label: 'Im(Z)', color: '#f87171' },
       ],
+      refLines: [{ value: 50, label: '50\u2126', color: '#55556a' }],
     });
     logConsole('Impedance plot updated.');
   }, 0);
 }
 
-function tryPlotRadiation(probes) {
-  // Read NF2FF data if available from simulation
-  // For XML-based runs, NF2FF dumps need post-processing
-  // Show placeholder if no data, show pattern if data available from nf2ff files
+function tryPlotRadiation() {
   if (!window._lastNF2FFData) return;
-  const { theta, xzPattern, yzPattern } = window._lastNF2FFData;
-  plotSVG(document.getElementById('plot-radiation'), {
-    title: 'Radiation Pattern',
-    xLabel: 'Theta (deg)',
-    yLabel: 'Directivity (dBi)',
-    lines: [
-      { x: theta, y: xzPattern, label: 'xz-plane', color: '#2563eb' },
-      { x: theta, y: yzPattern, label: 'yz-plane', color: '#dc2626' },
-    ],
+  const { thetaDeg: theta, xzPattern, yzPattern } = window._lastNF2FFData;
+  const container = document.getElementById('plot-radiation');
+
+  const W = 520, H = 320;
+  const cx1 = W * 0.25 + 10, cx2 = W * 0.75 - 10, cy = H / 2 + 10;
+  const R = Math.min(W / 4 - 20, H / 2 - 30);
+  const dbMin = -30, dbMax = 0;
+  const dbRange = dbMax - dbMin;
+
+  // Find peak for normalization reference
+  let peak = -Infinity;
+  for (const v of xzPattern) if (isFinite(v) && v > peak) peak = v;
+  for (const v of yzPattern) if (isFinite(v) && v > peak) peak = v;
+
+  function polarPath(thetaDeg, patternDBi, cx_) {
+    let path = '';
+    for (let i = 0; i < thetaDeg.length; i++) {
+      const dB = patternDBi[i] - peak; // normalize to peak
+      if (!isFinite(dB)) continue;
+      const clamped = Math.max(dbMin, Math.min(dbMax, dB));
+      const r = ((clamped - dbMin) / dbRange) * R;
+      const angle = (thetaDeg[i] - 90) * Math.PI / 180; // 0° at top
+      const x = cx_ + r * Math.cos(angle);
+      const y = cy + r * Math.sin(angle);
+      path += path ? `L${x.toFixed(1)},${y.toFixed(1)}` : `M${x.toFixed(1)},${y.toFixed(1)}`;
+    }
+    return path + 'Z';
+  }
+
+  function polarGrid(cx_) {
+    let g = '';
+    const rings = [0, -10, -20, -30];
+    for (const db of rings) {
+      const r = ((db - dbMin) / dbRange) * R;
+      g += `<circle cx="${cx_}" cy="${cy}" r="${r}" fill="none" stroke="#2a2a35" stroke-width="0.5"/>`;
+      if (db > dbMin) {
+        g += `<text x="${cx_ + 3}" y="${cy - r + 10}" font-size="8" fill="#55556a">${db}</text>`;
+      }
+    }
+    // Angle lines every 45°
+    for (let a = 0; a < 360; a += 45) {
+      const rad = (a - 90) * Math.PI / 180;
+      const x2 = cx_ + R * Math.cos(rad);
+      const y2 = cy + R * Math.sin(rad);
+      g += `<line x1="${cx_}" y1="${cy}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="#2a2a35" stroke-width="0.5"/>`;
+      // Angle labels
+      const lx = cx_ + (R + 10) * Math.cos(rad);
+      const ly = cy + (R + 10) * Math.sin(rad);
+      g += `<text x="${lx.toFixed(1)}" y="${(ly + 3).toFixed(1)}" text-anchor="middle" font-size="8" fill="#55556a">${a}°</text>`;
+    }
+    return g;
+  }
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" font-family="'Inter',system-ui,sans-serif">`;
+  svg += `<rect width="${W}" height="${H}" fill="#16161c" rx="6"/>`;
+  svg += `<text x="${W / 2}" y="16" text-anchor="middle" font-size="12" font-weight="600" fill="#e2e2e8">Radiation Pattern</text>`;
+
+  // E-plane (xz, phi=0)
+  svg += polarGrid(cx1);
+  svg += `<path d="${polarPath(theta, xzPattern, cx1)}" fill="rgba(129,140,248,0.1)" stroke="#818cf8" stroke-width="1.5"/>`;
+  svg += `<text x="${cx1}" y="${H - 4}" text-anchor="middle" font-size="10" fill="#818cf8">E-plane (φ=0°)</text>`;
+
+  // H-plane (yz, phi=90)
+  svg += polarGrid(cx2);
+  svg += `<path d="${polarPath(theta, yzPattern, cx2)}" fill="rgba(248,113,113,0.1)" stroke="#f87171" stroke-width="1.5"/>`;
+  svg += `<text x="${cx2}" y="${H - 4}" text-anchor="middle" font-size="10" fill="#f87171">H-plane (φ=90°)</text>`;
+
+  // Peak directivity label
+  svg += `<text x="${W - 8}" y="16" text-anchor="end" font-size="9" fill="#55556a">Peak: ${peak.toFixed(1)} dBi</text>`;
+
+  svg += '</svg>';
+  container.innerHTML = svg;
+  logConsole('Radiation pattern updated.');
+}
+
+// ---- 3D Radiation Pattern ----
+let radiationViewer = null;
+function tryPlotRadiation3D() {
+  if (!window._lastNF2FFData) return;
+  const d = window._lastNF2FFData;
+  if (!d.thetaRad || !d.phiRad || !d.directivity_dBi) return;
+  if (!radiationViewer) {
+    radiationViewer = createRadiationViewer(document.getElementById('plot-radiation-3d'));
+  }
+  radiationViewer.update({
+    thetaRad: d.thetaRad,
+    phiRad: d.phiRad,
+    directivity_dBi: d.directivity_dBi,
+    Dmax_dBi: d.DmaxdBi,
   });
-  logConsole('Radiation pattern plot updated.');
 }
 
 // ---- Init ----

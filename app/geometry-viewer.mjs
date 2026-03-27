@@ -96,19 +96,20 @@ function buildSphere(el, scale, material) {
   return mesh;
 }
 
+function getVertices(el) {
+  const pts = el.querySelectorAll('Vertex');
+  return pts.length > 0 ? [...pts] : [...el.querySelectorAll('Point')];
+}
+
 function buildCurve(el, scale, material) {
-  const points = [...el.querySelectorAll('Point')].map(
-    p => parsePoint(p).multiplyScalar(scale),
-  );
+  const points = getVertices(el).map(p => parsePoint(p).multiplyScalar(scale));
   if (points.length < 2) return null;
   const geo = new THREE.BufferGeometry().setFromPoints(points);
   return new THREE.Line(geo, new THREE.LineBasicMaterial({ color: material.color }));
 }
 
 function buildWire(el, scale, material) {
-  const points = [...el.querySelectorAll('Point')].map(
-    p => parsePoint(p).multiplyScalar(scale),
-  );
+  const points = getVertices(el).map(p => parsePoint(p).multiplyScalar(scale));
   if (points.length < 2) return null;
   const radius = parseFloat(el.getAttribute('Radius') || '0.5') * scale;
   const curve = new THREE.CatmullRomCurve3(points, false);
@@ -191,7 +192,7 @@ function buildGridLines(grid) {
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(points, 3));
-  const mat = new THREE.LineBasicMaterial({ color: 0xdddddd });
+  const mat = new THREE.LineBasicMaterial({ color: 0x2a2a35 });
   return new THREE.LineSegments(geo, mat);
 }
 
@@ -219,7 +220,7 @@ export function createViewer(container) {
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xf0f0f0);
+  scene.background = new THREE.Color(0x16161c);
 
   const camera = new THREE.PerspectiveCamera(
     50,

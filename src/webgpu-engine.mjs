@@ -431,20 +431,12 @@ fn update_rlc(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 const MUR_ABC_WGSL = /* wgsl */`
-struct Params {
-    numLines: vec3<u32>,
-    numTS: u32,
-    shift: vec3<i32>,
-    _pad: u32,
-};
-
 struct MurParams {
     numPoints: u32,
     _pad: vec3<u32>,
 };
 
 @group(0) @binding(0) var<storage, read_write> volt: array<f32>;
-@group(0) @binding(2) var<uniform> params: Params;
 
 @group(1) @binding(0) var<uniform> mur: MurParams;
 @group(1) @binding(1) var<storage, read> normal_idx: array<u32>;
@@ -1380,12 +1372,12 @@ export class WebGPUEngine {
             shiftedIdxArr = config.shifted_idx;
         }
 
-        // MurParams uniform: numPoints(u32) + pad(vec3<u32>) = 16 bytes
+        // MurParams uniform: padded to 32 bytes for WebGPU minimum binding size
         const murParamsBuffer = this.device.createBuffer({
-            size: 16,
+            size: 32,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
-        this.device.queue.writeBuffer(murParamsBuffer, 0, new Uint32Array([numPoints, 0, 0, 0]));
+        this.device.queue.writeBuffer(murParamsBuffer, 0, new Uint32Array([numPoints, 0, 0, 0, 0, 0, 0, 0]));
 
         const normalIdxBuf = this._createAndUploadBuffer(normalIdxArr, GPUBufferUsage.STORAGE);
         const shiftedIdxBuf = this._createAndUploadBuffer(shiftedIdxArr, GPUBufferUsage.STORAGE);
@@ -1395,23 +1387,38 @@ export class WebGPUEngine {
         });
         const coeffBuf = this._createAndUploadBuffer(coeffArr, GPUBufferUsage.STORAGE);
 
-        // Create three pipelines for the three entry points
-        this.murPrePipeline = this._getOrCreateComputePipeline(
-            MUR_ABC_WGSL,
-            'mur_pre_voltage'
-        );
-        this.murPostPipeline = this._getOrCreateComputePipeline(
-            MUR_ABC_WGSL,
-            'mur_post_voltage'
-        );
-        this.murApplyPipeline = this._getOrCreateComputePipeline(
-            MUR_ABC_WGSL,
-            'mur_apply'
-        );
+        // Explicit bind group layouts (auto layout drops unused bindings per entry point)
+        const murGroup0Layout = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+            ],
+        });
+        const murGroup1Layout = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+            ],
+        });
+        const murPipelineLayout = this.device.createPipelineLayout({
+            bindGroupLayouts: [murGroup0Layout, murGroup1Layout],
+        });
 
-        // All three share the same bind group layout (group 1)
+        const murModule = this._getOrCreateShaderModule(MUR_ABC_WGSL);
+        this.murPrePipeline = this.device.createComputePipeline({
+            layout: murPipelineLayout, compute: { module: murModule, entryPoint: 'mur_pre_voltage' },
+        });
+        this.murPostPipeline = this.device.createComputePipeline({
+            layout: murPipelineLayout, compute: { module: murModule, entryPoint: 'mur_post_voltage' },
+        });
+        this.murApplyPipeline = this.device.createComputePipeline({
+            layout: murPipelineLayout, compute: { module: murModule, entryPoint: 'mur_apply' },
+        });
+
         this.murBindGroup = this.device.createBindGroup({
-            layout: this.murPrePipeline.getBindGroupLayout(1),
+            layout: murGroup1Layout,
             entries: [
                 { binding: 0, resource: { buffer: murParamsBuffer } },
                 { binding: 1, resource: { buffer: normalIdxBuf } },
@@ -1420,9 +1427,10 @@ export class WebGPUEngine {
                 { binding: 4, resource: { buffer: coeffBuf } },
             ],
         });
-        this._ensureCoreBindGroup(this.murPrePipeline);
-        this._ensureCoreBindGroup(this.murPostPipeline);
-        this._ensureCoreBindGroup(this.murApplyPipeline);
+        this._murCoreBindGroup = this.device.createBindGroup({
+            layout: murGroup0Layout,
+            entries: [{ binding: 0, resource: { buffer: this.voltBuffer } }],
+        });
 
         this._murNumPoints = numPoints;
         this._murBuffers = [murParamsBuffer, normalIdxBuf, shiftedIdxBuf, savedVoltBuf, coeffBuf];
@@ -1437,7 +1445,7 @@ export class WebGPUEngine {
         if (!this.murConfigured) return;
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.murPrePipeline);
-        pass.setBindGroup(0, this._coreBindGroupFor(this.murPrePipeline));
+        pass.setBindGroup(0, this._murCoreBindGroup);
         pass.setBindGroup(1, this.murBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
         pass.end();
@@ -1451,7 +1459,7 @@ export class WebGPUEngine {
         if (!this.murConfigured) return;
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.murPostPipeline);
-        pass.setBindGroup(0, this._coreBindGroupFor(this.murPostPipeline));
+        pass.setBindGroup(0, this._murCoreBindGroup);
         pass.setBindGroup(1, this.murBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
         pass.end();
@@ -1465,7 +1473,7 @@ export class WebGPUEngine {
         if (!this.murConfigured) return;
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.murApplyPipeline);
-        pass.setBindGroup(0, this._coreBindGroupFor(this.murApplyPipeline));
+        pass.setBindGroup(0, this._murCoreBindGroup);
         pass.setBindGroup(1, this.murBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
         pass.end();
@@ -2049,213 +2057,6 @@ fn main() {
     }
 
     /**
-     * Configure frequency-domain accumulation for NF2FF surface faces.
-     * Creates GPU buffers and compute pipelines for FD field accumulation.
-     * @param {Array} faces - array of face descriptors
-     */
-    configureFDAccumulation(faces) {
-        if (!faces || faces.length === 0) return;
-
-        this._fdFaces = [];
-
-        // Step params uniform (shared across all faces, updated each call)
-        // StepParams: numTS(u32) + pad(vec3<u32>) = 16 bytes, padded to 32 for alignment
-        this._fdStepParamsBuffer = this.device.createBuffer({
-            size: 32,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
-
-        const shaderCode = /* wgsl */ `
-struct FDParams {
-    numPoints: u32,
-    numNeighbors: u32,
-    numFreqs: u32,
-    dualTime: u32,
-    dT: f32,
-    fdInterval: u32,
-    _pad0: u32,
-    _pad1: u32,
-};
-
-struct StepParams {
-    numTS: u32,
-    _pad: vec3<u32>,
-};
-
-@group(0) @binding(0) var<storage, read> field: array<f32>;
-@group(0) @binding(1) var<storage, read> indices: array<u32>;
-@group(0) @binding(2) var<storage, read> weights: array<f32>;
-@group(0) @binding(3) var<storage, read_write> fd_accum: array<f32>;
-@group(0) @binding(4) var<uniform> params: FDParams;
-@group(0) @binding(5) var<storage, read> freqs: array<f32>;
-@group(0) @binding(6) var<uniform> step_params: StepParams;
-
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u) {
-    let pointIdx = gid.x;
-    if (pointIdx >= params.numPoints) { return; }
-
-    let nn = params.numNeighbors;
-
-    for (var comp = 0u; comp < 3u; comp++) {
-        // Gather interpolated field value
-        let baseIdx = (comp * params.numPoints + pointIdx) * nn;
-        var val: f32 = 0.0;
-        for (var k = 0u; k < nn; k++) {
-            val += weights[baseIdx + k] * field[indices[baseIdx + k]];
-        }
-
-        // Accumulate for each frequency
-        for (var fi = 0u; fi < params.numFreqs; fi++) {
-            let T = (f32(step_params.numTS) + f32(params.dualTime) * 0.5) * params.dT;
-            let phase = -2.0 * 3.14159265358979 * freqs[fi] * T;
-            let scale = 2.0 * params.dT * f32(params.fdInterval);
-
-            let outIdx = (fi * 3u * params.numPoints + comp * params.numPoints + pointIdx) * 2u;
-            fd_accum[outIdx] += val * cos(phase) * scale;      // real
-            fd_accum[outIdx + 1u] += val * sin(phase) * scale;  // imag
-        }
-    }
-}
-`;
-        const module = this.device.createShaderModule({ code: shaderCode });
-        const pipeline = this.device.createComputePipeline({
-            layout: 'auto',
-            compute: { module, entryPoint: 'main' },
-        });
-
-        for (const face of faces) {
-            if (face.numPoints === 0 || face.indices.length === 0) continue;
-
-            // Upload data buffers
-            const indexBuffer = this._createAndUploadBuffer(face.indices, GPUBufferUsage.STORAGE);
-            const weightBuffer = this._createAndUploadBuffer(face.weights, GPUBufferUsage.STORAGE);
-            const freqBuffer = this._createAndUploadBuffer(face.frequencies, GPUBufferUsage.STORAGE);
-
-            // FD accumulator: numFreqs * 3 * numPoints * 2 floats (re+im), initialized to 0
-            const accumSize = face.numFreqs * 3 * face.numPoints * 2 * 4;
-            const accumBuffer = this.device.createBuffer({
-                size: accumSize,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-            });
-
-            // Params uniform: 32 bytes
-            const paramsData = new ArrayBuffer(32);
-            const paramsU32 = new Uint32Array(paramsData);
-            const paramsF32 = new Float32Array(paramsData);
-            paramsU32[0] = face.numPoints;
-            paramsU32[1] = face.numNeighbors;
-            paramsU32[2] = face.numFreqs;
-            paramsU32[3] = face.dualTime ? 1 : 0;
-            paramsF32[4] = face.dT;
-            paramsU32[5] = face.fdInterval;
-            paramsU32[6] = 0; // pad
-            paramsU32[7] = 0; // pad
-            const paramsBuffer = this._createAndUploadBuffer(
-                new Uint8Array(paramsData), GPUBufferUsage.UNIFORM);
-
-            // Select field buffer: voltBuffer for E-field, currBuffer for H-field
-            const fieldBuffer = face.dualTime ? this.currBuffer : this.voltBuffer;
-
-            const bindGroup = this.device.createBindGroup({
-                layout: pipeline.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: { buffer: fieldBuffer } },
-                    { binding: 1, resource: { buffer: indexBuffer } },
-                    { binding: 2, resource: { buffer: weightBuffer } },
-                    { binding: 3, resource: { buffer: accumBuffer } },
-                    { binding: 4, resource: { buffer: paramsBuffer } },
-                    { binding: 5, resource: { buffer: freqBuffer } },
-                    { binding: 6, resource: { buffer: this._fdStepParamsBuffer } },
-                ],
-            });
-
-            this._fdFaces.push({
-                indexBuffer,
-                weightBuffer,
-                freqBuffer,
-                accumBuffer,
-                paramsBuffer,
-                bindGroup,
-                pipeline,
-                numPoints: face.numPoints,
-                numFreqs: face.numFreqs,
-                fdInterval: face.fdInterval,
-                accumSize,
-            });
-        }
-    }
-
-    /**
-     * Accumulate frequency-domain field values on GPU.
-     * Should be called after iterate() completes. Synchronous (no await).
-     * @param {number} numTS - current timestep number
-     */
-    accumulateFD(numTS) {
-        if (!this._fdFaces || this._fdFaces.length === 0) return;
-
-        // Check which faces need accumulation this step
-        const activeFaces = this._fdFaces.filter(f => numTS % f.fdInterval === 0);
-        if (activeFaces.length === 0) return;
-
-        // Update step_params uniform with current numTS
-        const stepData = new Uint32Array([numTS, 0, 0, 0, 0, 0, 0, 0]);
-        this.device.queue.writeBuffer(this._fdStepParamsBuffer, 0, stepData);
-
-        const encoder = this.device.createCommandEncoder();
-        const pass = encoder.beginComputePass();
-
-        for (const face of activeFaces) {
-            pass.setPipeline(face.pipeline);
-            pass.setBindGroup(0, face.bindGroup);
-            pass.dispatchWorkgroups(Math.ceil(face.numPoints / 64));
-        }
-
-        pass.end();
-        this.device.queue.submit([encoder.finish()]);
-    }
-
-    /**
-     * Read back all FD accumulator buffers from GPU.
-     * @returns {Promise<Array<{data: Float32Array, numPoints: number, numFreqs: number}>>}
-     */
-    async readFDAccumulators() {
-        if (!this._fdFaces || this._fdFaces.length === 0) return [];
-
-        // Create readback buffers and copy all in a single encoder
-        const readbacks = [];
-        const encoder = this.device.createCommandEncoder();
-
-        for (const face of this._fdFaces) {
-            const readback = this.device.createBuffer({
-                size: face.accumSize,
-                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-            });
-            encoder.copyBufferToBuffer(face.accumBuffer, 0, readback, 0, face.accumSize);
-            readbacks.push(readback);
-        }
-
-        this.device.queue.submit([encoder.finish()]);
-
-        // Map all readback buffers in parallel
-        await Promise.all(readbacks.map(rb => rb.mapAsync(GPUMapMode.READ)));
-
-        const results = this._fdFaces.map((face, i) => {
-            const rb = readbacks[i];
-            const data = new Float32Array(rb.getMappedRange().slice(0));
-            rb.unmap();
-            rb.destroy();
-            return {
-                data,
-                numPoints: face.numPoints,
-                numFreqs: face.numFreqs,
-            };
-        });
-
-        return results;
-    }
-
-    /**
      * Destroy all GPU resources.
      */
     destroy() {
@@ -2302,14 +2103,6 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         for (const buf of [this._gatherIndexBuffer, this._gatherOutBuffer,
                            this._energyPartialBuffer, this._energyResultBuffer]) {
             if (buf) buf.destroy();
-        }
-        // Destroy FD accumulation buffers
-        if (this._fdStepParamsBuffer) this._fdStepParamsBuffer.destroy();
-        for (const face of (this._fdFaces || [])) {
-            for (const buf of [face.indexBuffer, face.weightBuffer, face.freqBuffer,
-                               face.accumBuffer, face.paramsBuffer]) {
-                if (buf) buf.destroy();
-            }
         }
 
         if (this.device) {

@@ -16,8 +16,7 @@ export const PATCH_ANTENNA = `<?xml version="1.0" encoding="UTF-8"?>
 <openEMS>
   <FDTD NumberOfTimesteps="30000" endCriteria="1e-5" f_max="6e9">
     <Excitation Type="0" f0="3e9" fc="3e9"/>
-    <BoundaryCond xmin="3" xmax="3" ymin="3" ymax="3" zmin="3" zmax="3"
-                  PML_xmin="8" PML_xmax="8" PML_ymin="8" PML_ymax="8" PML_zmin="8" PML_zmax="8"/>
+    <BoundaryCond xmin="2" xmax="2" ymin="2" ymax="2" zmin="2" zmax="2"/>
   </FDTD>
   <ContinuousStructure CoordSystem="0">
     <RectilinearGrid DeltaUnit="1e-3">
@@ -67,7 +66,7 @@ export const PATCH_ANTENNA = `<?xml version="1.0" encoding="UTF-8"?>
           </Box>
         </Primitives>
       </Excitation>
-      <ProbeBox Name="port_ut1" Type="0" Weight="1">
+      <ProbeBox Name="port_ut1" Type="0" Weight="-1">
         <Primitives>
           <Box Priority="0">
             <P1 X="-5.5" Y="0" Z="0"/>
@@ -120,8 +119,7 @@ export const MSL_NOTCH_FILTER = `<?xml version="1.0" encoding="UTF-8"?>
 <openEMS>
   <FDTD NumberOfTimesteps="20000" endCriteria="1e-5" f_max="10e9">
     <Excitation Type="0" f0="5e9" fc="5e9"/>
-    <BoundaryCond xmin="3" xmax="3" ymin="3" ymax="3" zmin="0" zmax="3"
-                  PML_xmin="8" PML_xmax="8" PML_ymin="8" PML_ymax="8" PML_zmin="0" PML_zmax="8"/>
+    <BoundaryCond xmin="2" xmax="2" ymin="2" ymax="2" zmin="0" zmax="2"/>
   </FDTD>
   <ContinuousStructure CoordSystem="0">
     <RectilinearGrid DeltaUnit="1e-3">
@@ -179,7 +177,7 @@ export const MSL_NOTCH_FILTER = `<?xml version="1.0" encoding="UTF-8"?>
           </Box>
         </Primitives>
       </Excitation>
-      <ProbeBox Name="port_ut1" Type="0" Weight="1">
+      <ProbeBox Name="port_ut1" Type="0" Weight="-1">
         <Primitives>
           <Box Priority="0">
             <P1 X="-18" Y="0" Z="0"/>
@@ -203,7 +201,7 @@ export const MSL_NOTCH_FILTER = `<?xml version="1.0" encoding="UTF-8"?>
           </Box>
         </Primitives>
       </LumpedElement>
-      <ProbeBox Name="port_ut2" Type="0" Weight="1">
+      <ProbeBox Name="port_ut2" Type="0" Weight="-1">
         <Primitives>
           <Box Priority="0">
             <P1 X="18" Y="0" Z="0"/>
@@ -230,12 +228,195 @@ export const MSL_NOTCH_FILTER = `<?xml version="1.0" encoding="UTF-8"?>
  * PEC walls, PML termination at both ends.
  * Gaussian excitation covering 8-12 GHz (X-band).
  */
+/**
+ * Helical Antenna example.
+ *
+ * Based on https://docs.openems.de/python/openEMS/Tutorials/Helical_Antenna.html
+ * 9-turn axial-mode helix at 2.4 GHz. Radius 20 mm, pitch 30 mm.
+ * Circular ground plane (r = 62.5 mm). Feed impedance 120 Ohm.
+ * Gaussian excitation 1.9-2.9 GHz, MUR boundaries + PML on zmax.
+ */
+export const HELICAL_ANTENNA = `<?xml version="1.0" encoding="UTF-8"?>
+<openEMS>
+  <FDTD NumberOfTimesteps="30000" endCriteria="1e-4" f_max="2.9e9">
+    <Excitation Type="0" f0="2.4e9" fc="0.5e9"/>
+    <BoundaryCond xmin="2" xmax="2" ymin="2" ymax="2" zmin="2" zmax="2"/>
+  </FDTD>
+  <ContinuousStructure CoordSystem="0">
+    <RectilinearGrid DeltaUnit="1e-3">
+      <XLines>-130,-110,-90,-75,-62.5,-50,-40,-30,-25,-20,-15,-10,-5,0,5,10,15,20,25,30,40,50,62.5,75,90,110,130</XLines>
+      <YLines>-130,-110,-90,-75,-62.5,-50,-40,-30,-25,-20,-15,-10,-5,0,5,10,15,20,25,30,40,50,62.5,75,90,110,130</YLines>
+      <ZLines>-130,-100,-70,-40,-20,-10,-5,0,1.5,3,15,30,45,60,75,90,105,120,135,150,165,180,195,210,225,240,255,270,285,300,320,350,400</ZLines>
+    </RectilinearGrid>
+    <Properties>
+      <Metal Name="helix">
+        <Primitives>
+          <Curve Priority="5">
+            <Vertex X="20.00" Y="0.00" Z="3.00"/>
+            <Vertex X="16.18" Y="11.76" Z="6.00"/>
+            <Vertex X="6.18" Y="19.02" Z="9.00"/>
+            <Vertex X="-6.18" Y="19.02" Z="12.00"/>
+            <Vertex X="-16.18" Y="11.76" Z="15.00"/>
+            <Vertex X="-20.00" Y="0.00" Z="18.00"/>
+            <Vertex X="-16.18" Y="-11.76" Z="21.00"/>
+            <Vertex X="-6.18" Y="-19.02" Z="24.00"/>
+            <Vertex X="6.18" Y="-19.02" Z="27.00"/>
+            <Vertex X="16.18" Y="-11.76" Z="30.00"/>
+            <Vertex X="20.00" Y="0.00" Z="33.00"/>
+            <Vertex X="16.18" Y="11.76" Z="36.00"/>
+            <Vertex X="6.18" Y="19.02" Z="39.00"/>
+            <Vertex X="-6.18" Y="19.02" Z="42.00"/>
+            <Vertex X="-16.18" Y="11.76" Z="45.00"/>
+            <Vertex X="-20.00" Y="0.00" Z="48.00"/>
+            <Vertex X="-16.18" Y="-11.76" Z="51.00"/>
+            <Vertex X="-6.18" Y="-19.02" Z="54.00"/>
+            <Vertex X="6.18" Y="-19.02" Z="57.00"/>
+            <Vertex X="16.18" Y="-11.76" Z="60.00"/>
+            <Vertex X="20.00" Y="0.00" Z="63.00"/>
+            <Vertex X="16.18" Y="11.76" Z="66.00"/>
+            <Vertex X="6.18" Y="19.02" Z="69.00"/>
+            <Vertex X="-6.18" Y="19.02" Z="72.00"/>
+            <Vertex X="-16.18" Y="11.76" Z="75.00"/>
+            <Vertex X="-20.00" Y="0.00" Z="78.00"/>
+            <Vertex X="-16.18" Y="-11.76" Z="81.00"/>
+            <Vertex X="-6.18" Y="-19.02" Z="84.00"/>
+            <Vertex X="6.18" Y="-19.02" Z="87.00"/>
+            <Vertex X="16.18" Y="-11.76" Z="90.00"/>
+            <Vertex X="20.00" Y="0.00" Z="93.00"/>
+            <Vertex X="16.18" Y="11.76" Z="96.00"/>
+            <Vertex X="6.18" Y="19.02" Z="99.00"/>
+            <Vertex X="-6.18" Y="19.02" Z="102.00"/>
+            <Vertex X="-16.18" Y="11.76" Z="105.00"/>
+            <Vertex X="-20.00" Y="0.00" Z="108.00"/>
+            <Vertex X="-16.18" Y="-11.76" Z="111.00"/>
+            <Vertex X="-6.18" Y="-19.02" Z="114.00"/>
+            <Vertex X="6.18" Y="-19.02" Z="117.00"/>
+            <Vertex X="16.18" Y="-11.76" Z="120.00"/>
+            <Vertex X="20.00" Y="0.00" Z="123.00"/>
+            <Vertex X="16.18" Y="11.76" Z="126.00"/>
+            <Vertex X="6.18" Y="19.02" Z="129.00"/>
+            <Vertex X="-6.18" Y="19.02" Z="132.00"/>
+            <Vertex X="-16.18" Y="11.76" Z="135.00"/>
+            <Vertex X="-20.00" Y="0.00" Z="138.00"/>
+            <Vertex X="-16.18" Y="-11.76" Z="141.00"/>
+            <Vertex X="-6.18" Y="-19.02" Z="144.00"/>
+            <Vertex X="6.18" Y="-19.02" Z="147.00"/>
+            <Vertex X="16.18" Y="-11.76" Z="150.00"/>
+            <Vertex X="20.00" Y="0.00" Z="153.00"/>
+            <Vertex X="16.18" Y="11.76" Z="156.00"/>
+            <Vertex X="6.18" Y="19.02" Z="159.00"/>
+            <Vertex X="-6.18" Y="19.02" Z="162.00"/>
+            <Vertex X="-16.18" Y="11.76" Z="165.00"/>
+            <Vertex X="-20.00" Y="0.00" Z="168.00"/>
+            <Vertex X="-16.18" Y="-11.76" Z="171.00"/>
+            <Vertex X="-6.18" Y="-19.02" Z="174.00"/>
+            <Vertex X="6.18" Y="-19.02" Z="177.00"/>
+            <Vertex X="16.18" Y="-11.76" Z="180.00"/>
+            <Vertex X="20.00" Y="0.00" Z="183.00"/>
+            <Vertex X="16.18" Y="11.76" Z="186.00"/>
+            <Vertex X="6.18" Y="19.02" Z="189.00"/>
+            <Vertex X="-6.18" Y="19.02" Z="192.00"/>
+            <Vertex X="-16.18" Y="11.76" Z="195.00"/>
+            <Vertex X="-20.00" Y="0.00" Z="198.00"/>
+            <Vertex X="-16.18" Y="-11.76" Z="201.00"/>
+            <Vertex X="-6.18" Y="-19.02" Z="204.00"/>
+            <Vertex X="6.18" Y="-19.02" Z="207.00"/>
+            <Vertex X="16.18" Y="-11.76" Z="210.00"/>
+            <Vertex X="20.00" Y="0.00" Z="213.00"/>
+            <Vertex X="16.18" Y="11.76" Z="216.00"/>
+            <Vertex X="6.18" Y="19.02" Z="219.00"/>
+            <Vertex X="-6.18" Y="19.02" Z="222.00"/>
+            <Vertex X="-16.18" Y="11.76" Z="225.00"/>
+            <Vertex X="-20.00" Y="0.00" Z="228.00"/>
+            <Vertex X="-16.18" Y="-11.76" Z="231.00"/>
+            <Vertex X="-6.18" Y="-19.02" Z="234.00"/>
+            <Vertex X="6.18" Y="-19.02" Z="237.00"/>
+            <Vertex X="16.18" Y="-11.76" Z="240.00"/>
+            <Vertex X="20.00" Y="0.00" Z="243.00"/>
+            <Vertex X="16.18" Y="11.76" Z="246.00"/>
+            <Vertex X="6.18" Y="19.02" Z="249.00"/>
+            <Vertex X="-6.18" Y="19.02" Z="252.00"/>
+            <Vertex X="-16.18" Y="11.76" Z="255.00"/>
+            <Vertex X="-20.00" Y="0.00" Z="258.00"/>
+            <Vertex X="-16.18" Y="-11.76" Z="261.00"/>
+            <Vertex X="-6.18" Y="-19.02" Z="264.00"/>
+            <Vertex X="6.18" Y="-19.02" Z="267.00"/>
+            <Vertex X="16.18" Y="-11.76" Z="270.00"/>
+            <Vertex X="20.00" Y="0.00" Z="273.00"/>
+          </Curve>
+        </Primitives>
+      </Metal>
+      <Metal Name="gnd">
+        <Primitives>
+          <Cylinder Priority="10" Radius="62.5">
+            <P1 X="0" Y="0" Z="-0.1"/>
+            <P2 X="0" Y="0" Z="0.1"/>
+          </Cylinder>
+        </Primitives>
+      </Metal>
+      <LumpedElement Name="port_resist_1" Direction="2" R="120" C="0" L="0">
+        <Primitives>
+          <Box Priority="5">
+            <P1 X="20" Y="0" Z="0"/>
+            <P2 X="20" Y="0" Z="3"/>
+          </Box>
+        </Primitives>
+      </LumpedElement>
+      <Excitation Name="port_excite_1" Type="0" Excite="0,0,1">
+        <Primitives>
+          <Box Priority="5">
+            <P1 X="20" Y="0" Z="0"/>
+            <P2 X="20" Y="0" Z="3"/>
+          </Box>
+        </Primitives>
+      </Excitation>
+      <ProbeBox Name="port_ut1" Type="0" Weight="-1">
+        <Primitives>
+          <Box Priority="0">
+            <P1 X="20" Y="0" Z="0"/>
+            <P2 X="20" Y="0" Z="3"/>
+          </Box>
+        </Primitives>
+      </ProbeBox>
+      <ProbeBox Name="port_it1" Type="1" Weight="1" NormDir="2">
+        <Primitives>
+          <Box Priority="0">
+            <P1 X="15" Y="-5" Z="1.5"/>
+            <P2 X="25" Y="5" Z="1.5"/>
+          </Box>
+        </Primitives>
+      </ProbeBox>
+      <DumpBox Name="nf2ff_E" DumpType="10" DumpMode="1" FileType="1">
+        <FD_Samples>2.4e9</FD_Samples>
+        <Primitives>
+          <Box Priority="0"><P1 X="-90" Y="-90" Z="-40"/><P2 X="-90" Y="90" Z="320"/></Box>
+          <Box Priority="0"><P1 X="90" Y="-90" Z="-40"/><P2 X="90" Y="90" Z="320"/></Box>
+          <Box Priority="0"><P1 X="-90" Y="-90" Z="-40"/><P2 X="90" Y="-90" Z="320"/></Box>
+          <Box Priority="0"><P1 X="-90" Y="90" Z="-40"/><P2 X="90" Y="90" Z="320"/></Box>
+          <Box Priority="0"><P1 X="-90" Y="-90" Z="-40"/><P2 X="90" Y="90" Z="-40"/></Box>
+          <Box Priority="0"><P1 X="-90" Y="-90" Z="320"/><P2 X="90" Y="90" Z="320"/></Box>
+        </Primitives>
+      </DumpBox>
+      <DumpBox Name="nf2ff_H" DumpType="11" DumpMode="1" FileType="1">
+        <FD_Samples>2.4e9</FD_Samples>
+        <Primitives>
+          <Box Priority="0"><P1 X="-90" Y="-90" Z="-40"/><P2 X="-90" Y="90" Z="320"/></Box>
+          <Box Priority="0"><P1 X="90" Y="-90" Z="-40"/><P2 X="90" Y="90" Z="320"/></Box>
+          <Box Priority="0"><P1 X="-90" Y="-90" Z="-40"/><P2 X="90" Y="-90" Z="320"/></Box>
+          <Box Priority="0"><P1 X="-90" Y="90" Z="-40"/><P2 X="90" Y="90" Z="320"/></Box>
+          <Box Priority="0"><P1 X="-90" Y="-90" Z="-40"/><P2 X="90" Y="90" Z="-40"/></Box>
+          <Box Priority="0"><P1 X="-90" Y="-90" Z="320"/><P2 X="90" Y="90" Z="320"/></Box>
+        </Primitives>
+      </DumpBox>
+    </Properties>
+  </ContinuousStructure>
+</openEMS>`;
+
 export const RECT_WAVEGUIDE = `<?xml version="1.0" encoding="UTF-8"?>
 <openEMS>
   <FDTD NumberOfTimesteps="10000" endCriteria="1e-5" f_max="12e9">
     <Excitation Type="0" f0="10e9" fc="2e9"/>
-    <BoundaryCond xmin="3" xmax="3" ymin="0" ymax="0" zmin="0" zmax="0"
-                  PML_xmin="8" PML_xmax="8" PML_ymin="0" PML_ymax="0" PML_zmin="0" PML_zmax="0"/>
+    <BoundaryCond xmin="2" xmax="2" ymin="0" ymax="0" zmin="0" zmax="0"/>
   </FDTD>
   <ContinuousStructure CoordSystem="0">
     <RectilinearGrid DeltaUnit="1e-3">
@@ -272,7 +453,7 @@ export const RECT_WAVEGUIDE = `<?xml version="1.0" encoding="UTF-8"?>
           </Box>
         </Primitives>
       </Excitation>
-      <ProbeBox Name="port_ut1" Type="0" Weight="1">
+      <ProbeBox Name="port_ut1" Type="0" Weight="-1">
         <Primitives>
           <Box Priority="0">
             <P1 X="-20" Y="0" Z="5.08"/>
@@ -288,7 +469,7 @@ export const RECT_WAVEGUIDE = `<?xml version="1.0" encoding="UTF-8"?>
           </Box>
         </Primitives>
       </ProbeBox>
-      <ProbeBox Name="port_ut2" Type="0" Weight="1">
+      <ProbeBox Name="port_ut2" Type="0" Weight="-1">
         <Primitives>
           <Box Priority="0">
             <P1 X="20" Y="0" Z="5.08"/>
