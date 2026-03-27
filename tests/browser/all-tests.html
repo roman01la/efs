@@ -1154,7 +1154,20 @@ async function runSectionC() {
     const sim = new Simulation(WASMModule, { nrTS: 100, endCriteria: 1e-3 });
     sim.setExcitation({ type: 'gauss', f0: 5e9, fc: 4e9 });
     sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
-    sim.setGrid(1, Array.from(linspace(0, 0.05, 6)), Array.from(linspace(0, 0.02, 4)), Array.from(linspace(0, 0.06, 8)));
+    const xL = Array.from(linspace(0, 0.05, 6));
+    const yL = Array.from(linspace(0, 0.02, 4));
+    const zL = Array.from(linspace(0, 0.06, 8));
+    sim.setGrid(1, xL, yL, zL);
+
+    // Add excitation source so the operator doesn't warn
+    const ps = sim._csx.GetParameterSet();
+    const exc = WASMModule.CSPropExcitation.create(ps, 0);
+    exc.SetName('exc');
+    exc.SetExcitType(0);
+    exc.SetExcitation(1, 2);
+    sim._csx.AddProperty(exc);
+    const excBox = WASMModule.CSPrimBox.create(ps, exc);
+    excBox.SetStartStop(xL[2], yL[1], zL[2], xL[3], yL[2], zL[3]);
 
     const { ems } = await sim.runDirect({ engineType: 0, simPath: '/sim_coeff' });
 
