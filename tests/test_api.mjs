@@ -851,9 +851,9 @@ function testNF2FFBox() {
   assert(xml.includes('nf2ff_rec_H'), 'NF2FF XML has H-field dump');
   assert(xml.includes('DumpBox'), 'NF2FF XML has DumpBox elements');
 
-  // Count DumpBox entries (should be 2: one E, one H)
+  // Count DumpBox entries (12: one per face × 2 for E/H fields)
   const dumpBoxCount = (xml.match(/<DumpBox /g) || []).length;
-  assert(dumpBoxCount === 2, `NF2FF has 2 DumpBox properties (found ${dumpBoxCount})`);
+  assert(dumpBoxCount === 12, `NF2FF has 12 DumpBox properties (found ${dumpBoxCount})`);
 
   // Each DumpBox should have 6 box primitives (all 6 faces)
   // Total boxes in the dump section: 6 per dump * 2 dumps = 12
