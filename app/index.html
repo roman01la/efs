@@ -627,15 +627,28 @@ async function runWebGPU(Module, ems, simPath) {
   const device = gpuEngine.device;
 
   if (numProbes > 0) {
-    // Pack probe definitions: 8 values per probe (matching ProbeDef struct in WGSL)
-    const probeData = new ArrayBuffer(numProbes * 32);
+    // Pack probe definitions: 12 values per probe (matching ProbeDef struct in WGSL, 48 bytes aligned)
+    // struct ProbeDef { startXYZ, stopXYZ, normDir, sign, type, insideFlags, _pad0, _pad1 }
+    const PROBE_STRIDE = 12; // 12 u32s = 48 bytes (aligned to 16)
+    const probeData = new ArrayBuffer(numProbes * PROBE_STRIDE * 4);
     const probeU32 = new Uint32Array(probeData);
     const probeF32 = new Float32Array(probeData);
+    const probeTypes = new Uint32Array(numProbes);
     for (let i = 0; i < numProbes; i++) {
-      const b = i * 8, s = 1 + i * 10;
-      probeU32[b+0] = probeDefs.get(s+0); probeU32[b+1] = probeDefs.get(s+1); probeU32[b+2] = probeDefs.get(s+2);
-      probeU32[b+3] = probeDefs.get(s+3); probeU32[b+4] = probeDefs.get(s+4); probeU32[b+5] = probeDefs.get(s+5);
-      probeU32[b+6] = probeDefs.get(s+6); probeF32[b+7] = probeDefs.get(s+7);
+      const b = i * PROBE_STRIDE, s = 1 + i * 11;
+      probeU32[b+0] = probeDefs.get(s+0); // startX
+      probeU32[b+1] = probeDefs.get(s+1); // startY
+      probeU32[b+2] = probeDefs.get(s+2); // startZ
+      probeU32[b+3] = probeDefs.get(s+3); // stopX
+      probeU32[b+4] = probeDefs.get(s+4); // stopY
+      probeU32[b+5] = probeDefs.get(s+5); // stopZ
+      probeU32[b+6] = probeDefs.get(s+6); // normDir
+      probeF32[b+7] = probeDefs.get(s+7); // sign
+      probeU32[b+8] = probeDefs.get(s+9); // type (0=voltage, 1=current)
+      probeU32[b+9] = probeDefs.get(s+10);// insideFlags
+      probeU32[b+10] = 0; // pad
+      probeU32[b+11] = 0; // pad
+      probeTypes[i] = probeU32[b+8];
     }
 
     const [Nx, Ny, Nz] = config.gridSize;
@@ -659,6 +672,7 @@ async function runWebGPU(Module, ems, simPath) {
       layout: probePipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: gpuEngine.voltBuffer } },
+        { binding: 1, resource: { buffer: gpuEngine.currBuffer } },
         { binding: 2, resource: { buffer: paramsBuf } },
         { binding: 3, resource: { buffer: defsBuf } },
         { binding: 4, resource: { buffer: probeResultsBuf } },
@@ -682,7 +696,9 @@ async function runWebGPU(Module, ems, simPath) {
     await new Promise(r => setTimeout(r, 0));
 
     if (numProbes > 0) {
-      // Dispatch probe shader — reads ~6 field values, not 90K
+      // Read ONLY the probe grid cells from GPU (not all 90K fields).
+      // Use the probe shader to gather the cells, then write them into
+      // the WASM engine at the correct positions so doProcess() works.
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();
       pass.setPipeline(probePipeline);
@@ -696,8 +712,9 @@ async function runWebGPU(Module, ems, simPath) {
       const vals = new Float32Array(probeReadBuf.getMappedRange().slice(0));
       probeReadBuf.unmap();
 
-      // Write probe results to WASM and process
+      // Write GPU probe integral results into m_Results and process
       Module.HEAPF32.set(vals, probeStage >> 2);
+      ems.setTimestepCount(totalSteps);
       const next = ems.processProbeResults(probeStage, numProbes, totalSteps);
 
       statusTs.textContent = String(totalSteps);

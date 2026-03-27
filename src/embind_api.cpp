@@ -87,13 +87,16 @@ class Processing_Accessor : public Processing {
 public:
     const unsigned int* getStart() const { return start; }
     const unsigned int* getStop() const { return stop; }
+    const bool* getStartInside() const { return m_start_inside; }
+    const bool* getStopInside() const { return m_stop_inside; }
 };
 
-// Accessor for ProcessIntegral protected members (m_Results)
+// Accessor for ProcessIntegral protected members (m_Results, m_normDir)
 class ProcessIntegral_Accessor : public ProcessIntegral {
 public:
     double* getResults() { return m_Results; }
     void setResult(int idx, double val) { if (m_Results) m_Results[idx] = val; }
+    int getNormDir() const { return m_normDir; }
 };
 
 static std::atomic<int> g_xmlPathCounter{0};
@@ -437,16 +440,30 @@ public:
             float weight = proc->GetWeight();
             float type = pv ? 0.0f : 1.0f;
 
-            result.push_back((float)start[0]);
-            result.push_back((float)start[1]);
-            result.push_back((float)start[2]);
-            result.push_back((float)stop[0]);
-            result.push_back((float)stop[1]);
-            result.push_back((float)stop[2]);
-            result.push_back((float)component);
-            result.push_back(sign);
-            result.push_back(weight);
-            result.push_back(type);
+            // For current probes, extract normDir and inside flags
+            int normDir = component;
+            unsigned int insideFlags = 0x3F; // all inside by default
+            if (pc) {
+                auto* piAcc = reinterpret_cast<ProcessIntegral_Accessor*>(proc);
+                normDir = piAcc->getNormDir();
+                auto* prAcc = reinterpret_cast<Processing_Accessor*>(proc);
+                const bool* si = prAcc->getStartInside();
+                const bool* ti = prAcc->getStopInside();
+                insideFlags = (si[0]?1:0) | (si[1]?2:0) | (si[2]?4:0)
+                            | (ti[0]?8:0) | (ti[1]?16:0) | (ti[2]?32:0);
+            }
+
+            result.push_back((float)start[0]);   // 0
+            result.push_back((float)start[1]);   // 1
+            result.push_back((float)start[2]);   // 2
+            result.push_back((float)stop[0]);    // 3
+            result.push_back((float)stop[1]);    // 4
+            result.push_back((float)stop[2]);    // 5
+            result.push_back((float)normDir);    // 6 (integration dir for voltage, normDir for current)
+            result.push_back(sign);              // 7
+            result.push_back(weight);            // 8
+            result.push_back(type);              // 9
+            result.push_back((float)insideFlags);// 10
             count++;
         }
         result[0] = (float)count;
@@ -461,16 +478,25 @@ public:
      *            in the same order as getProbeDefinitions().
      * Returns: next processing interval, or <=0 if simulation should stop.
      */
+    /**
+     * Inject GPU-computed probe integrals and write to file.
+     * Unlike doProcess(), this sets m_Results AFTER CalcMultipleIntegrals
+     * would overwrite them, by directly invoking the file-write path.
+     *
+     * Returns: next processing interval, or <=0 if end criteria met.
+     */
     int processProbeResults(uintptr_t valuesPtr, unsigned int numProbes, unsigned int timestep) {
         auto* omsAcc = reinterpret_cast<openEMS_Accessor*>(ems_);
         auto* eng = getEngine();
+        Operator* op = getOperator();
         ProcessingArray* pa = omsAcc->getPA();
-        if (!eng || !pa) return -1;
+        if (!eng || !pa || !op) return -1;
 
         const float* values = reinterpret_cast<const float*>(valuesPtr);
         reinterpret_cast<Engine_Accessor*>(eng)->setNumTS(timestep);
 
-        // Inject results into each matching ProcessIntegral
+        // Inject GPU-computed results via SetExternalResult.
+        // Process() will use these instead of calling CalcMultipleIntegrals().
         unsigned int probeIdx = 0;
         for (size_t i = 0; i < pa->GetNumberOfProcessings(); i++) {
             Processing* proc = pa->GetProcessing(i);
@@ -478,17 +504,18 @@ public:
             ProcessCurrent* pc = dynamic_cast<ProcessCurrent*>(proc);
             if (!pv && !pc) continue;
 
+            // Check this probe has a valid direction (matches getProbeDefinitions filter)
             auto* procAcc = reinterpret_cast<Processing_Accessor*>(proc);
-            const unsigned int* start = procAcc->getStart();
-            const unsigned int* stop = procAcc->getStop();
+            const unsigned int* pstart = procAcc->getStart();
+            const unsigned int* pstop = procAcc->getStop();
             bool hasDir = false;
             for (int d = 0; d < 3; d++)
-                if (start[d] != stop[d]) hasDir = true;
+                if (pstart[d] != pstop[d]) hasDir = true;
             if (!hasDir) continue;
 
             if (probeIdx < numProbes) {
-                auto* piAcc = reinterpret_cast<ProcessIntegral_Accessor*>(proc);
-                piAcc->setResult(0, (double)values[probeIdx]);
+                auto* pi = dynamic_cast<ProcessIntegral*>(proc);
+                if (pi) pi->SetExternalResult((double)values[probeIdx]);
                 probeIdx++;
             }
         }
