@@ -13,8 +13,8 @@ if (EMSCRIPTEN)
   set(DISABLE_VTK ON CACHE BOOL "" FORCE)
   set(DISABLE_CGAL ON CACHE BOOL "" FORCE)
   set(DISABLE_MPI ON CACHE BOOL "" FORCE)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -msimd128 -O3 -flto")
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread -msimd128 -O3 -flto")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msimd128 -O3 -flto")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -msimd128 -O3 -flto")
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -O3 -flto")
   if (ENABLE_MEMORY64)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -sMEMORY64=1")
@@ -66,9 +66,6 @@ if (EMSCRIPTEN)
     "-sWASM_BIGINT"
     "-sASSERTIONS=0"
     "--closure=0"
-    "-pthread"
-    "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency||4"
-    "-sDEFAULT_PTHREAD_STACK_SIZE=2097152"
   )
   if (ENABLE_MEMORY64)
     target_link_options(openems_wasm PRIVATE

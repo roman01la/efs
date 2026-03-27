@@ -80,15 +80,13 @@ fi
 
 # Boost
 BOOST_DIR="$ROOT/deps/src/boost_1_86_0"
-if [ ! -f "$PREFIX/lib/libboost_thread.a" ]; then
+if [ ! -f "$PREFIX/lib/libboost_program_options.a" ]; then
   echo "--- Boost (wasm64) ---"
   cd "$BOOST_DIR"
 
   cat > user-config-wasm64.jam << JAMEOF
 using gcc : emscripten64 : em++
-  : <compileflags>-pthread
-    <compileflags>-sMEMORY64=1
-    <linkflags>-pthread
+  : <compileflags>-sMEMORY64=1
     <linkflags>-sMEMORY64=1
     <archiver>emar
     <ranlib>emranlib
@@ -98,13 +96,11 @@ JAMEOF
   ./b2 --user-config=user-config-wasm64.jam \
     toolset=gcc-emscripten64 \
     link=static \
-    threading=multi \
+    threading=single \
     variant=release \
     cxxflags="-std=c++11" \
-    --with-thread \
     --with-date_time \
     --with-serialization \
-    --with-chrono \
     --with-system \
     --with-program_options \
     --prefix="$PREFIX" \
@@ -114,7 +110,7 @@ fi
 
 echo ""
 echo "=== wasm64 dependency check ==="
-for lib in libtinyxml.a libfparser.a libhdf5.a libhdf5_hl.a libboost_thread.a libboost_program_options.a; do
+for lib in libtinyxml.a libfparser.a libhdf5.a libhdf5_hl.a libboost_program_options.a libboost_program_options.a; do
   if [ -f "$PREFIX/lib/$lib" ]; then
     echo "  [OK] $lib"
   else

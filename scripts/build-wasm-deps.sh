@@ -137,7 +137,7 @@ BOOST_VERSION="1.86.0"
 BOOST_VERSION_UNDERSCORE="${BOOST_VERSION//./_}"
 BOOST_DIR="$SRC/boost_${BOOST_VERSION_UNDERSCORE}"
 
-if [ ! -f "$PREFIX/lib/libboost_thread.a" ]; then
+if [ ! -f "$PREFIX/lib/libboost_program_options.a" ]; then
   echo "=== Building Boost $BOOST_VERSION ==="
   if [ ! -d "$BOOST_DIR" ]; then
     curl -L "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VERSION_UNDERSCORE}.tar.gz" \
@@ -154,9 +154,7 @@ if [ ! -f "$PREFIX/lib/libboost_thread.a" ]; then
   # Use the gcc toolset with em++ as the compiler.
   cat > user-config.jam << JAMEOF
 using gcc : emscripten : em++
-  : <compileflags>-pthread
-    <linkflags>-pthread
-    <archiver>emar
+  : <archiver>emar
     <ranlib>emranlib
 ;
 JAMEOF
@@ -164,13 +162,11 @@ JAMEOF
   ./b2 --user-config=user-config.jam \
     toolset=gcc-emscripten \
     link=static \
-    threading=multi \
+    threading=single \
     variant=release \
     cxxflags="-std=c++11" \
-    --with-thread \
     --with-date_time \
     --with-serialization \
-    --with-chrono \
     --with-system \
     --with-program_options \
     --prefix="$PREFIX" \
@@ -189,7 +185,7 @@ echo ""
 echo "=== Dependency build summary ==="
 echo "PREFIX: $PREFIX"
 echo ""
-for lib in libtinyxml.a libfparser.a libhdf5.a libhdf5_hl.a libboost_thread.a libboost_program_options.a; do
+for lib in libtinyxml.a libfparser.a libhdf5.a libhdf5_hl.a libboost_program_options.a libboost_date_time.a; do
   if [ -f "$PREFIX/lib/$lib" ]; then
     echo "  [OK] $lib"
   else

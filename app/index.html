@@ -47,6 +47,32 @@ header .spacer { flex: 1; }
 }
 .panel-body { flex: 1; overflow: auto; padding: 8px; }
 
+/* Editor tab buttons */
+.tab-group { display: flex; gap: 0; }
+.tab-btn {
+  padding: 3px 10px;
+  border: 1px solid #aaa;
+  border-radius: 3px 3px 0 0;
+  background: #f0f0f0;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  color: #555;
+  border-bottom: 2px solid transparent;
+}
+.tab-btn.active {
+  background: #fff;
+  color: #222;
+  border-bottom: 2px solid #2563eb;
+}
+#viewer-3d {
+  width: 100%;
+  height: 100%;
+  min-height: 300px;
+  display: none;
+}
+#viewer-3d.visible { display: block; }
+
 /* Editor panel */
 #editor-container {
   width: 100%;
@@ -139,6 +165,10 @@ button.danger:hover { background: #b91c1c; }
   <div class="panel" id="panel-editor">
     <div class="panel-header">
       Editor
+      <div class="tab-group">
+        <button class="tab-btn active" data-tab="xml">XML</button>
+        <button class="tab-btn" data-tab="3d">3D</button>
+      </div>
       <select id="example-select">
         <option value="patch">Patch Antenna</option>
         <option value="msl">MSL Notch Filter</option>
@@ -148,6 +178,7 @@ button.danger:hover { background: #b91c1c; }
     <div class="panel-body">
       <div id="editor-container"></div>
       <div id="editor-error"></div>
+      <div id="viewer-3d"></div>
     </div>
   </div>
 
@@ -197,6 +228,7 @@ button.danger:hover { background: #b91c1c; }
 <script type="module">
 import { PATCH_ANTENNA, MSL_NOTCH_FILTER, RECT_WAVEGUIDE } from '/app/examples.mjs';
 import { encodeConfig, decodeConfig, shareConfig, loadSharedConfig } from '/src/url-share.mjs';
+import { createViewer } from '/app/geometry-viewer.mjs';
 
 // CodeMirror 6 — pin @codemirror/state version across all packages to avoid duplicate instances
 const cmState = 'https://esm.sh/@codemirror/state@6.5.2';
@@ -211,6 +243,7 @@ const EXAMPLES = {
   waveguide: RECT_WAVEGUIDE,
 };
 
+let viewerDirty = true;
 // ---- CodeMirror editor ----
 const cmView = new EditorView({
   state: EditorState.create({
@@ -224,7 +257,7 @@ const cmView = new EditorView({
         '.cm-gutters': { fontSize: '11px' },
       }),
       EditorView.updateListener.of(update => {
-        if (update.docChanged) validateXML();
+        if (update.docChanged) { validateXML(); viewerDirty = true; }
       }),
     ],
   }),
@@ -273,6 +306,36 @@ function validateXML() {
   }
 }
 
+// ---- 3D Geometry Viewer ----
+const viewer3d = createViewer(document.getElementById('viewer-3d'));
+let activeTab = 'xml';
+
+document.querySelector('.tab-group').addEventListener('click', (e) => {
+  const btn = e.target.closest('.tab-btn');
+  if (!btn || btn.dataset.tab === activeTab) return;
+  activeTab = btn.dataset.tab;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+
+  const editorEl = document.getElementById('editor-container');
+  const errorEl = document.getElementById('editor-error');
+  const viewerEl = document.getElementById('viewer-3d');
+
+  if (activeTab === 'xml') {
+    editorEl.style.display = '';
+    errorEl.style.display = '';
+    viewerEl.classList.remove('visible');
+  } else {
+    editorEl.style.display = 'none';
+    errorEl.style.display = 'none';
+    viewerEl.classList.add('visible');
+    if (viewerDirty) {
+      viewer3d.update(editorTextarea.value);
+      viewerDirty = false;
+    }
+  }
+});
+
 // ---- Console log helper ----
 function logConsole(msg) {
   simConsole.textContent += msg + '\n';
@@ -285,6 +348,11 @@ exampleSelect.addEventListener('change', () => {
   if (key && EXAMPLES[key]) {
     editorTextarea.value = EXAMPLES[key];
     logConsole(`Loaded example: ${exampleSelect.options[exampleSelect.selectedIndex].text}`);
+    viewerDirty = true;
+    if (activeTab === '3d') {
+      viewer3d.update(editorTextarea.value);
+      viewerDirty = false;
+    }
   }
 });
 
