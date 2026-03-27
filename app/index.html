@@ -173,17 +173,21 @@ button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
 }
 
 /* ---- Editor ---- */
-#editor-container {
+#script-container, #xml-container {
   width: 100%;
   height: 100%;
   min-height: 300px;
 }
-#editor-container .cm-editor {
+#xml-container { display: none; }
+#script-container .cm-editor,
+#xml-container .cm-editor {
   height: 100%;
   background: transparent;
 }
-#editor-container .cm-scroller { overflow: auto; }
-#editor-container .cm-gutters {
+#script-container .cm-scroller,
+#xml-container .cm-scroller { overflow: auto; }
+#script-container .cm-gutters,
+#xml-container .cm-gutters {
   background: var(--surface) !important;
   border-right: 1px solid var(--border) !important;
 }
@@ -297,7 +301,8 @@ button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
   <div class="panel" id="panel-editor">
     <div class="panel-header">
       <div class="tab-group">
-        <button class="tab-btn active" data-tab="xml">XML</button>
+        <button class="tab-btn active" data-tab="script">Script</button>
+        <button class="tab-btn" data-tab="xml">XML</button>
         <button class="tab-btn" data-tab="3d">3D</button>
       </div>
       <select id="example-select">
@@ -308,7 +313,8 @@ button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
       </select>
     </div>
     <div class="panel-body">
-      <div id="editor-container"></div>
+      <div id="script-container"></div>
+      <div id="xml-container"></div>
       <div id="editor-error"></div>
       <div id="viewer-3d"></div>
     </div>
@@ -362,6 +368,7 @@ button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
 
 <script type="module">
 import { PATCH_ANTENNA, MSL_NOTCH_FILTER, HELICAL_ANTENNA, RECT_WAVEGUIDE } from '/app/examples.mjs';
+import { OpenEMS, ContinuousStructure } from '/app/ems-api.mjs';
 import { encodeConfig, decodeConfig, shareConfig, loadSharedConfig } from '/src/url-share.mjs';
 import { createViewer } from '/app/geometry-viewer.mjs';
 import { createRadiationViewer } from '/app/radiation-viewer.mjs';
@@ -370,6 +377,7 @@ const cmState = 'https://esm.sh/@codemirror/state@6.5.2';
 const { EditorState } = await import(cmState);
 const { EditorView, basicSetup } = await import(`https://esm.sh/codemirror@6.0.1?deps=@codemirror/state@6.5.2`);
 const { xml } = await import(`https://esm.sh/@codemirror/lang-xml@6.1.0?deps=@codemirror/state@6.5.2`);
+const { javascript } = await import(`https://esm.sh/@codemirror/lang-javascript@6.2.3?deps=@codemirror/state@6.5.2`);
 const { oneDark } = await import(`https://esm.sh/@codemirror/theme-one-dark@6.1.2?deps=@codemirror/state@6.5.2`);
 
 const EXAMPLES = {
@@ -380,6 +388,8 @@ const EXAMPLES = {
 };
 
 let viewerDirty = true;
+let generatedXml = '';
+let scriptExecTimer = null;
 
 const themeOverrides = EditorView.theme({
   '&': { fontSize: '12px', backgroundColor: 'var(--surface)' },
@@ -387,28 +397,72 @@ const themeOverrides = EditorView.theme({
   '.cm-gutters': { fontSize: '11px', backgroundColor: 'var(--surface)', borderRight: '1px solid var(--border)' },
 }, { dark: true });
 
-const cmView = new EditorView({
+const cmScript = new EditorView({
   state: EditorState.create({
-    doc: PATCH_ANTENNA,
+    doc: EXAMPLES.patch.script,
+    extensions: [
+      basicSetup,
+      javascript(),
+      oneDark,
+      themeOverrides,
+      EditorView.updateListener.of(update => {
+        if (update.docChanged) {
+          clearTimeout(scriptExecTimer);
+          scriptExecTimer = setTimeout(executeScript, 500);
+        }
+      }),
+    ],
+  }),
+  parent: document.getElementById('script-container'),
+});
+
+const cmXml = new EditorView({
+  state: EditorState.create({
+    doc: '',
     extensions: [
       basicSetup,
       xml(),
       oneDark,
       themeOverrides,
-      EditorView.updateListener.of(update => {
-        if (update.docChanged) { validateXML(); viewerDirty = true; updateRadiationVisibility(); }
-      }),
+      EditorState.readOnly.of(true),
     ],
   }),
-  parent: document.getElementById('editor-container'),
+  parent: document.getElementById('xml-container'),
 });
 
-const editorTextarea = {
-  get value() { return cmView.state.doc.toString(); },
-  set value(v) {
-    cmView.dispatch({
-      changes: { from: 0, to: cmView.state.doc.length, insert: v },
+function executeScript() {
+  const scriptCode = cmScript.state.doc.toString();
+  const editorError = document.getElementById('editor-error');
+  try {
+    const result = new Function('OpenEMS', 'ContinuousStructure', scriptCode)(OpenEMS, ContinuousStructure);
+    if (typeof result === 'string') {
+      generatedXml = result;
+    } else if (result && typeof result.toXml === 'function') {
+      generatedXml = result.toXml();
+    } else {
+      generatedXml = '';
+    }
+    cmXml.dispatch({
+      changes: { from: 0, to: cmXml.state.doc.length, insert: generatedXml },
     });
+    editorError.textContent = '';
+    editorError.classList.remove('visible');
+    viewerDirty = true;
+    updateRadiationVisibility();
+    if (activeTab === '3d') {
+      viewer3d.update(generatedXml);
+      viewerDirty = false;
+    }
+  } catch (e) {
+    editorError.textContent = e.message;
+    editorError.classList.add('visible');
+  }
+}
+
+const editorTextarea = {
+  get value() { return generatedXml; },
+  set value(v) {
+    /* no-op: script controls the XML now */
   },
   addEventListener() {},
 };
@@ -424,26 +478,9 @@ const loadingOverlay = document.getElementById('loading-overlay');
 const rawDataPre = document.getElementById('raw-data');
 
 const editorError = document.getElementById('editor-error');
-function validateXML() {
-  const xml = editorTextarea.value.trim();
-  if (!xml) { editorError.classList.remove('visible'); return; }
-  try {
-    const doc = new DOMParser().parseFromString(xml, 'application/xml');
-    const parseError = doc.querySelector('parsererror');
-    if (parseError) {
-      editorError.textContent = parseError.textContent.split('\n')[0];
-      editorError.classList.add('visible');
-    } else {
-      editorError.classList.remove('visible');
-    }
-  } catch (e) {
-    editorError.textContent = e.message;
-    editorError.classList.add('visible');
-  }
-}
 
 function updateRadiationVisibility() {
-  const has = /<DumpBox\b/i.test(editorTextarea.value);
+  const has = /<DumpBox\b/i.test(generatedXml);
   document.getElementById('section-radiation').style.display = has ? '' : 'none';
   document.getElementById('section-radiation-3d').style.display = has ? '' : 'none';
 }
@@ -451,7 +488,7 @@ updateRadiationVisibility();
 
 // ---- 3D Geometry Viewer ----
 const viewer3d = createViewer(document.getElementById('viewer-3d'));
-let activeTab = 'xml';
+let activeTab = 'script';
 
 document.querySelector('.tab-group').addEventListener('click', (e) => {
   const btn = e.target.closest('.tab-btn');
@@ -460,20 +497,28 @@ document.querySelector('.tab-group').addEventListener('click', (e) => {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
 
-  const editorEl = document.getElementById('editor-container');
+  const scriptEl = document.getElementById('script-container');
+  const xmlEl = document.getElementById('xml-container');
   const errorEl = document.getElementById('editor-error');
   const viewerEl = document.getElementById('viewer-3d');
 
-  if (activeTab === 'xml') {
-    editorEl.style.display = '';
+  if (activeTab === 'script') {
+    scriptEl.style.display = '';
+    xmlEl.style.display = 'none';
     errorEl.style.display = '';
     viewerEl.classList.remove('visible');
+  } else if (activeTab === 'xml') {
+    scriptEl.style.display = 'none';
+    xmlEl.style.display = '';
+    errorEl.style.display = 'none';
+    viewerEl.classList.remove('visible');
   } else {
-    editorEl.style.display = 'none';
+    scriptEl.style.display = 'none';
+    xmlEl.style.display = 'none';
     errorEl.style.display = 'none';
     viewerEl.classList.add('visible');
     if (viewerDirty) {
-      viewer3d.update(editorTextarea.value);
+      viewer3d.update(generatedXml);
       viewerDirty = false;
     }
   }
@@ -487,19 +532,18 @@ function logConsole(msg) {
 exampleSelect.addEventListener('change', () => {
   const key = exampleSelect.value;
   if (key && EXAMPLES[key]) {
-    editorTextarea.value = EXAMPLES[key];
+    const script = EXAMPLES[key].script;
+    cmScript.dispatch({
+      changes: { from: 0, to: cmScript.state.doc.length, insert: script },
+    });
     logConsole(`Loaded example: ${exampleSelect.options[exampleSelect.selectedIndex].text}`);
-    viewerDirty = true;
-    if (activeTab === '3d') {
-      viewer3d.update(editorTextarea.value);
-      viewerDirty = false;
-    }
+    executeScript();
   }
 });
 
 btnShare.addEventListener('click', async () => {
-  const xml = editorTextarea.value.trim();
-  if (!xml) { logConsole('Nothing to share - editor is empty.'); return; }
+  const xml = generatedXml.trim();
+  if (!xml) { logConsole('Nothing to share - no generated XML.'); return; }
   try {
     const fragment = await shareConfig(xml);
     const url = `${location.origin}${location.pathname}#${fragment}`;
@@ -729,8 +773,8 @@ simWorker.onmessage = (e) => {
 
 btnRun.addEventListener('click', () => {
   if (running) return;
-  const xml = editorTextarea.value.trim();
-  if (!xml) { logConsole('Error: Editor is empty.'); return; }
+  const xml = generatedXml.trim();
+  if (!xml) { logConsole('Error: No generated XML. Check your script.'); return; }
 
   running = true;
   btnRun.disabled = true;
@@ -948,6 +992,7 @@ function tryPlotRadiation3D() {
 }
 
 // ---- Init ----
+executeScript();
 loadFromURL();
 </script>
 </body>

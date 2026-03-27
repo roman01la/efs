@@ -1,8 +1,9 @@
 /**
- * Pre-built XML configurations for the demo examples.
+ * Example scripts for the demo examples.
  *
- * Each is a complete openEMS XML string that can be loaded directly
- * into the simulation engine.
+ * Each export is an object with { name, script } where script is a JS string
+ * executed via `new Function('OpenEMS', 'ContinuousStructure', code)`.
+ * The script must end with `return FDTD.GenerateXML();`.
  */
 
 /**
@@ -12,101 +13,90 @@
  * 60 x 60 mm ground plane. Lumped port feed at x = -5.5 mm, 50 Ohm.
  * Gaussian excitation 0-6 GHz, 30000 timesteps, end criteria 1e-5.
  */
-export const PATCH_ANTENNA = `<?xml version="1.0" encoding="UTF-8"?>
-<openEMS>
-  <FDTD NumberOfTimesteps="30000" endCriteria="1e-5" f_max="6e9">
-    <Excitation Type="0" f0="3e9" fc="3e9"/>
-    <BoundaryCond xmin="2" xmax="2" ymin="2" ymax="2" zmin="2" zmax="2"/>
-  </FDTD>
-  <ContinuousStructure CoordSystem="0">
-    <RectilinearGrid DeltaUnit="1e-3">
-      <XLines>-45,-40,-35,-32,-30,-28,-26,-24,-22,-20,-18,-16.43,-14,-12,-10,-8,-6.5,-6,-5.5,-5,-4,-2,0,2,4,5,5.5,6,6.5,8,10,12,14,16.43,18,20,22,24,26,28,30,32,35,40,45</XLines>
-      <YLines>-45,-40,-35,-32,-30,-28,-26,-24,-22,-20.685,-18,-16,-14,-12,-10,-8,-6,-4,-2,0,2,4,6,8,10,12,14,16,18,20.685,22,24,26,28,30,32,35,40,45</YLines>
-      <ZLines>-10,-8,-6,-4,-2,0,0.3,0.762,1.524,2,4,6,8,10,12,15,20</ZLines>
-    </RectilinearGrid>
-    <Properties>
-      <Metal Name="ground">
-        <Primitives>
-          <Box Priority="10">
-            <P1 X="-30" Y="-30" Z="0"/>
-            <P2 X="30" Y="30" Z="0"/>
-          </Box>
-        </Primitives>
-      </Metal>
-      <Material Name="substrate">
-        <Property Epsilon="3.38"/>
-        <Primitives>
-          <Box Priority="5">
-            <P1 X="-30" Y="-30" Z="0"/>
-            <P2 X="30" Y="30" Z="1.524"/>
-          </Box>
-        </Primitives>
-      </Material>
-      <Metal Name="patch">
-        <Primitives>
-          <Box Priority="10">
-            <P1 X="-16.43" Y="-20.685" Z="1.524"/>
-            <P2 X="16.43" Y="20.685" Z="1.524"/>
-          </Box>
-        </Primitives>
-      </Metal>
-      <LumpedElement Name="port_resist_1" Direction="2" R="50" C="0" L="0">
-        <Primitives>
-          <Box Priority="5">
-            <P1 X="-5.5" Y="0" Z="0"/>
-            <P2 X="-5.5" Y="0" Z="1.524"/>
-          </Box>
-        </Primitives>
-      </LumpedElement>
-      <Excitation Name="port_excite_1" Type="0" Excite="0,0,1">
-        <Primitives>
-          <Box Priority="5">
-            <P1 X="-5.5" Y="0" Z="0"/>
-            <P2 X="-5.5" Y="0" Z="1.524"/>
-          </Box>
-        </Primitives>
-      </Excitation>
-      <ProbeBox Name="port_ut1" Type="0" Weight="-1">
-        <Primitives>
-          <Box Priority="0">
-            <P1 X="-5.5" Y="0" Z="0"/>
-            <P2 X="-5.5" Y="0" Z="1.524"/>
-          </Box>
-        </Primitives>
-      </ProbeBox>
-      <ProbeBox Name="port_it1" Type="1" Weight="1" NormDir="2">
-        <Primitives>
-          <Box Priority="0">
-            <P1 X="-6.5" Y="-2" Z="0.762"/>
-            <P2 X="-4.5" Y="2" Z="0.762"/>
-          </Box>
-        </Primitives>
-      </ProbeBox>
-      <DumpBox Name="nf2ff_E" DumpType="10" DumpMode="1" FileType="1">
-        <FD_Samples>2.4e9</FD_Samples>
-        <Primitives>
-          <Box Priority="0"><P1 X="-35" Y="-35" Z="-6"/><P2 X="-35" Y="35" Z="15"/></Box>
-          <Box Priority="0"><P1 X="35" Y="-35" Z="-6"/><P2 X="35" Y="35" Z="15"/></Box>
-          <Box Priority="0"><P1 X="-35" Y="-35" Z="-6"/><P2 X="35" Y="-35" Z="15"/></Box>
-          <Box Priority="0"><P1 X="-35" Y="35" Z="-6"/><P2 X="35" Y="35" Z="15"/></Box>
-          <Box Priority="0"><P1 X="-35" Y="-35" Z="-6"/><P2 X="35" Y="35" Z="-6"/></Box>
-          <Box Priority="0"><P1 X="-35" Y="-35" Z="15"/><P2 X="35" Y="35" Z="15"/></Box>
-        </Primitives>
-      </DumpBox>
-      <DumpBox Name="nf2ff_H" DumpType="11" DumpMode="1" FileType="1">
-        <FD_Samples>2.4e9</FD_Samples>
-        <Primitives>
-          <Box Priority="0"><P1 X="-35" Y="-35" Z="-6"/><P2 X="-35" Y="35" Z="15"/></Box>
-          <Box Priority="0"><P1 X="35" Y="-35" Z="-6"/><P2 X="35" Y="35" Z="15"/></Box>
-          <Box Priority="0"><P1 X="-35" Y="-35" Z="-6"/><P2 X="35" Y="-35" Z="15"/></Box>
-          <Box Priority="0"><P1 X="-35" Y="35" Z="-6"/><P2 X="35" Y="35" Z="15"/></Box>
-          <Box Priority="0"><P1 X="-35" Y="-35" Z="-6"/><P2 X="35" Y="35" Z="-6"/></Box>
-          <Box Priority="0"><P1 X="-35" Y="-35" Z="15"/><P2 X="35" Y="35" Z="15"/></Box>
-        </Primitives>
-      </DumpBox>
-    </Properties>
-  </ContinuousStructure>
-</openEMS>`;
+export const PATCH_ANTENNA = {
+  name: 'Patch Antenna',
+  script: `
+// Patch Antenna — parametric design
+const unit = 1e-3; // all lengths in mm
+const f0 = 3e9;    // center frequency
+const fc = 3e9;    // 20dB corner frequency
+
+// substrate
+const epsR = 3.38;
+const subW = 60, subL = 60, subH = 1.524;
+
+// patch dimensions
+const patchW = 32.86, patchL = 41.37;
+
+// feed position
+const feedX = -5.5;
+const feedR = 50; // ohm
+const feedH = subH;
+
+// PML padding
+const pmlPad = 15;
+
+// NF2FF box inset from PML
+const nf2ffDist = 10;
+
+// derived
+const halfSubW = subW / 2;
+const halfSubL = subL / 2;
+const halfPatchW = patchW / 2;
+const halfPatchL = patchL / 2;
+const simXmax = halfSubW + pmlPad;
+const simYmax = halfSubL + pmlPad;
+const simZmin = -10;
+const simZmax = 20;
+const nfX = halfSubW + nf2ffDist / 2;
+const nfY = halfSubL + nf2ffDist / 2;
+const nfZmin = -6;
+const nfZmax = 15;
+
+// setup FDTD
+const FDTD = new OpenEMS({ NrTS: 30000, EndCriteria: 1e-5 });
+FDTD.SetGaussExcite(f0, fc);
+FDTD.SetBoundaryCond(['PML_8','PML_8','PML_8','PML_8','PML_8','PML_8']);
+
+const CSX = new ContinuousStructure();
+FDTD.SetCSX(CSX);
+
+const mesh = CSX.GetGrid();
+mesh.SetDeltaUnit(unit);
+
+// mesh — x
+mesh.AddLine('x', [-simXmax, -halfSubW, -halfPatchW, feedX - 1, feedX, feedX + 1, 0, halfPatchW, halfSubW, simXmax]);
+mesh.SmoothMeshLines('x', 4, 1.4);
+
+// mesh — y
+mesh.AddLine('y', [-simYmax, -halfSubL, -halfPatchL, 0, halfPatchL, halfSubL, simYmax]);
+mesh.SmoothMeshLines('y', 4, 1.4);
+
+// mesh — z
+mesh.AddLine('z', [simZmin, 0, subH * 0.2, subH / 2, subH, subH + 1, 6, 10, simZmax]);
+mesh.SmoothMeshLines('z', 4, 1.4);
+
+// ground plane
+const ground = CSX.AddMetal('ground');
+ground.AddBox([-halfSubW, -halfSubL, 0], [halfSubW, halfSubL, 0], 10);
+
+// substrate
+const substrate = CSX.AddMaterial('substrate', { Epsilon: epsR });
+substrate.AddBox([-halfSubW, -halfSubL, 0], [halfSubW, halfSubL, subH], 5);
+
+// patch
+const patch = CSX.AddMetal('patch');
+patch.AddBox([-halfPatchW, -halfPatchL, subH], [halfPatchW, halfPatchL, subH], 10);
+
+// lumped port feed
+FDTD.AddLumpedPort(1, feedR, [feedX, 0, 0], [feedX, 0, feedH], 'z', 1.0);
+
+// NF2FF box
+FDTD.CreateNF2FFBox({ frequency: 2.4e9 });
+
+return FDTD.GenerateXML();
+`
+};
 
 /**
  * MSL Notch Filter example.
@@ -115,376 +105,261 @@ export const PATCH_ANTENNA = `<?xml version="1.0" encoding="UTF-8"?>
  * Two MSL ports for S11/S21 measurement.
  * Gaussian excitation 0-10 GHz.
  */
-export const MSL_NOTCH_FILTER = `<?xml version="1.0" encoding="UTF-8"?>
-<openEMS>
-  <FDTD NumberOfTimesteps="20000" endCriteria="1e-5" f_max="10e9">
-    <Excitation Type="0" f0="5e9" fc="5e9"/>
-    <BoundaryCond xmin="2" xmax="2" ymin="2" ymax="2" zmin="0" zmax="2"/>
-  </FDTD>
-  <ContinuousStructure CoordSystem="0">
-    <RectilinearGrid DeltaUnit="1e-3">
-      <XLines>-20,-18,-16,-14,-12,-10,-8,-6,-5,-4,-3,-2,-1.5,-1,-0.5,0,0.5,1,1.5,2,3,4,5,6,8,10,12,14,16,18,20</XLines>
-      <YLines>-15,-12,-10,-8,-6,-4,-3,-2,-1.5,-1,-0.5,0,0.5,1,1.5,2,3,4,5,6,7,8,9,10,12,15</YLines>
-      <ZLines>-5,-3,-1,0,0.254,0.508,1.0,1.524,2,3,5,8,12</ZLines>
-    </RectilinearGrid>
-    <Properties>
-      <Metal Name="ground">
-        <Primitives>
-          <Box Priority="10">
-            <P1 X="-20" Y="-15" Z="0"/>
-            <P2 X="20" Y="15" Z="0"/>
-          </Box>
-        </Primitives>
-      </Metal>
-      <Material Name="substrate">
-        <Property Epsilon="3.38"/>
-        <Primitives>
-          <Box Priority="5">
-            <P1 X="-20" Y="-15" Z="0"/>
-            <P2 X="20" Y="15" Z="1.524"/>
-          </Box>
-        </Primitives>
-      </Material>
-      <Metal Name="msl_trace">
-        <Primitives>
-          <Box Priority="10">
-            <P1 X="-20" Y="-1.5" Z="1.524"/>
-            <P2 X="20" Y="1.5" Z="1.524"/>
-          </Box>
-        </Primitives>
-      </Metal>
-      <Metal Name="notch_stub">
-        <Primitives>
-          <Box Priority="10">
-            <P1 X="-1.5" Y="1.5" Z="1.524"/>
-            <P2 X="1.5" Y="10" Z="1.524"/>
-          </Box>
-        </Primitives>
-      </Metal>
-      <LumpedElement Name="port_resist_1" Direction="2" R="50" C="0" L="0">
-        <Primitives>
-          <Box Priority="5">
-            <P1 X="-18" Y="0" Z="0"/>
-            <P2 X="-18" Y="0" Z="1.524"/>
-          </Box>
-        </Primitives>
-      </LumpedElement>
-      <Excitation Name="port_excite_1" Type="0" Excite="0,0,1">
-        <Primitives>
-          <Box Priority="5">
-            <P1 X="-18" Y="0" Z="0"/>
-            <P2 X="-18" Y="0" Z="1.524"/>
-          </Box>
-        </Primitives>
-      </Excitation>
-      <ProbeBox Name="port_ut1" Type="0" Weight="-1">
-        <Primitives>
-          <Box Priority="0">
-            <P1 X="-18" Y="0" Z="0"/>
-            <P2 X="-18" Y="0" Z="1.524"/>
-          </Box>
-        </Primitives>
-      </ProbeBox>
-      <ProbeBox Name="port_it1" Type="1" Weight="1" NormDir="2">
-        <Primitives>
-          <Box Priority="0">
-            <P1 X="-19" Y="-2" Z="0.762"/>
-            <P2 X="-17" Y="2" Z="0.762"/>
-          </Box>
-        </Primitives>
-      </ProbeBox>
-      <LumpedElement Name="port_resist_2" Direction="2" R="50" C="0" L="0">
-        <Primitives>
-          <Box Priority="5">
-            <P1 X="18" Y="0" Z="0"/>
-            <P2 X="18" Y="0" Z="1.524"/>
-          </Box>
-        </Primitives>
-      </LumpedElement>
-      <ProbeBox Name="port_ut2" Type="0" Weight="-1">
-        <Primitives>
-          <Box Priority="0">
-            <P1 X="18" Y="0" Z="0"/>
-            <P2 X="18" Y="0" Z="1.524"/>
-          </Box>
-        </Primitives>
-      </ProbeBox>
-      <ProbeBox Name="port_it2" Type="1" Weight="1" NormDir="2">
-        <Primitives>
-          <Box Priority="0">
-            <P1 X="17" Y="-2" Z="0.762"/>
-            <P2 X="19" Y="2" Z="0.762"/>
-          </Box>
-        </Primitives>
-      </ProbeBox>
-    </Properties>
-  </ContinuousStructure>
-</openEMS>`;
+export const MSL_NOTCH_FILTER = {
+  name: 'MSL Notch Filter',
+  script: `
+// MSL Notch Filter — parametric design
+const unit = 1e-3;
+const f0 = 5e9;
+const fc = 5e9;
 
-/**
- * Rectangular Waveguide example.
- *
- * WR-90 waveguide (22.86 x 10.16 mm) with TE10 mode port.
- * PEC walls, PML termination at both ends.
- * Gaussian excitation covering 8-12 GHz (X-band).
- */
+// substrate
+const epsR = 3.38;
+const subW = 40, subL = 30, subH = 1.524;
+
+// MSL trace
+const traceW = 3.0; // width of microstrip line
+const halfTraceW = traceW / 2;
+
+// notch stub
+const stubW = 3.0;
+const stubL = 8.5; // quarter-wave stub length
+const halfStubW = stubW / 2;
+
+// port positions
+const port1X = -18;
+const port2X = 18;
+const portR = 50;
+
+// PML padding
+const pmlPad = 5;
+
+// derived
+const halfSubW = subW / 2;
+const halfSubL = subL / 2;
+const simXmax = halfSubW;
+const simYmax = halfSubL;
+const simZmin = -5;
+const simZmax = 12;
+
+// setup FDTD
+const FDTD = new OpenEMS({ NrTS: 20000, EndCriteria: 1e-5 });
+FDTD.SetGaussExcite(f0, fc);
+FDTD.SetBoundaryCond(['PML_8','PML_8','PML_8','PML_8','PEC','PML_8']);
+
+const CSX = new ContinuousStructure();
+FDTD.SetCSX(CSX);
+
+const mesh = CSX.GetGrid();
+mesh.SetDeltaUnit(unit);
+
+// mesh — x
+mesh.AddLine('x', [-simXmax, port1X - 1, port1X, port1X + 1, -halfStubW, 0, halfStubW, port2X - 1, port2X, port2X + 1, simXmax]);
+mesh.SmoothMeshLines('x', 2, 1.4);
+
+// mesh — y
+mesh.AddLine('y', [-simYmax, -halfTraceW, 0, halfTraceW, halfTraceW + stubL, simYmax]);
+mesh.SmoothMeshLines('y', 2, 1.4);
+
+// mesh — z
+mesh.AddLine('z', [simZmin, 0, subH * 0.25, subH / 2, subH, 2, 5, simZmax]);
+mesh.SmoothMeshLines('z', 2, 1.4);
+
+// ground plane
+const ground = CSX.AddMetal('ground');
+ground.AddBox([-simXmax, -simYmax, 0], [simXmax, simYmax, 0], 10);
+
+// substrate
+const substrate = CSX.AddMaterial('substrate', { Epsilon: epsR });
+substrate.AddBox([-simXmax, -simYmax, 0], [simXmax, simYmax, subH], 5);
+
+// MSL trace
+const msl = CSX.AddMetal('msl_trace');
+msl.AddBox([-simXmax, -halfTraceW, subH], [simXmax, halfTraceW, subH], 10);
+
+// notch stub
+const stub = CSX.AddMetal('notch_stub');
+stub.AddBox([-halfStubW, halfTraceW, subH], [halfStubW, halfTraceW + stubL, subH], 10);
+
+// port 1 — excited
+FDTD.AddLumpedPort(1, portR, [port1X, 0, 0], [port1X, 0, subH], 'z', 1.0);
+
+// port 2 — passive (no excitation)
+FDTD.AddLumpedPort(2, portR, [port2X, 0, 0], [port2X, 0, subH], 'z', 0);
+
+return FDTD.GenerateXML();
+`
+};
+
 /**
  * Helical Antenna example.
  *
  * Based on https://docs.openems.de/python/openEMS/Tutorials/Helical_Antenna.html
  * 9-turn axial-mode helix at 2.4 GHz. Radius 20 mm, pitch 30 mm.
  * Circular ground plane (r = 62.5 mm). Feed impedance 120 Ohm.
- * Gaussian excitation 1.9-2.9 GHz, MUR boundaries + PML on zmax.
+ * Gaussian excitation 1.9-2.9 GHz, PML boundaries.
  */
-export const HELICAL_ANTENNA = `<?xml version="1.0" encoding="UTF-8"?>
-<openEMS>
-  <FDTD NumberOfTimesteps="30000" endCriteria="1e-4" f_max="2.9e9">
-    <Excitation Type="0" f0="2.4e9" fc="0.5e9"/>
-    <BoundaryCond xmin="2" xmax="2" ymin="2" ymax="2" zmin="2" zmax="2"/>
-  </FDTD>
-  <ContinuousStructure CoordSystem="0">
-    <RectilinearGrid DeltaUnit="1e-3">
-      <XLines>-130,-110,-90,-75,-62.5,-50,-40,-30,-25,-20,-15,-10,-5,0,5,10,15,20,25,30,40,50,62.5,75,90,110,130</XLines>
-      <YLines>-130,-110,-90,-75,-62.5,-50,-40,-30,-25,-20,-15,-10,-5,0,5,10,15,20,25,30,40,50,62.5,75,90,110,130</YLines>
-      <ZLines>-130,-100,-70,-40,-20,-10,-5,0,1.5,3,15,30,45,60,75,90,105,120,135,150,165,180,195,210,225,240,255,270,285,300,320,350,400</ZLines>
-    </RectilinearGrid>
-    <Properties>
-      <Metal Name="helix">
-        <Primitives>
-          <Curve Priority="5">
-            <Vertex X="20.00" Y="0.00" Z="3.00"/>
-            <Vertex X="16.18" Y="11.76" Z="6.00"/>
-            <Vertex X="6.18" Y="19.02" Z="9.00"/>
-            <Vertex X="-6.18" Y="19.02" Z="12.00"/>
-            <Vertex X="-16.18" Y="11.76" Z="15.00"/>
-            <Vertex X="-20.00" Y="0.00" Z="18.00"/>
-            <Vertex X="-16.18" Y="-11.76" Z="21.00"/>
-            <Vertex X="-6.18" Y="-19.02" Z="24.00"/>
-            <Vertex X="6.18" Y="-19.02" Z="27.00"/>
-            <Vertex X="16.18" Y="-11.76" Z="30.00"/>
-            <Vertex X="20.00" Y="0.00" Z="33.00"/>
-            <Vertex X="16.18" Y="11.76" Z="36.00"/>
-            <Vertex X="6.18" Y="19.02" Z="39.00"/>
-            <Vertex X="-6.18" Y="19.02" Z="42.00"/>
-            <Vertex X="-16.18" Y="11.76" Z="45.00"/>
-            <Vertex X="-20.00" Y="0.00" Z="48.00"/>
-            <Vertex X="-16.18" Y="-11.76" Z="51.00"/>
-            <Vertex X="-6.18" Y="-19.02" Z="54.00"/>
-            <Vertex X="6.18" Y="-19.02" Z="57.00"/>
-            <Vertex X="16.18" Y="-11.76" Z="60.00"/>
-            <Vertex X="20.00" Y="0.00" Z="63.00"/>
-            <Vertex X="16.18" Y="11.76" Z="66.00"/>
-            <Vertex X="6.18" Y="19.02" Z="69.00"/>
-            <Vertex X="-6.18" Y="19.02" Z="72.00"/>
-            <Vertex X="-16.18" Y="11.76" Z="75.00"/>
-            <Vertex X="-20.00" Y="0.00" Z="78.00"/>
-            <Vertex X="-16.18" Y="-11.76" Z="81.00"/>
-            <Vertex X="-6.18" Y="-19.02" Z="84.00"/>
-            <Vertex X="6.18" Y="-19.02" Z="87.00"/>
-            <Vertex X="16.18" Y="-11.76" Z="90.00"/>
-            <Vertex X="20.00" Y="0.00" Z="93.00"/>
-            <Vertex X="16.18" Y="11.76" Z="96.00"/>
-            <Vertex X="6.18" Y="19.02" Z="99.00"/>
-            <Vertex X="-6.18" Y="19.02" Z="102.00"/>
-            <Vertex X="-16.18" Y="11.76" Z="105.00"/>
-            <Vertex X="-20.00" Y="0.00" Z="108.00"/>
-            <Vertex X="-16.18" Y="-11.76" Z="111.00"/>
-            <Vertex X="-6.18" Y="-19.02" Z="114.00"/>
-            <Vertex X="6.18" Y="-19.02" Z="117.00"/>
-            <Vertex X="16.18" Y="-11.76" Z="120.00"/>
-            <Vertex X="20.00" Y="0.00" Z="123.00"/>
-            <Vertex X="16.18" Y="11.76" Z="126.00"/>
-            <Vertex X="6.18" Y="19.02" Z="129.00"/>
-            <Vertex X="-6.18" Y="19.02" Z="132.00"/>
-            <Vertex X="-16.18" Y="11.76" Z="135.00"/>
-            <Vertex X="-20.00" Y="0.00" Z="138.00"/>
-            <Vertex X="-16.18" Y="-11.76" Z="141.00"/>
-            <Vertex X="-6.18" Y="-19.02" Z="144.00"/>
-            <Vertex X="6.18" Y="-19.02" Z="147.00"/>
-            <Vertex X="16.18" Y="-11.76" Z="150.00"/>
-            <Vertex X="20.00" Y="0.00" Z="153.00"/>
-            <Vertex X="16.18" Y="11.76" Z="156.00"/>
-            <Vertex X="6.18" Y="19.02" Z="159.00"/>
-            <Vertex X="-6.18" Y="19.02" Z="162.00"/>
-            <Vertex X="-16.18" Y="11.76" Z="165.00"/>
-            <Vertex X="-20.00" Y="0.00" Z="168.00"/>
-            <Vertex X="-16.18" Y="-11.76" Z="171.00"/>
-            <Vertex X="-6.18" Y="-19.02" Z="174.00"/>
-            <Vertex X="6.18" Y="-19.02" Z="177.00"/>
-            <Vertex X="16.18" Y="-11.76" Z="180.00"/>
-            <Vertex X="20.00" Y="0.00" Z="183.00"/>
-            <Vertex X="16.18" Y="11.76" Z="186.00"/>
-            <Vertex X="6.18" Y="19.02" Z="189.00"/>
-            <Vertex X="-6.18" Y="19.02" Z="192.00"/>
-            <Vertex X="-16.18" Y="11.76" Z="195.00"/>
-            <Vertex X="-20.00" Y="0.00" Z="198.00"/>
-            <Vertex X="-16.18" Y="-11.76" Z="201.00"/>
-            <Vertex X="-6.18" Y="-19.02" Z="204.00"/>
-            <Vertex X="6.18" Y="-19.02" Z="207.00"/>
-            <Vertex X="16.18" Y="-11.76" Z="210.00"/>
-            <Vertex X="20.00" Y="0.00" Z="213.00"/>
-            <Vertex X="16.18" Y="11.76" Z="216.00"/>
-            <Vertex X="6.18" Y="19.02" Z="219.00"/>
-            <Vertex X="-6.18" Y="19.02" Z="222.00"/>
-            <Vertex X="-16.18" Y="11.76" Z="225.00"/>
-            <Vertex X="-20.00" Y="0.00" Z="228.00"/>
-            <Vertex X="-16.18" Y="-11.76" Z="231.00"/>
-            <Vertex X="-6.18" Y="-19.02" Z="234.00"/>
-            <Vertex X="6.18" Y="-19.02" Z="237.00"/>
-            <Vertex X="16.18" Y="-11.76" Z="240.00"/>
-            <Vertex X="20.00" Y="0.00" Z="243.00"/>
-            <Vertex X="16.18" Y="11.76" Z="246.00"/>
-            <Vertex X="6.18" Y="19.02" Z="249.00"/>
-            <Vertex X="-6.18" Y="19.02" Z="252.00"/>
-            <Vertex X="-16.18" Y="11.76" Z="255.00"/>
-            <Vertex X="-20.00" Y="0.00" Z="258.00"/>
-            <Vertex X="-16.18" Y="-11.76" Z="261.00"/>
-            <Vertex X="-6.18" Y="-19.02" Z="264.00"/>
-            <Vertex X="6.18" Y="-19.02" Z="267.00"/>
-            <Vertex X="16.18" Y="-11.76" Z="270.00"/>
-            <Vertex X="20.00" Y="0.00" Z="273.00"/>
-          </Curve>
-        </Primitives>
-      </Metal>
-      <Metal Name="gnd">
-        <Primitives>
-          <Cylinder Priority="10" Radius="62.5">
-            <P1 X="0" Y="0" Z="-0.1"/>
-            <P2 X="0" Y="0" Z="0.1"/>
-          </Cylinder>
-        </Primitives>
-      </Metal>
-      <LumpedElement Name="port_resist_1" Direction="2" R="120" C="0" L="0">
-        <Primitives>
-          <Box Priority="5">
-            <P1 X="20" Y="0" Z="0"/>
-            <P2 X="20" Y="0" Z="3"/>
-          </Box>
-        </Primitives>
-      </LumpedElement>
-      <Excitation Name="port_excite_1" Type="0" Excite="0,0,1">
-        <Primitives>
-          <Box Priority="5">
-            <P1 X="20" Y="0" Z="0"/>
-            <P2 X="20" Y="0" Z="3"/>
-          </Box>
-        </Primitives>
-      </Excitation>
-      <ProbeBox Name="port_ut1" Type="0" Weight="-1">
-        <Primitives>
-          <Box Priority="0">
-            <P1 X="20" Y="0" Z="0"/>
-            <P2 X="20" Y="0" Z="3"/>
-          </Box>
-        </Primitives>
-      </ProbeBox>
-      <ProbeBox Name="port_it1" Type="1" Weight="1" NormDir="2">
-        <Primitives>
-          <Box Priority="0">
-            <P1 X="15" Y="-5" Z="1.5"/>
-            <P2 X="25" Y="5" Z="1.5"/>
-          </Box>
-        </Primitives>
-      </ProbeBox>
-      <DumpBox Name="nf2ff_E" DumpType="10" DumpMode="1" FileType="1">
-        <FD_Samples>2.4e9</FD_Samples>
-        <Primitives>
-          <Box Priority="0"><P1 X="-90" Y="-90" Z="-40"/><P2 X="-90" Y="90" Z="320"/></Box>
-          <Box Priority="0"><P1 X="90" Y="-90" Z="-40"/><P2 X="90" Y="90" Z="320"/></Box>
-          <Box Priority="0"><P1 X="-90" Y="-90" Z="-40"/><P2 X="90" Y="-90" Z="320"/></Box>
-          <Box Priority="0"><P1 X="-90" Y="90" Z="-40"/><P2 X="90" Y="90" Z="320"/></Box>
-          <Box Priority="0"><P1 X="-90" Y="-90" Z="-40"/><P2 X="90" Y="90" Z="-40"/></Box>
-          <Box Priority="0"><P1 X="-90" Y="-90" Z="320"/><P2 X="90" Y="90" Z="320"/></Box>
-        </Primitives>
-      </DumpBox>
-      <DumpBox Name="nf2ff_H" DumpType="11" DumpMode="1" FileType="1">
-        <FD_Samples>2.4e9</FD_Samples>
-        <Primitives>
-          <Box Priority="0"><P1 X="-90" Y="-90" Z="-40"/><P2 X="-90" Y="90" Z="320"/></Box>
-          <Box Priority="0"><P1 X="90" Y="-90" Z="-40"/><P2 X="90" Y="90" Z="320"/></Box>
-          <Box Priority="0"><P1 X="-90" Y="-90" Z="-40"/><P2 X="90" Y="-90" Z="320"/></Box>
-          <Box Priority="0"><P1 X="-90" Y="90" Z="-40"/><P2 X="90" Y="90" Z="320"/></Box>
-          <Box Priority="0"><P1 X="-90" Y="-90" Z="-40"/><P2 X="90" Y="90" Z="-40"/></Box>
-          <Box Priority="0"><P1 X="-90" Y="-90" Z="320"/><P2 X="90" Y="90" Z="320"/></Box>
-        </Primitives>
-      </DumpBox>
-    </Properties>
-  </ContinuousStructure>
-</openEMS>`;
+export const HELICAL_ANTENNA = {
+  name: 'Helical Antenna',
+  script: `
+// Helical Antenna — parametric design
+const unit = 1e-3;
+const f0 = 2.4e9;
+const fc = 0.5e9;
 
-export const RECT_WAVEGUIDE = `<?xml version="1.0" encoding="UTF-8"?>
-<openEMS>
-  <FDTD NumberOfTimesteps="10000" endCriteria="1e-5" f_max="12e9">
-    <Excitation Type="0" f0="10e9" fc="2e9"/>
-    <BoundaryCond xmin="2" xmax="2" ymin="0" ymax="0" zmin="0" zmax="0"/>
-  </FDTD>
-  <ContinuousStructure CoordSystem="0">
-    <RectilinearGrid DeltaUnit="1e-3">
-      <XLines>-30,-25,-20,-15,-12,-10,-8,-6,-4,-2,0,2,4,6,8,10,12,15,20,25,30</XLines>
-      <YLines>0,1.016,2.032,3.048,4.064,5.08,6.096,7.112,8.128,9.144,10.16,11.43,12.7,14,16,18,20,22.86</YLines>
-      <ZLines>0,1.27,2.54,3.81,5.08,6.35,7.62,8.89,10.16</ZLines>
-    </RectilinearGrid>
-    <Properties>
-      <Metal Name="wg_walls">
-        <Primitives>
-          <Box Priority="10">
-            <P1 X="-30" Y="0" Z="0"/>
-            <P2 X="30" Y="0" Z="10.16"/>
-          </Box>
-          <Box Priority="10">
-            <P1 X="-30" Y="22.86" Z="0"/>
-            <P2 X="30" Y="22.86" Z="10.16"/>
-          </Box>
-          <Box Priority="10">
-            <P1 X="-30" Y="0" Z="0"/>
-            <P2 X="30" Y="22.86" Z="0"/>
-          </Box>
-          <Box Priority="10">
-            <P1 X="-30" Y="0" Z="10.16"/>
-            <P2 X="30" Y="22.86" Z="10.16"/>
-          </Box>
-        </Primitives>
-      </Metal>
-      <Excitation Name="port_excite_1" Type="0" Excite="0,1,0">
-        <Primitives>
-          <Box Priority="5">
-            <P1 X="-20" Y="0" Z="0"/>
-            <P2 X="-20" Y="22.86" Z="10.16"/>
-          </Box>
-        </Primitives>
-      </Excitation>
-      <ProbeBox Name="port_ut1" Type="0" Weight="-1">
-        <Primitives>
-          <Box Priority="0">
-            <P1 X="-20" Y="0" Z="5.08"/>
-            <P2 X="-20" Y="22.86" Z="5.08"/>
-          </Box>
-        </Primitives>
-      </ProbeBox>
-      <ProbeBox Name="port_it1" Type="1" Weight="1" NormDir="0">
-        <Primitives>
-          <Box Priority="0">
-            <P1 X="-20" Y="0" Z="0"/>
-            <P2 X="-20" Y="22.86" Z="10.16"/>
-          </Box>
-        </Primitives>
-      </ProbeBox>
-      <ProbeBox Name="port_ut2" Type="0" Weight="-1">
-        <Primitives>
-          <Box Priority="0">
-            <P1 X="20" Y="0" Z="5.08"/>
-            <P2 X="20" Y="22.86" Z="5.08"/>
-          </Box>
-        </Primitives>
-      </ProbeBox>
-      <ProbeBox Name="port_it2" Type="1" Weight="1" NormDir="0">
-        <Primitives>
-          <Box Priority="0">
-            <P1 X="20" Y="0" Z="0"/>
-            <P2 X="20" Y="22.86" Z="10.16"/>
-          </Box>
-        </Primitives>
-      </ProbeBox>
-    </Properties>
-  </ContinuousStructure>
-</openEMS>`;
+// helix parameters
+const turns = 9;
+const radius = 20;   // mm
+const pitch = 30;     // mm per turn
+const feedH = 3;      // feed pin height (mm)
+const feedR = 120;    // feed impedance (ohm)
+
+// ground plane
+const gndRadius = 62.5; // mm
+
+// simulation box
+const simXY = 130;
+const simZmin = -130;
+const simZmax = 400;
+
+// NF2FF box
+const nfXY = 90;
+const nfZmin = -40;
+const nfZmax = 320;
+
+// helix top
+const helixTop = feedH + turns * pitch;
+
+// setup FDTD
+const FDTD = new OpenEMS({ NrTS: 30000, EndCriteria: 1e-4 });
+FDTD.SetGaussExcite(f0, fc);
+FDTD.SetBoundaryCond(['PML_8','PML_8','PML_8','PML_8','PML_8','PML_8']);
+
+const CSX = new ContinuousStructure();
+FDTD.SetCSX(CSX);
+
+const mesh = CSX.GetGrid();
+mesh.SetDeltaUnit(unit);
+
+// mesh — x, y (symmetric)
+mesh.AddLine('x', [-simXY, -nfXY, -gndRadius, -radius, 0, radius, gndRadius, nfXY, simXY]);
+mesh.SmoothMeshLines('x', 10, 1.4);
+
+mesh.AddLine('y', [-simXY, -nfXY, -gndRadius, -radius, 0, radius, gndRadius, nfXY, simXY]);
+mesh.SmoothMeshLines('y', 10, 1.4);
+
+// mesh — z
+const zLines = [simZmin, nfZmin, -10, 0, feedH];
+for (let i = 0; i <= turns; i++) {
+  zLines.push(feedH + i * pitch);
+}
+zLines.push(helixTop + 20, nfZmax, simZmax);
+mesh.AddLine('z', zLines);
+mesh.SmoothMeshLines('z', 10, 1.4);
+
+// helix curve — generate programmatically
+const helixX = [], helixY = [], helixZ = [];
+const ptsPerTurn = 10;
+for (let i = 0; i <= turns * ptsPerTurn; i++) {
+  const t = i / ptsPerTurn;
+  helixX.push(radius * Math.cos(t * 2 * Math.PI));
+  helixY.push(radius * Math.sin(t * 2 * Math.PI));
+  helixZ.push(feedH + t * pitch);
+}
+const helix = CSX.AddMetal('helix');
+helix.AddCurve([helixX, helixY, helixZ], 5);
+
+// circular ground plane
+const gnd = CSX.AddMetal('gnd');
+gnd.AddCylinder([0, 0, -0.1], [0, 0, 0.1], gndRadius, 10);
+
+// lumped port feed (from ground to helix start)
+FDTD.AddLumpedPort(1, feedR, [radius, 0, 0], [radius, 0, feedH], 'z', 1.0);
+
+// NF2FF box
+FDTD.CreateNF2FFBox({ frequency: f0 });
+
+return FDTD.GenerateXML();
+`
+};
+
+/**
+ * Rectangular Waveguide example.
+ *
+ * WR-90 waveguide (22.86 x 10.16 mm) with TE10 mode excitation.
+ * PEC walls, PML termination at both ends.
+ * Gaussian excitation covering 8-12 GHz (X-band).
+ */
+export const RECT_WAVEGUIDE = {
+  name: 'Rect Waveguide',
+  script: `
+// Rectangular Waveguide — parametric design
+const unit = 1e-3;
+const f0 = 10e9;
+const fc = 2e9;
+
+// WR-90 waveguide dimensions
+const wgW = 22.86; // broad wall (y)
+const wgH = 10.16; // narrow wall (z)
+const wgL = 60;    // total length (x), centered at 0
+
+// port positions
+const port1X = -20;
+const port2X = 20;
+
+// derived
+const halfL = wgL / 2;
+
+// setup FDTD
+const FDTD = new OpenEMS({ NrTS: 10000, EndCriteria: 1e-5 });
+FDTD.SetGaussExcite(f0, fc);
+FDTD.SetBoundaryCond(['PML_8','PML_8','PEC','PEC','PEC','PEC']);
+
+const CSX = new ContinuousStructure();
+FDTD.SetCSX(CSX);
+
+const mesh = CSX.GetGrid();
+mesh.SetDeltaUnit(unit);
+
+// mesh — x (propagation direction)
+mesh.AddLine('x', [-halfL, port1X, 0, port2X, halfL]);
+mesh.SmoothMeshLines('x', 3, 1.3);
+
+// mesh — y (broad wall)
+mesh.AddLine('y', [0, wgW]);
+mesh.SmoothMeshLines('y', 1.27, 1.3);
+
+// mesh — z (narrow wall)
+mesh.AddLine('z', [0, wgH]);
+mesh.SmoothMeshLines('z', 1.27, 1.3);
+
+// PEC waveguide walls (4 walls along x)
+const walls = CSX.AddMetal('wg_walls');
+walls.AddBox([-halfL, 0, 0], [halfL, 0, wgH], 10);       // y=0 wall
+walls.AddBox([-halfL, wgW, 0], [halfL, wgW, wgH], 10);   // y=wgW wall
+walls.AddBox([-halfL, 0, 0], [halfL, wgW, 0], 10);       // z=0 wall
+walls.AddBox([-halfL, 0, wgH], [halfL, wgW, wgH], 10);   // z=wgH wall
+
+// TE10 excitation at port 1
+const excite = CSX.AddExcitation('port_excite_1', 0, [0, 1, 0]);
+excite.AddBox([port1X, 0, 0], [port1X, wgW, wgH], 5);
+
+// voltage probe at port 1 (midline)
+const vProbe1 = CSX.AddProbe('port_ut1', 0, { weight: -1 });
+vProbe1.AddBox([port1X, 0, wgH / 2], [port1X, wgW, wgH / 2], 0);
+
+// current probe at port 1
+const iProbe1 = CSX.AddProbe('port_it1', 1, { weight: 1, normDir: 0 });
+iProbe1.AddBox([port1X, 0, 0], [port1X, wgW, wgH], 0);
+
+// voltage probe at port 2 (midline)
+const vProbe2 = CSX.AddProbe('port_ut2', 0, { weight: -1 });
+vProbe2.AddBox([port2X, 0, wgH / 2], [port2X, wgW, wgH / 2], 0);
+
+// current probe at port 2
+const iProbe2 = CSX.AddProbe('port_it2', 1, { weight: 1, normDir: 0 });
+iProbe2.AddBox([port2X, 0, 0], [port2X, wgW, wgH], 0);
+
+return FDTD.GenerateXML();
+`
+};
