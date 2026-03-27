@@ -64,7 +64,7 @@ if (EMSCRIPTEN)
     "-sENVIRONMENT=web,node"
     "-sWASM_BIGINT"
     "-sASSERTIONS=0"
-    "--closure=1"
+    "--closure=0"
     "-pthread"
     "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency||4"
     "-sDEFAULT_PTHREAD_STACK_SIZE=2097152"

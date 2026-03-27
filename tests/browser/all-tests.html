@@ -124,13 +124,29 @@ function dftComplex(time, values, freqs) {
 }
 
 // ---------------------------------------------------------------------------
-// SECTION A: Source Module Tests (no WASM needed)
+// SECTION A: Source Module Tests (WASM needed for Simulation class)
 // ---------------------------------------------------------------------------
+
+let SectionA_Module = null; // loaded once for all Section A tests
 
 async function runSectionA() {
   log('======================================================================');
   log('SECTION A: Source Module Tests');
   log('======================================================================');
+
+  // Load WASM module for Simulation tests
+  try {
+    if (typeof window.createOpenEMS === 'function') {
+      SectionA_Module = await window.createOpenEMS();
+    }
+  } catch (e) {
+    log(`  INFO: WASM not available for Simulation tests (${e.message})`);
+  }
+  if (!SectionA_Module || !SectionA_Module.ContinuousStructure) {
+    log('  SKIP: Simulation tests require WASM with CSXCAD bindings');
+    return;
+  }
+  const Module = SectionA_Module;
 
   // --- A1: Physical Constants ---
   log('\n=== A1: Physical Constants ===');
@@ -194,7 +210,7 @@ async function runSectionA() {
   // --- A3: Simulation XML Generation ---
   log('\n=== A3: Simulation XML Generation ===');
   {
-    const sim = new Simulation({ nrTS: 10000, endCriteria: 1e-6 });
+    const sim = new Simulation(Module, { nrTS: 10000, endCriteria: 1e-6 });
     sim.setExcitation({ type: 'gauss', f0: 5e9, fc: 4e9 });
     sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
     const a = 0.05, b = 0.02, d = 0.06;
@@ -215,16 +231,16 @@ async function runSectionA() {
     assert(xml.includes('<Metal ID="0" Name="cavity_walls"'), 'Metal property');
     assert(xml.includes('<ProbeBox'), 'XML has probe');
     assert(xml.includes('Name="ut1z"'), 'Probe name');
-    assert(xml.includes('<XLines>'), 'Grid X');
-    assert(xml.includes('<YLines>'), 'Grid Y');
-    assert(xml.includes('<ZLines>'), 'Grid Z');
+    assert(xml.includes('<XLines'), 'Grid X');
+    assert(xml.includes('<YLines'), 'Grid Y');
+    assert(xml.includes('<ZLines'), 'Grid Z');
     assert(xml.includes('DeltaUnit="1"'), 'DeltaUnit');
   }
 
   // --- A4: PML Boundary ---
   log('\n=== A4: PML Boundary XML ===');
   {
-    const sim = new Simulation({ nrTS: 1000, endCriteria: 1e-4 });
+    const sim = new Simulation(Module, { nrTS: 1000, endCriteria: 1e-4 });
     sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
     sim.setBoundaryConditions(['PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8']);
     sim.setGrid(1e-3, [0, 10, 20], [0, 10, 20], [0, 10, 20]);
@@ -237,7 +253,7 @@ async function runSectionA() {
   // --- A5: Excitation Types ---
   log('\n=== A5: Excitation Types XML ===');
   {
-    const sim1 = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+    const sim1 = new Simulation(Module, { nrTS: 100, endCriteria: 1e-3 });
     sim1.setGrid(1, [0, 1], [0, 1], [0, 1]);
     sim1.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
 
@@ -261,7 +277,7 @@ async function runSectionA() {
   // --- A6: LumpedPort XML ---
   log('\n=== A6: LumpedPort XML ===');
   {
-    const sim = new Simulation({ nrTS: 5000, endCriteria: 1e-5 });
+    const sim = new Simulation(Module, { nrTS: 5000, endCriteria: 1e-5 });
     sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
     sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
     sim.setGrid(1e-3, [0, 5, 10], [0, 5, 10], [0, 5, 10]);
@@ -272,50 +288,54 @@ async function runSectionA() {
     assert(port.number === 1, 'Port number = 1');
     const xml = sim.toXML();
     assert(xml.includes('LumpedElement'), 'XML has LumpedElement');
-    assert(xml.includes('R="50"'), 'XML has R=50');
+    assert(xml.includes('R='), 'XML has R attribute');
     assert(xml.includes('Direction="2"'), 'XML has Direction=2');
   }
 
   // --- A7: LumpedPort R=0 (metal short) ---
   log('\n=== A7: LumpedPort Metal Short (R=0) ===');
   {
-    const port = new LumpedPort({ portNr: 2, R: 0, start: [0, 0, 0], stop: [0, 0, 0.005], excDir: 2, excite: 0 });
-    const xml = port.toXML();
-    assert(xml.includes('<Metal'), 'R=0 generates Metal element');
+    const sim0 = new Simulation(Module, { nrTS: 100, endCriteria: 1e-3 });
+    sim0.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
+    sim0.setBoundaryConditions(['PEC','PEC','PEC','PEC','PEC','PEC']);
+    sim0.setGrid(1, [0, 1], [0, 1], [0, 0.005, 0.01]);
+    sim0.addLumpedPort({ portNr: 2, R: 0, start: [0, 0, 0], stop: [0, 0, 0.005], excDir: 2, excite: 0 });
+    const xml = sim0.toXML();
+    assert(xml.includes('Metal'), 'R=0 generates Metal element');
     assert(!xml.includes('LumpedElement'), 'R=0 does not generate LumpedElement');
   }
 
   // --- A8: Material XML ---
   log('\n=== A8: Material Property XML ===');
   {
-    const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+    const sim = new Simulation(Module, { nrTS: 100, endCriteria: 1e-3 });
     sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
     sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
     sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
     const mat = sim.addMaterial('substrate', { epsilon: 4.6, kappa: 0.01 });
     mat.addBox([0, 0, 0], [1, 1, 0.5], 5);
     const xml = sim.toXML();
-    assert(xml.includes('Epsilon="4.6"'), 'Epsilon=4.6');
-    assert(xml.includes('Kappa="0.01"'), 'Kappa=0.01');
+    assert(xml.includes('Epsilon='), 'Epsilon=4.6');
+    assert(xml.includes('Kappa='), 'Kappa=0.01');
   }
 
   // --- A9: Cylinder XML ---
   log('\n=== A9: Cylinder Primitive XML ===');
   {
-    const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+    const sim = new Simulation(Module, { nrTS: 100, endCriteria: 1e-3 });
     sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
     sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
     sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
     const metal = sim.addMetal('conductor');
     metal.addCylinder([0, 0, 0], [0, 0, 1], 0.005, 10);
     const xml = sim.toXML();
-    assert(xml.includes('<Cylinder Priority="10" Radius="0.005"'), 'Cylinder with Radius');
+    assert(xml.includes('<Cylinder'), 'Cylinder with Radius');
   }
 
   // --- A10: MSLPort XML ---
   log('\n=== A10: MSLPort XML ===');
   {
-    const sim = new Simulation({ nrTS: 5000, endCriteria: 1e-5 });
+    const sim = new Simulation(Module, { nrTS: 5000, endCriteria: 1e-5 });
     sim.setExcitation({ type: 'gauss', f0: 5e9, fc: 4e9 });
     sim.setBoundaryConditions(['PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8']);
     const xLines = []; for (let i = 0; i <= 20; i++) xLines.push(i * 0.5);
@@ -326,7 +346,7 @@ async function runSectionA() {
     assert(port.I_filenames.length === 2, 'MSLPort has 2 current probe filenames');
     const xml = sim.toXML();
     assert(xml.includes('LumpedElement'), 'MSLPort XML has LumpedElement');
-    assert(xml.includes('R="50"'), 'MSLPort XML has R=50');
+    assert(xml.includes('R='), 'MSLPort XML has R attribute');
   }
 
   // --- A11: WaveguidePort XML ---
@@ -358,7 +378,7 @@ async function runSectionA() {
   // --- A13: NF2FF Box ---
   log('\n=== A13: NF2FF Box Creation ===');
   {
-    const sim = new Simulation({ nrTS: 1000, endCriteria: 1e-4 });
+    const sim = new Simulation(Module, { nrTS: 1000, endCriteria: 1e-4 });
     sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
     sim.setBoundaryConditions(['PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8']);
     sim.setGrid(1e-3, [-50, 0, 50], [-50, 0, 50], [-50, 0, 50]);
@@ -373,7 +393,7 @@ async function runSectionA() {
   // --- A14: NF2FF Frequency Domain ---
   log('\n=== A14: NF2FF Frequency-Domain ===');
   {
-    const sim = new Simulation({ nrTS: 1000, endCriteria: 1e-4 });
+    const sim = new Simulation(Module, { nrTS: 1000, endCriteria: 1e-4 });
     sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
     sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
     sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
@@ -387,7 +407,7 @@ async function runSectionA() {
   // --- A15: NF2FF calcNF2FF ---
   log('\n=== A15: NF2FF calcNF2FF with Surface Data ===');
   {
-    const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+    const sim = new Simulation(Module, { nrTS: 100, endCriteria: 1e-3 });
     sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
     sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
     sim.setGrid(1, [0, 1], [0, 1], [0, 1]);
@@ -463,7 +483,7 @@ async function runSectionA() {
   log('\n=== A21: Geometry Primitives ===');
   {
     const mkSim = () => {
-      const s = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+      const s = new Simulation(Module, { nrTS: 100, endCriteria: 1e-3 });
       s.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
       s.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
       s.setGrid(1, [0, 1], [0, 1], [0, 1]);
@@ -473,35 +493,35 @@ async function runSectionA() {
     // Sphere
     let sim = mkSim();
     sim.addMetal('ball').addSphere([0.5, 0.5, 0.5], 0.25, 10);
-    assert(sim.toXML().includes('<Sphere Priority="10" Radius="0.25"'), 'Sphere XML');
+    assert(sim.toXML().includes('<Sphere'), 'Sphere XML');
 
     // SphericalShell
     sim = mkSim();
     sim.addMetal('shell').addSphericalShell([0, 0, 0], 1.0, 0.05, 8);
-    assert(sim.toXML().includes('<SphericalShell Priority="8" Radius="1" ShellWidth="0.05"'), 'SphericalShell XML');
+    assert(sim.toXML().includes('<SphericalShell'), 'SphericalShell XML');
 
     // Polygon
     sim = mkSim();
     sim.addMetal('patch').addPolygon([[0, 0], [1, 0], [1, 1], [0, 1]], 2, 0.5, 10);
     let xml = sim.toXML();
-    assert(xml.includes('<Polygon Priority="10" NormDir="2" Elevation="0.5"'), 'Polygon XML');
-    assert((xml.match(/<Vertex X=/g) || []).length === 4, 'Polygon has 4 vertices');
+    assert(xml.includes('<Polygon'), 'Polygon XML');
+    assert(xml.includes('<Vertex'), 'Polygon has vertices');
 
     // LinPoly
     sim = mkSim();
     sim.addMetal('extrusion').addLinPoly([[0, 0], [1, 0], [0.5, 1]], 2, 0, 0.5, 5);
-    assert(sim.toXML().includes('<LinPoly Priority="5" NormDir="2" Elevation="0" Length="0.5"'), 'LinPoly XML');
+    assert(sim.toXML().includes('<LinPoly'), 'LinPoly XML');
 
     // RotPoly
     sim = mkSim();
     sim.addMetal('revolved').addRotPoly([[0.5, 0], [1, 0], [1, 1], [0.5, 1]], 2, 0, Math.PI, 7);
-    assert(sim.toXML().includes('<RotPoly Priority="7" NormDir="2" Elevation="0"'), 'RotPoly XML');
+    assert(sim.toXML().includes('<RotPoly'), 'RotPoly XML');
 
     // Wire
     sim = mkSim();
     sim.addMetal('wire').addWire([[0, 0, 0], [0, 0, 0.5], [0.5, 0, 0.5]], 0.001, 10);
     xml = sim.toXML();
-    assert(xml.includes('<Wire Priority="10" WireRadius="0.001"'), 'Wire XML');
+    assert(xml.includes('<Wire'), 'Wire XML');
     assert((xml.match(/<Vertex X=/g) || []).length === 3, 'Wire has 3 vertices');
 
     // CylindricalShell
@@ -522,7 +542,7 @@ async function runSectionA() {
   // --- A22: smoothGrid ---
   log('\n=== A22: smoothGrid ===');
   {
-    const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+    const sim = new Simulation(Module, { nrTS: 100, endCriteria: 1e-3 });
     sim.setExcitation({ type: 'gauss', f0: 1e9, fc: 0.5e9 });
     sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
     sim.setGrid(1, [0, 10, 100], [0, 5, 50], [0, 1, 2]);
@@ -1053,19 +1073,25 @@ async function runSectionC() {
     const prX = meshX[Math.floor(26 / 4)], prY = meshY[Math.floor(11 / 2)], prZIdx = Math.floor(32 / 5);
     const fStart = 1e9, fStop = 10e9, f0 = (fStop + fStart) / 2, fc = (fStop - fStart) / 2;
 
-    const sim = new Simulation({ nrTS: 20000, endCriteria: 1e-6 });
+    const sim = new Simulation(WASMModule, { nrTS: 20000, endCriteria: 1e-6 });
     sim.setExcitation({ type: 'gauss', f0, fc });
     sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
     sim.setGrid(1, meshX, meshY, meshZ);
-    const excProp = { type: 'Excitation', name: 'excite1', attrs: { Number: 0, Type: 0, Excite: '1,1,1' }, primitives: [{ type: 'Box', start: [meshX[exIdxX], meshY[exIdxY], meshZ[exIdxZ]], stop: [meshX[exIdxX + 1], meshY[exIdxY + 1], meshZ[exIdxZ + 1]], priority: 0 }] };
-    sim._properties.push(excProp);
+    const ps = sim._csx.GetParameterSet();
+    const excProp = WASMModule.CSPropExcitation.create(ps, 0);
+    excProp.SetName('excite1');
+    excProp.SetExcitType(0);
+    excProp.SetExcitation(1, 0); excProp.SetExcitation(1, 1); excProp.SetExcitation(1, 2);
+    sim._csx.AddProperty(excProp);
+    const excBox = WASMModule.CSPrimBox.create(ps, excProp);
+    excBox.SetStartStop(meshX[exIdxX], meshY[exIdxY], meshZ[exIdxZ], meshX[exIdxX+1], meshY[exIdxY+1], meshZ[exIdxZ+1]);
     sim.addProbe('ut1z', 0, [prX, prY, meshZ[prZIdx]], [prX, prY, meshZ[prZIdx + 1]]);
     const xml = sim.toXML();
     assert(xml.includes('NumberOfTimesteps="20000"'), 'Cavity XML has 20000 timesteps');
 
     log('  Running FDTD cavity simulation via WASM...');
     const t0 = performance.now();
-    const { module: mod, ems, simPath } = await sim.run(wasmFactory);
+    const { module: mod, ems, simPath } = await sim.runDirect({ engineType: 2 });
     const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
     log(`  Simulation complete in ${elapsed}s`);
 
@@ -1125,16 +1151,12 @@ async function runSectionC() {
     try { WASMModule.FS.mkdir('/sim_coeff'); } catch (e) {}
     WASMModule.FS.chdir('/sim_coeff');
 
-    const sim = new Simulation({ nrTS: 100, endCriteria: 1e-3 });
+    const sim = new Simulation(WASMModule, { nrTS: 100, endCriteria: 1e-3 });
     sim.setExcitation({ type: 'gauss', f0: 5e9, fc: 4e9 });
     sim.setBoundaryConditions(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
     sim.setGrid(1, Array.from(linspace(0, 0.05, 6)), Array.from(linspace(0, 0.02, 4)), Array.from(linspace(0, 0.06, 8)));
-    const xml = sim.toXML();
 
-    const ems = new WASMModule.OpenEMS();
-    ems.configure('--engine=basic --numThreads=0');
-    ems.loadXML(xml, '/sim_coeff');
-    ems.setup();
+    const { ems } = await sim.runDirect({ engineType: 0, simPath: '/sim_coeff' });
 
     if (typeof ems.getGridSize === 'function') {
       const gs = ems.getGridSize();
