@@ -615,7 +615,47 @@ async function runWebGPU(Module, ems, simPath) {
   await gpuEngine.init(config.gridSize, config.coefficients);
   if (config.excitation) gpuEngine.configureExcitation(config.excitation);
   if (config.pmlRegions.length > 0) gpuEngine.configurePML(config.pmlRegions);
-  if (config.murRegions.length > 0) gpuEngine.configureMur(config.murRegions);
+  // Mur ABC: convert raw region data to per-point format for WebGPUEngine
+  if (config.murRegions.length > 0) {
+    const [Nx, Ny, Nz] = config.gridSize;
+    const allNormalP = [], allShiftedP = [], allCoeffP = [];
+    const allNormalPP = [], allShiftedPP = [], allCoeffPP = [];
+    for (const r of config.murRegions) {
+      const { ny, top, lineNr, lineNrShift, numLines: [n0, n1], coeffNyP, coeffNyPP } = r;
+      const nyP = (ny + 1) % 3, nyPP = (ny + 2) % 3;
+      const dims = [Nx, Ny, Nz];
+      for (let a = 0; a < n0; a++) {
+        for (let b = 0; b < n1; b++) {
+          const pos = [0, 0, 0];
+          pos[ny] = lineNr;
+          pos[nyP] = a;
+          pos[nyPP] = b;
+          const normalIdx = nyP * Nx * Ny * Nz + pos[0] * Ny * Nz + pos[1] * Nz + pos[2];
+          const posShift = [...pos];
+          posShift[ny] = lineNrShift;
+          const shiftedIdx = nyP * Nx * Ny * Nz + posShift[0] * Ny * Nz + posShift[1] * Nz + posShift[2];
+          allNormalP.push(normalIdx);
+          allShiftedP.push(shiftedIdx);
+          allCoeffP.push(coeffNyP[a * n1 + b]);
+
+          // nyPP component
+          const normalIdxPP = nyPP * Nx * Ny * Nz + pos[0] * Ny * Nz + pos[1] * Nz + pos[2];
+          const shiftedIdxPP = nyPP * Nx * Ny * Nz + posShift[0] * Ny * Nz + posShift[1] * Nz + posShift[2];
+          allNormalPP.push(normalIdxPP);
+          allShiftedPP.push(shiftedIdxPP);
+          allCoeffPP.push(coeffNyPP[a * n1 + b]);
+        }
+      }
+    }
+    gpuEngine.configureMur({
+      coeff_nyP: new Float32Array(allCoeffP),
+      coeff_nyPP: new Float32Array(allCoeffPP),
+      normal_idx_nyP: new Uint32Array(allNormalP),
+      normal_idx_nyPP: new Uint32Array(allNormalPP),
+      shifted_idx_nyP: new Uint32Array(allShiftedP),
+      shifted_idx_nyPP: new Uint32Array(allShiftedPP),
+    });
+  }
   logConsole('WebGPU engine initialized.');
   // --- GPU Probe Setup ---
   const probeDefs = ems.getProbeDefinitions();
