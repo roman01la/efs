@@ -176,10 +176,9 @@ button.danger:hover { background: #b91c1c; }
     <div class="panel-header">
       Simulation
       <select id="engine-select">
-        <option value="webgpu">webgpu</option>
+        <option value="2">sse-compressed</option>
         <option value="0">basic</option>
         <option value="1">sse</option>
-        <option value="2">sse-compressed</option>
         <option value="3">multithreaded</option>
       </select>
       <button id="btn-run" class="primary">Run</button>
@@ -246,13 +245,7 @@ const simConsole = document.getElementById('sim-console');
 const loadingOverlay = document.getElementById('loading-overlay');
 const rawDataPre = document.getElementById('raw-data');
 
-// ---- Auto-detect WebGPU ----
-if (!navigator.gpu) {
-  // Remove WebGPU option if not available, default to sse-compressed
-  const gpuOpt = engineSelect.querySelector('option[value="webgpu"]');
-  if (gpuOpt) gpuOpt.remove();
-  engineSelect.value = '2';
-}
+// Engine default is sse-compressed (fastest WASM engine with probe support)
 
 // ---- XML validation ----
 const editorError = document.getElementById('editor-error');
