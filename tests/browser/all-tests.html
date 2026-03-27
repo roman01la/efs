@@ -969,8 +969,9 @@ async function runSectionB() {
     const mockEms = createMockWASMInstance(4, 3, 2);
     const bridge = new WASMGPUBridge();
     bridge.configureFromWASM(mockEms);
-    assert(bridge.gridSize[0] === 4 && bridge.gridSize[1] === 3 && bridge.gridSize[2] === 2, 'Bridge grid size correct');
-    assert(bridge.coefficients.vv.length === 3 * 4 * 3 * 2, 'Bridge coefficient array length correct');
+    const cfg = bridge.getConfig();
+    assert(cfg.gridSize[0] === 4 && cfg.gridSize[1] === 3 && cfg.gridSize[2] === 2, 'Bridge grid size correct');
+    assert(cfg.coefficients.vv.length === 3 * 4 * 3 * 2, 'Bridge coefficient array length correct');
 
     const engine = bridge.createCPUEngine();
     assert(engine !== null, 'Bridge creates CPU engine');
