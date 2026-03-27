@@ -1409,17 +1409,31 @@ export class WebGPUEngine {
             'mur_apply'
         );
 
-        // All three share the same bind group layout (group 1)
-        this.murBindGroup = this.device.createBindGroup({
-            layout: this.murPrePipeline.getBindGroupLayout(1),
-            entries: [
-                { binding: 0, resource: { buffer: murParamsBuffer } },
-                { binding: 1, resource: { buffer: normalIdxBuf } },
-                { binding: 2, resource: { buffer: shiftedIdxBuf } },
-                { binding: 3, resource: { buffer: savedVoltBuf } },
-                { binding: 4, resource: { buffer: coeffBuf } },
-            ],
-        });
+        // Each Mur entry point may optimize out different bindings, so create
+        // separate bind groups per pipeline using their auto-generated layouts.
+        const allEntries = [
+            { binding: 0, resource: { buffer: murParamsBuffer } },
+            { binding: 1, resource: { buffer: normalIdxBuf } },
+            { binding: 2, resource: { buffer: shiftedIdxBuf } },
+            { binding: 3, resource: { buffer: savedVoltBuf } },
+            { binding: 4, resource: { buffer: coeffBuf } },
+        ];
+        const makeBindGroup = (pipeline) => {
+            const layout = pipeline.getBindGroupLayout(1);
+            // Filter entries to only include bindings that exist in this layout.
+            // We try all entries; if createBindGroup fails, we remove entries one by one.
+            // Simpler: just try-catch and remove unused bindings.
+            for (let mask = 0x1F; mask >= 0; mask--) {
+                const filtered = allEntries.filter((_, i) => mask & (1 << i));
+                try {
+                    return this.device.createBindGroup({ layout, entries: filtered });
+                } catch (e) { continue; }
+            }
+            return this.device.createBindGroup({ layout, entries: allEntries });
+        };
+        this.murPreBindGroup = makeBindGroup(this.murPrePipeline);
+        this.murPostBindGroup = makeBindGroup(this.murPostPipeline);
+        this.murApplyBindGroup = makeBindGroup(this.murApplyPipeline);
         this._ensureCoreBindGroup(this.murPrePipeline);
         this._ensureCoreBindGroup(this.murPostPipeline);
         this._ensureCoreBindGroup(this.murApplyPipeline);
@@ -1438,7 +1452,7 @@ export class WebGPUEngine {
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.murPrePipeline);
         pass.setBindGroup(0, this._coreBindGroupFor(this.murPrePipeline));
-        pass.setBindGroup(1, this.murBindGroup);
+        pass.setBindGroup(1, this.murPreBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
         pass.end();
     }
@@ -1452,7 +1466,7 @@ export class WebGPUEngine {
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.murPostPipeline);
         pass.setBindGroup(0, this._coreBindGroupFor(this.murPostPipeline));
-        pass.setBindGroup(1, this.murBindGroup);
+        pass.setBindGroup(1, this.murPostBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
         pass.end();
     }
@@ -1466,7 +1480,7 @@ export class WebGPUEngine {
         const pass = encoder.beginComputePass();
         pass.setPipeline(this.murApplyPipeline);
         pass.setBindGroup(0, this._coreBindGroupFor(this.murApplyPipeline));
-        pass.setBindGroup(1, this.murBindGroup);
+        pass.setBindGroup(1, this.murApplyBindGroup);
         pass.dispatchWorkgroups(Math.ceil(this._murNumPoints / this.WG_SIZE_EXC), 1, 1);
         pass.end();
     }
