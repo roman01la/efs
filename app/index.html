@@ -713,6 +713,12 @@ function plotSVG(container, { title, xLabel, yLabel, lines, refLines }) {
 
   if (!isFinite(xMin)) { xMin = 0; xMax = 1; }
   if (!isFinite(yMin)) { yMin = 0; yMax = 1; }
+  if (refLines) {
+    for (const ref of refLines) {
+      if (ref.value < yMin) yMin = ref.value;
+      if (ref.value > yMax) yMax = ref.value;
+    }
+  }
   if (xMin === xMax) { xMin -= 0.5; xMax += 0.5; }
   if (yMin === yMax) { yMin -= 0.5; yMax += 0.5; }
 

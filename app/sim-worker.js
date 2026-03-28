@@ -516,6 +516,127 @@ function convertGPUAccumToSurfaceData(accumE, accumH, faceSlices, faceMeshes) {
   return { faces };
 }
 
+/**
+ * Build NF2FF point metadata for GPU far-field computation.
+ * For each surface point (same order as buildNF2FFSurfaceIndices),
+ * computes: posX, posY, posZ, normalDir, normSign, area, pad, pad (8 floats).
+ *
+ * @param {Array} faceSlices - face slice metadata
+ * @param {Array} faceMeshes - face mesh lines (in meters)
+ * @returns {Float32Array} 8 floats per point
+ */
+function buildNF2FFPointMetadata(faceSlices, faceMeshes) {
+  let totalPoints = 0;
+  for (const slice of faceSlices) totalPoints += slice.count;
+
+  const meta = new Float32Array(totalPoints * 8);
+
+  for (let fi = 0; fi < faceSlices.length; fi++) {
+    const slice = faceSlices[fi];
+    const mesh = faceMeshes[fi];
+    const { offset, count, normalDir, normalSign, Nx, Ny, Nz, startIdx } = slice;
+
+    const nP = (normalDir + 1) % 3;
+    const nPP = (normalDir + 2) % 3;
+
+    // Determine which mesh arrays correspond to nP and nPP
+    const meshArrays = [mesh.x, mesh.y, mesh.z];
+    const meshP = meshArrays[nP];
+    const meshPP = meshArrays[nPP];
+
+    // Compute edge lengths for area weighting (midpoint rule)
+    const edgeLenP = _computeEdgeLengths(meshP);
+    const edgeLenPP = _computeEdgeLengths(meshPP);
+
+    // Enumerate points in same order as buildNF2FFSurfaceIndices:
+    // ix from startIdx[0]..stopIdx[0], iy, iz
+    for (let p = 0; p < count; p++) {
+      const pid = offset + p;
+      const localIz = p % Nz;
+      const localIy = Math.floor(p / Nz) % Ny;
+      const localIx = Math.floor(p / (Ny * Nz));
+
+      // Position in meters
+      const posX = mesh.x[localIx];
+      const posY = mesh.y[localIy];
+      const posZ = mesh.z[localIz];
+
+      // Map local indices to nP/nPP indices for edge lengths
+      const localIndices = [localIx, localIy, localIz];
+      const local_nP_idx = localIndices[nP];
+      const local_nPP_idx = localIndices[nPP];
+
+      const area = edgeLenP[local_nP_idx] * edgeLenPP[local_nPP_idx];
+
+      const base = pid * 8;
+      meta[base + 0] = posX;
+      meta[base + 1] = posY;
+      meta[base + 2] = posZ;
+      meta[base + 3] = normalDir;
+      meta[base + 4] = normalSign;
+      meta[base + 5] = area;
+      meta[base + 6] = 0; // pad
+      meta[base + 7] = 0; // pad
+    }
+  }
+
+  return meta;
+}
+
+/**
+ * Compute edge lengths for midpoint-rule area weighting.
+ * @param {Float64Array|number[]} lines
+ * @returns {Float64Array}
+ */
+function _computeEdgeLengths(lines) {
+  const N = lines.length;
+  const lengths = new Float64Array(N);
+  if (N === 1) {
+    lengths[0] = 0;
+    return lengths;
+  }
+  lengths[0] = 0.5 * Math.abs(lines[1] - lines[0]);
+  for (let i = 1; i < N - 1; i++) {
+    lengths[i] = 0.5 * Math.abs(lines[i + 1] - lines[i - 1]);
+  }
+  lengths[N - 1] = 0.5 * Math.abs(lines[N - 1] - lines[N - 2]);
+  return lengths;
+}
+
+/**
+ * Compute total radiated power from surface Poynting vector.
+ *
+ * @param {Float32Array} accumE - E accumulation (numPoints * 6 floats)
+ * @param {Float32Array} accumH - H accumulation (numPoints * 6 floats)
+ * @param {Float32Array} pointMeta - 8 floats per point
+ * @param {number} numPoints
+ * @returns {number} radiated power
+ */
+function computeRadPower(accumE, accumH, pointMeta, numPoints) {
+  let radPower = 0;
+  for (let pid = 0; pid < numPoints; pid++) {
+    const normalDir = pointMeta[pid * 8 + 3];
+    const normSign = pointMeta[pid * 8 + 4];
+    const area = pointMeta[pid * 8 + 5];
+    const nP = (normalDir + 1) % 3;
+    const nPP = (normalDir + 2) % 3;
+
+    const E_nP_re = accumE[pid * 6 + nP * 2];
+    const E_nP_im = accumE[pid * 6 + nP * 2 + 1];
+    const H_nPP_re = accumH[pid * 6 + nPP * 2];
+    const H_nPP_im = accumH[pid * 6 + nPP * 2 + 1];
+    const E_nPP_re = accumE[pid * 6 + nPP * 2];
+    const E_nPP_im = accumE[pid * 6 + nPP * 2 + 1];
+    const H_nP_re = accumH[pid * 6 + nP * 2];
+    const H_nP_im = accumH[pid * 6 + nP * 2 + 1];
+
+    const poynting = (E_nP_re * H_nPP_re + E_nP_im * H_nPP_im)
+                   - (E_nPP_re * H_nP_re + E_nPP_im * H_nP_im);
+    radPower += 0.5 * area * poynting * normSign;
+  }
+  return radPower;
+}
+
 function readNF2FFData(Module, ems, simPath) {
   let files;
   try { files = Module.FS.readdir(simPath); } catch (e) { return null; }
@@ -637,7 +758,8 @@ async function runSimulation(xml) {
   // DOMParser not available in workers — use regex
   const hasDumpBoxes = /<DumpBox\b/i.test(xml);
   let cppProcessInterval = 0;
-  if (hasDumpBoxes) {
+  // Skip C++ dump box processing when GPU NF2FF handles the only dump boxes
+  if (hasDumpBoxes && !gpuNF2FFConfig) {
     const step0 = ems.initRun();
     if (step0 > 0) cppProcessInterval = step0;
     log(`  Dump boxes detected: C++ processing every ${cppProcessInterval} steps`);
@@ -657,21 +779,41 @@ async function runSimulation(xml) {
   const probeMult = Math.max(1, Math.floor(maxProbeSteps / baseInterval));
   const sampleInterval = baseInterval * probeMult;
 
-  const stepSize = cppProcessInterval > 0
-    ? Math.min(cppProcessInterval, sampleInterval)
-    : sampleInterval;
-
   let maxEnergy = 0;
   const energyCheckInterval = 1000;
+
+  // GPU batch size: run as many steps as possible between readbacks.
+  // Readbacks needed for: probe sampling, energy checks, and C++ dump box processing.
+  const readbackInterval = cppProcessInterval > 0
+    ? Math.min(cppProcessInterval, sampleInterval, energyCheckInterval)
+    : Math.min(sampleInterval, energyCheckInterval);
   let _voltStage = 0, _currStage = 0;
 
+  // Pipelined probe reading: dispatch the gather command (non-blocking),
+  // continue GPU iteration, and only await the result at the next probe interval.
+  let pendingProbeRead = null;
+  let pendingProbeTime = 0;
+
   while (totalSteps < maxTS && !stopRequested) {
-    const stepsThisBatch = Math.min(stepSize, maxTS - totalSteps);
+    const stepsThisBatch = Math.min(readbackInterval, maxTS - totalSteps);
     gpuEngine.iterate(stepsThisBatch);
     totalSteps += stepsThisBatch;
 
-    // C++ processing for dump boxes
+    // C++ processing for dump boxes (needs synchronous field readback)
     if (cppProcessInterval > 0 && totalSteps % cppProcessInterval === 0) {
+      // Must resolve any pending probe read first (GPU sync point)
+      if (pendingProbeRead) {
+        const gathered = await pendingProbeRead;
+        if (gathered) {
+          const integrals = computeProbeIntegrals(gathered, probes, probeSlices);
+          for (let p = 0; p < probes.length; p++) {
+            const isDual = probes[p].type === 1;
+            probeTS[p].time.push((pendingProbeTime + (isDual ? 0.5 : 0)) * dT);
+            probeTS[p].values.push(integrals[p]);
+          }
+        }
+        pendingProbeRead = null;
+      }
       const fields = await gpuEngine.getFields();
       if (!_voltStage) {
         const n = fields.volt.length * 4;
@@ -686,22 +828,38 @@ async function runSimulation(xml) {
       if (nextStep <= 0) break;
     }
 
-    // Probe gather
+    // Probe gather — resolve previous read, then dispatch next (non-blocking)
     if (totalSteps % sampleInterval === 0) {
-      const gathered = await gpuEngine.readProbeGather();
-      if (gathered) {
-        const integrals = computeProbeIntegrals(gathered, probes, probeSlices);
-        for (let p = 0; p < probes.length; p++) {
-          const isDual = probes[p].type === 1;
-          const time = (totalSteps + (isDual ? 0.5 : 0)) * dT;
-          probeTS[p].time.push(time);
-          probeTS[p].values.push(integrals[p]);
+      if (pendingProbeRead) {
+        const gathered = await pendingProbeRead;
+        if (gathered) {
+          const integrals = computeProbeIntegrals(gathered, probes, probeSlices);
+          for (let p = 0; p < probes.length; p++) {
+            const isDual = probes[p].type === 1;
+            probeTS[p].time.push((pendingProbeTime + (isDual ? 0.5 : 0)) * dT);
+            probeTS[p].values.push(integrals[p]);
+          }
         }
       }
+      // Dispatch next probe gather — GPU starts the readback but we don't wait
+      pendingProbeRead = gpuEngine.readProbeGather();
+      pendingProbeTime = totalSteps;
     }
 
-    // Energy end-criteria
-    if (cppProcessInterval === 0 && totalSteps % energyCheckInterval < stepSize) {
+    // Energy end-criteria (less frequent, OK to sync here)
+    if (totalSteps % energyCheckInterval < stepsThisBatch) {
+      if (pendingProbeRead) {
+        const gathered = await pendingProbeRead;
+        if (gathered) {
+          const integrals = computeProbeIntegrals(gathered, probes, probeSlices);
+          for (let p = 0; p < probes.length; p++) {
+            const isDual = probes[p].type === 1;
+            probeTS[p].time.push((pendingProbeTime + (isDual ? 0.5 : 0)) * dT);
+            probeTS[p].values.push(integrals[p]);
+          }
+        }
+        pendingProbeRead = null;
+      }
       const energy = await gpuEngine.computeEnergy();
       if (energy > maxEnergy) maxEnergy = energy;
       if (maxEnergy > 0 && (energy / maxEnergy) <= endCrit) {
@@ -711,7 +869,20 @@ async function runSimulation(xml) {
     }
 
     status(totalSteps, maxTS);
-    if (totalSteps % 1000 < stepSize) log(`  Step ${totalSteps}/${maxTS}`);
+    if (totalSteps % 1000 < stepsThisBatch) log(`  Step ${totalSteps}/${maxTS}`);
+  }
+
+  // Resolve any final pending probe read
+  if (pendingProbeRead) {
+    const gathered = await pendingProbeRead;
+    if (gathered) {
+      const integrals = computeProbeIntegrals(gathered, probes, probeSlices);
+      for (let p = 0; p < probes.length; p++) {
+        const isDual = probes[p].type === 1;
+        probeTS[p].time.push((pendingProbeTime + (isDual ? 0.5 : 0)) * dT);
+        probeTS[p].values.push(integrals[p]);
+      }
+    }
   }
 
   if (cppProcessInterval > 0) ems.finalizeRun();
@@ -720,8 +891,9 @@ async function runSimulation(xml) {
   let gpuNF2FFAccum = null;
   if (gpuNF2FFConfig) {
     try {
+      const t_readback = performance.now();
       gpuNF2FFAccum = await gpuEngine.readNF2FFAccumulation();
-      log(`  NF2FF GPU readback: ${gpuNF2FFConfig.numPoints} points, accumE size ${gpuNF2FFAccum.accumE.length}`);
+      log(`  [timing] NF2FF GPU readback: ${(performance.now() - t_readback).toFixed(1)}ms (${gpuNF2FFConfig.numPoints} points)`);
     } catch (e) {
       log(`  NF2FF GPU readback failed: ${e.message}`);
     }
@@ -743,84 +915,71 @@ async function runSimulation(xml) {
     } catch (e) {}
   }
 
-  gpuEngine.destroy();
-
-  // Collect results
-  const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-
-  // Read probe files
-  const probeData = {};
-  try {
-    const files = Module.FS.readdir(simPath);
-    for (const f of files) {
-      if (f.startsWith('port_') && (f.includes('_ut') || f.includes('_it'))) {
-        probeData[f] = new TextDecoder().decode(Module.FS.readFile(`${simPath}/${f}`));
-      }
-    }
-  } catch (e) {}
-
-  // NF2FF data — prefer GPU-accumulated data, fall back to C++ HDF5
+  // NF2FF data — GPU far-field computation (GPU still alive)
   let nf2ffData = null;
-  let nf2ffFreqHz = null;
-  let surfaceData = null;
 
   if (gpuNF2FFAccum && gpuNF2FFConfig) {
-    // Use GPU-accumulated DFT data (runs every timestep, no undersampling)
-    nf2ffFreqHz = gpuNF2FFConfig.frequency;
+    const nf2ffFreqHz = gpuNF2FFConfig.frequency;
     try {
-      surfaceData = convertGPUAccumToSurfaceData(
-        gpuNF2FFAccum.accumE, gpuNF2FFAccum.accumH,
-        gpuNF2FFConfig.faceSlices, gpuNF2FFConfig.faceMeshes,
-      );
-      log(`  NF2FF using GPU-accumulated data (${surfaceData.faces.length} faces)`);
-    } catch (e) {
-      log(`  GPU NF2FF conversion failed: ${e.message}`);
-    }
-  }
+      // Build point metadata for GPU far-field shader
+      const t_meta = performance.now();
+      const pointMeta = buildNF2FFPointMetadata(gpuNF2FFConfig.faceSlices, gpuNF2FFConfig.faceMeshes);
+      log(`  [timing] NF2FF buildPointMetadata: ${(performance.now() - t_meta).toFixed(1)}ms`);
 
-  if (!surfaceData) {
-    // Fall back to C++ HDF5 FD dump data
-    const nf2ffInfo = readNF2FFData(Module, ems, simPath);
-    if (nf2ffInfo?.freqHz) {
-      nf2ffFreqHz = nf2ffInfo.freqHz;
-      try {
-        const { readNF2FFSurfaceData } = await import('/src/nf2ff.mjs');
-        surfaceData = readNF2FFSurfaceData(ems, simPath, nf2ffInfo.boxName, { frequency: nf2ffInfo.freqHz });
-        log(`  NF2FF using C++ HDF5 data (${surfaceData.faces.length} faces)`);
-      } catch (e) {
-        log(`  C++ NF2FF reading failed: ${e.message}`);
-      }
-    }
-  }
-
-  if (surfaceData && nf2ffFreqHz) {
-    try {
-      const { computeNF2FF } = await import('/src/nf2ff.mjs');
-
-      // Full 3D grid for radiation pattern
-      const thetaRad3d = [], phiRad3d = [];
+      // Build theta/phi arrays (same 3D grid as before)
+      const thetaRad3d = [];
+      const phiRad3d = [];
       for (let t = 0; t <= 180; t += 3) thetaRad3d.push(t * Math.PI / 180);
       for (let p = 0; p <= 360; p += 5) phiRad3d.push(p * Math.PI / 180);
-      const result = computeNF2FF(surfaceData, nf2ffFreqHz, thetaRad3d, phiRad3d, [0, 0, 0]);
-      const nAngles = thetaRad3d.length * phiRad3d.length;
+
+      // GPU far-field computation
+      const t_farfield = performance.now();
+      const gpuFarFieldResult = await gpuEngine.computeNF2FFfarField({
+        pointMeta,
+        theta: new Float32Array(thetaRad3d),
+        phi: new Float32Array(phiRad3d),
+        center: [0, 0, 0],
+        frequency: nf2ffFreqHz,
+        radius: 1,
+        numPoints: gpuNF2FFConfig.numPoints,
+      });
+      log(`  [timing] GPU far-field: ${(performance.now() - t_farfield).toFixed(1)}ms (${thetaRad3d.length}x${phiRad3d.length} angles, ${gpuNF2FFConfig.numPoints} surface points)`);
+
+      // Destroy GPU engine after all GPU work is done
+      gpuEngine.destroy();
+
+      // Extract results from GPU output (5 floats per angle: P_rad, Et_re, Et_im, Ep_re, Ep_im)
+      const nTheta3d = thetaRad3d.length;
+      const nPhi3d = phiRad3d.length;
+      const nAngles = nTheta3d * nPhi3d;
       const E_norm = new Float64Array(nAngles);
+      let P_max = 0;
+
       for (let i = 0; i < nAngles; i++) {
-        E_norm[i] = Math.sqrt(
-          result.E_theta_re[i] ** 2 + result.E_theta_im[i] ** 2 +
-          result.E_phi_re[i] ** 2 + result.E_phi_im[i] ** 2
-        );
+        const base = i * 5;
+        const P_rad_i = gpuFarFieldResult[base + 0];
+        const Et_re = gpuFarFieldResult[base + 1];
+        const Et_im = gpuFarFieldResult[base + 2];
+        const Ep_re = gpuFarFieldResult[base + 3];
+        const Ep_im = gpuFarFieldResult[base + 4];
+        E_norm[i] = Math.sqrt(Et_re * Et_re + Et_im * Et_im + Ep_re * Ep_re + Ep_im * Ep_im);
+        if (P_rad_i > P_max) P_max = P_rad_i;
       }
-      const Dmax = result.Dmax;
+
+      // Compute radiated power on CPU from accumE/accumH/pointMeta
+      const t_radpower = performance.now();
+      const radPower = computeRadPower(gpuNF2FFAccum.accumE, gpuNF2FFAccum.accumH, pointMeta, gpuNF2FFConfig.numPoints);
+      log(`  [timing] CPU radPower: ${(performance.now() - t_radpower).toFixed(1)}ms`);
+
+      // Compute Dmax
+      const Dmax = radPower > 0 ? P_max * 4 * Math.PI * 1 * 1 / radPower : 0; // radius=1
       const DmaxdBi = 10 * Math.log10(Math.max(Dmax, 1e-15));
 
       // Extract 2D cuts (phi=0 xz-plane, phi=90 yz-plane) for the 2D plot
-      const nTheta3d = thetaRad3d.length;
-      const nPhi3d = phiRad3d.length;
       const phi0Idx = 0;
       const phi90Idx = Math.round(90 / 5); // index for phi=90deg
       const thetaDeg2d = [];
       for (let t = -180; t < 180; t += 2) thetaDeg2d.push(t);
-      // Map full theta range (-180..180) by mirroring the 0..180 pattern
       const xzPattern = [], yzPattern = [];
       let maxE = 0;
       for (const v of E_norm) if (v > maxE) maxE = v;
@@ -851,8 +1010,25 @@ async function runSimulation(xml) {
       log(`Far-field computed: Dmax = ${DmaxdBi.toFixed(1)} dBi at ${(nf2ffFreqHz / 1e9).toFixed(3)} GHz`);
     } catch (e) {
       log(`NF2FF computation failed: ${e.message}`);
+      gpuEngine.destroy();
     }
+  } else {
+    gpuEngine.destroy();
   }
+
+  // Collect results
+  const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+
+  // Read probe files
+  const probeData = {};
+  try {
+    const files = Module.FS.readdir(simPath);
+    for (const f of files) {
+      if (f.startsWith('port_') && (f.includes('_ut') || f.includes('_it'))) {
+        probeData[f] = new TextDecoder().decode(Module.FS.readFile(`${simPath}/${f}`));
+      }
+    }
+  } catch (e) {}
 
   ems.delete();
 

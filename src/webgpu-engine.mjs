@@ -675,6 +675,192 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 }
 `;
 
+const NF2FF_FARFIELD_WGSL = /* wgsl */`
+struct FarFieldParams {
+    numPoints: u32,
+    nTheta: u32,
+    nPhi: u32,
+    _pad0: u32,
+    k: f32,
+    Z0: f32,
+    radius: f32,
+    _pad1: f32,
+    centerX: f32,
+    centerY: f32,
+    centerZ: f32,
+    _pad2: f32,
+    fac_re: f32,
+    fac_im: f32,
+    _pad3: f32,
+    _pad4: f32,
+};
+
+@group(0) @binding(0) var<storage, read> accumE: array<f32>;
+@group(0) @binding(1) var<storage, read> accumH: array<f32>;
+@group(0) @binding(2) var<storage, read> pointMeta: array<f32>;
+@group(0) @binding(3) var<storage, read> thetaArr: array<f32>;
+@group(0) @binding(4) var<storage, read> phiArr: array<f32>;
+@group(0) @binding(5) var<uniform> params: FarFieldParams;
+@group(0) @binding(6) var<storage, read_write> output: array<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let angleIdx = gid.x;
+    let totalAngles = params.nTheta * params.nPhi;
+    if (angleIdx >= totalAngles) { return; }
+
+    let thetaIdx = angleIdx / params.nPhi;
+    let phiIdx = angleIdx % params.nPhi;
+    let theta = thetaArr[thetaIdx];
+    let phi = phiArr[phiIdx];
+
+    let sinT = sin(theta);
+    let cosT = cos(theta);
+    let sinP = sin(phi);
+    let cosP = cos(phi);
+    let cosT_cosP = cosT * cosP;
+    let cosT_sinP = cosT * sinP;
+    let sinT_cosP = sinT * cosP;
+    let sinT_sinP = sinT * sinP;
+
+    var Nt_re: f32 = 0.0;
+    var Nt_im: f32 = 0.0;
+    var Np_re: f32 = 0.0;
+    var Np_im: f32 = 0.0;
+    var Lt_re: f32 = 0.0;
+    var Lt_im: f32 = 0.0;
+    var Lp_re: f32 = 0.0;
+    var Lp_im: f32 = 0.0;
+
+    let numPts = params.numPoints;
+    let k = params.k;
+    let cX = params.centerX;
+    let cY = params.centerY;
+    let cZ = params.centerZ;
+
+    for (var pid: u32 = 0u; pid < numPts; pid = pid + 1u) {
+        let metaBase = pid * 8u;
+        let posX = pointMeta[metaBase + 0u];
+        let posY = pointMeta[metaBase + 1u];
+        let posZ = pointMeta[metaBase + 2u];
+        let normalDir = u32(pointMeta[metaBase + 3u]);
+        let normSign = pointMeta[metaBase + 4u];
+        let area = pointMeta[metaBase + 5u];
+
+        let eBase = pid * 6u;
+        let Ex_re = accumE[eBase + 0u];
+        let Ex_im = accumE[eBase + 1u];
+        let Ey_re = accumE[eBase + 2u];
+        let Ey_im = accumE[eBase + 3u];
+        let Ez_re = accumE[eBase + 4u];
+        let Ez_im = accumE[eBase + 5u];
+
+        let hBase = pid * 6u;
+        let Hx_re = accumH[hBase + 0u];
+        let Hx_im = accumH[hBase + 1u];
+        let Hy_re = accumH[hBase + 2u];
+        let Hy_im = accumH[hBase + 3u];
+        let Hz_re = accumH[hBase + 4u];
+        let Hz_im = accumH[hBase + 5u];
+
+        // Js = n x H,  Ms = -n x E
+        var Js_x_re: f32 = 0.0; var Js_x_im: f32 = 0.0;
+        var Js_y_re: f32 = 0.0; var Js_y_im: f32 = 0.0;
+        var Js_z_re: f32 = 0.0; var Js_z_im: f32 = 0.0;
+        var Ms_x_re: f32 = 0.0; var Ms_x_im: f32 = 0.0;
+        var Ms_y_re: f32 = 0.0; var Ms_y_im: f32 = 0.0;
+        var Ms_z_re: f32 = 0.0; var Ms_z_im: f32 = 0.0;
+
+        if (normalDir == 0u) {
+            // x-normal: n = normSign * e_x
+            // Js = n x H: Js_y = -normSign*Hz, Js_z = normSign*Hy
+            Js_y_re = -normSign * Hz_re; Js_y_im = -normSign * Hz_im;
+            Js_z_re = normSign * Hy_re; Js_z_im = normSign * Hy_im;
+            // Ms = -n x E: Ms_y = normSign*Ez, Ms_z = -normSign*Ey
+            Ms_y_re = normSign * Ez_re; Ms_y_im = normSign * Ez_im;
+            Ms_z_re = -normSign * Ey_re; Ms_z_im = -normSign * Ey_im;
+        } else if (normalDir == 1u) {
+            // y-normal: n = normSign * e_y
+            // Js = n x H: Js_x = normSign*Hz, Js_z = -normSign*Hx
+            Js_x_re = normSign * Hz_re; Js_x_im = normSign * Hz_im;
+            Js_z_re = -normSign * Hx_re; Js_z_im = -normSign * Hx_im;
+            // Ms = -n x E: Ms_x = -normSign*Ez, Ms_z = normSign*Ex
+            Ms_x_re = -normSign * Ez_re; Ms_x_im = -normSign * Ez_im;
+            Ms_z_re = normSign * Ex_re; Ms_z_im = normSign * Ex_im;
+        } else {
+            // z-normal: n = normSign * e_z
+            // Js = n x H: Js_x = -normSign*Hy, Js_y = normSign*Hx
+            Js_x_re = -normSign * Hy_re; Js_x_im = -normSign * Hy_im;
+            Js_y_re = normSign * Hx_re; Js_y_im = normSign * Hx_im;
+            // Ms = -n x E: Ms_x = normSign*Ey, Ms_y = -normSign*Ex
+            Ms_x_re = normSign * Ey_re; Ms_x_im = normSign * Ey_im;
+            Ms_y_re = -normSign * Ex_re; Ms_y_im = -normSign * Ex_im;
+        }
+
+        // Phase factor
+        let r_cos_psi = (posX - cX) * sinT_cosP + (posY - cY) * sinT_sinP + (posZ - cZ) * cosT;
+        let phase = k * r_cos_psi;
+        let exp_re = cos(phase);
+        let exp_im = sin(phase);
+        let areaExp_re = area * exp_re;
+        let areaExp_im = area * exp_im;
+
+        // Spherical projections
+        let Js_t_re = Js_x_re * cosT_cosP + Js_y_re * cosT_sinP - Js_z_re * sinT;
+        let Js_t_im = Js_x_im * cosT_cosP + Js_y_im * cosT_sinP - Js_z_im * sinT;
+        let Js_p_re = Js_y_re * cosP - Js_x_re * sinP;
+        let Js_p_im = Js_y_im * cosP - Js_x_im * sinP;
+
+        let Ms_t_re = Ms_x_re * cosT_cosP + Ms_y_re * cosT_sinP - Ms_z_re * sinT;
+        let Ms_t_im = Ms_x_im * cosT_cosP + Ms_y_im * cosT_sinP - Ms_z_im * sinT;
+        let Ms_p_re = Ms_y_re * cosP - Ms_x_re * sinP;
+        let Ms_p_im = Ms_y_im * cosP - Ms_x_im * sinP;
+
+        // Complex multiply: areaExp * Js_t -> Nt
+        Nt_re += areaExp_re * Js_t_re - areaExp_im * Js_t_im;
+        Nt_im += areaExp_re * Js_t_im + areaExp_im * Js_t_re;
+
+        Np_re += areaExp_re * Js_p_re - areaExp_im * Js_p_im;
+        Np_im += areaExp_re * Js_p_im + areaExp_im * Js_p_re;
+
+        Lt_re += areaExp_re * Ms_t_re - areaExp_im * Ms_t_im;
+        Lt_im += areaExp_re * Ms_t_im + areaExp_im * Ms_t_re;
+
+        Lp_re += areaExp_re * Ms_p_re - areaExp_im * Ms_p_im;
+        Lp_im += areaExp_re * Ms_p_im + areaExp_im * Ms_p_re;
+    }
+
+    // Compute E_theta, E_phi, P_rad
+    let fac_re = params.fac_re;
+    let fac_im = params.fac_im;
+    let fZ0 = params.Z0;
+
+    // E_theta = -factor * (Lp + Z0*Nt)
+    let LpZ0Nt_re = Lp_re + fZ0 * Nt_re;
+    let LpZ0Nt_im = Lp_im + fZ0 * Nt_im;
+    let Et_re = -(fac_re * LpZ0Nt_re - fac_im * LpZ0Nt_im);
+    let Et_im = -(fac_re * LpZ0Nt_im + fac_im * LpZ0Nt_re);
+
+    // E_phi = factor * (Lt - Z0*Np)
+    let LtZ0Np_re = Lt_re - fZ0 * Np_re;
+    let LtZ0Np_im = Lt_im - fZ0 * Np_im;
+    let Ep_re = fac_re * LtZ0Np_re - fac_im * LtZ0Np_im;
+    let Ep_im = fac_re * LtZ0Np_im + fac_im * LtZ0Np_re;
+
+    // P_rad = (|E_theta|^2 + |E_phi|^2) / (2 * Z0)
+    let Et_mag2 = Et_re * Et_re + Et_im * Et_im;
+    let Ep_mag2 = Ep_re * Ep_re + Ep_im * Ep_im;
+    let P_rad = (Et_mag2 + Ep_mag2) / (2.0 * fZ0);
+
+    let outBase = angleIdx * 5u;
+    output[outBase + 0u] = P_rad;
+    output[outBase + 1u] = Et_re;
+    output[outBase + 2u] = Et_im;
+    output[outBase + 3u] = Ep_re;
+    output[outBase + 4u] = Ep_im;
+}
+`;
+
 /**
  * WebGPU FDTD Engine.
  *
@@ -2232,6 +2418,118 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     }
 
     /**
+     * Compute NF2FF far-field transformation entirely on the GPU.
+     * Each GPU thread handles one (theta, phi) angle pair and loops over all surface points.
+     *
+     * @param {Object} config
+     * @param {Float32Array} config.pointMeta - 8 floats per point (posX, posY, posZ, normalDir, normSign, area, pad, pad)
+     * @param {Float32Array} config.theta - theta angles in radians
+     * @param {Float32Array} config.phi - phi angles in radians
+     * @param {number[]} config.center - [x, y, z] phase reference center in meters
+     * @param {number} config.frequency - frequency in Hz
+     * @param {number} config.radius - far-field observation radius in meters
+     * @param {number} config.numPoints - number of surface points
+     * @returns {Promise<Float32Array>} output: 5 floats per angle (P_rad, Et_re, Et_im, Ep_re, Ep_im)
+     */
+    async computeNF2FFfarField(config) {
+        const { pointMeta, theta, phi, center, frequency, radius, numPoints } = config;
+        const C0 = 299792458;
+        const Z0_val = 376.73031346177066; // sqrt(MUE0/EPS0)
+        const k = 2 * Math.PI * frequency / C0;
+        const nTheta = theta.length;
+        const nPhi = phi.length;
+        const totalAngles = nTheta * nPhi;
+
+        // Precompute factor = j*k/(4*pi*r) * exp(-jkr)
+        const fac_mag = k / (4 * Math.PI * radius);
+        const fac_phase = -k * radius;
+        const fac_re = fac_mag * (-Math.sin(fac_phase));
+        const fac_im = fac_mag * Math.cos(fac_phase);
+
+        // Create temporary GPU buffers
+        const pointMetaBuffer = this._createAndUploadBuffer(pointMeta, GPUBufferUsage.STORAGE);
+        const thetaBuffer = this._createAndUploadBuffer(theta, GPUBufferUsage.STORAGE);
+        const phiBuffer = this._createAndUploadBuffer(phi, GPUBufferUsage.STORAGE);
+
+        // Params uniform: 16 u32/f32 = 64 bytes (multiple of 16)
+        const paramsData = new ArrayBuffer(64);
+        const u32View = new Uint32Array(paramsData);
+        const f32View = new Float32Array(paramsData);
+        u32View[0] = numPoints;
+        u32View[1] = nTheta;
+        u32View[2] = nPhi;
+        u32View[3] = 0; // _pad0
+        f32View[4] = k;
+        f32View[5] = Z0_val;
+        f32View[6] = radius;
+        f32View[7] = 0; // _pad1
+        f32View[8] = center[0];
+        f32View[9] = center[1];
+        f32View[10] = center[2];
+        f32View[11] = 0; // _pad2
+        f32View[12] = fac_re;
+        f32View[13] = fac_im;
+        f32View[14] = 0; // _pad3
+        f32View[15] = 0; // _pad4
+
+        const paramsBuffer = this.device.createBuffer({
+            size: 64,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+
+        // Output buffer: 5 floats per angle
+        const outputSize = totalAngles * 5 * 4;
+        const outputBuffer = this.device.createBuffer({
+            size: outputSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+
+        // Create pipeline
+        const module = this.device.createShaderModule({ code: NF2FF_FARFIELD_WGSL });
+        const pipeline = this.device.createComputePipeline({
+            layout: 'auto',
+            compute: { module, entryPoint: 'main' },
+        });
+
+        // Create bind group (reuse existing accumE/accumH buffers)
+        const bindGroup = this.device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this._nf2ffAccumEBuffer } },
+                { binding: 1, resource: { buffer: this._nf2ffAccumHBuffer } },
+                { binding: 2, resource: { buffer: pointMetaBuffer } },
+                { binding: 3, resource: { buffer: thetaBuffer } },
+                { binding: 4, resource: { buffer: phiBuffer } },
+                { binding: 5, resource: { buffer: paramsBuffer } },
+                { binding: 6, resource: { buffer: outputBuffer } },
+            ],
+        });
+
+        // Dispatch
+        const encoder = this.device.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(Math.ceil(totalAngles / 64));
+        pass.end();
+        this.device.queue.submit([encoder.finish()]);
+
+        // Read back output
+        const resultData = await this._readBuffer(outputBuffer, outputSize);
+        const result = new Float32Array(resultData);
+
+        // Destroy temporary buffers
+        pointMetaBuffer.destroy();
+        thetaBuffer.destroy();
+        phiBuffer.destroy();
+        paramsBuffer.destroy();
+        outputBuffer.destroy();
+
+        return result;
+    }
+
+    /**
      * Compute total field energy on GPU (for end-criteria check).
      * Returns sum of volt^2 + curr^2 over all cells.
      * @returns {Promise<number>}
@@ -2411,7 +2709,8 @@ fn main() {
         }
         // Destroy NF2FF buffers
         for (const buf of [this._nf2ffParamsBuffer, this._nf2ffPointsBuffer,
-                           this._nf2ffAccumEBuffer, this._nf2ffAccumHBuffer]) {
+                           this._nf2ffAccumEBuffer, this._nf2ffAccumHBuffer,
+                           this._nf2ffEdgeLenBuffer]) {
             if (buf) buf.destroy();
         }
 
