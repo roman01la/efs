@@ -38,14 +38,32 @@ function _embindVecToF32(vec) {
   return arr;
 }
 
-function extractGPUConfig(ems) {
+function extractGPUConfig(ems, Module) {
   const gridSizeVec = ems.getGridSize();
   const gridSize = [gridSizeVec.get(0), gridSizeVec.get(1), gridSizeVec.get(2)];
   gridSizeVec.delete();
-  const vv = _embindVecToF32(ems.getVV());
-  const vi = _embindVecToF32(ems.getVI());
-  const ii = _embindVecToF32(ems.getII());
-  const iv = _embindVecToF32(ems.getIV());
+  const t_coeff = performance.now();
+  const coeffInfo = ems.getCoefficientsPtr();
+  let vv, vi, ii, iv;
+  if (coeffInfo.size() === 8) {
+    // Fast path: read directly from WASM heap via raw pointers
+    const vvPtr = coeffInfo.get(0), vvLen = coeffInfo.get(1);
+    const viPtr = coeffInfo.get(2), viLen = coeffInfo.get(3);
+    const iiPtr = coeffInfo.get(4), iiLen = coeffInfo.get(5);
+    const ivPtr = coeffInfo.get(6), ivLen = coeffInfo.get(7);
+    vv = new Float32Array(Module.HEAPF32.buffer, vvPtr, vvLen).slice();
+    vi = new Float32Array(Module.HEAPF32.buffer, viPtr, viLen).slice();
+    ii = new Float32Array(Module.HEAPF32.buffer, iiPtr, iiLen).slice();
+    iv = new Float32Array(Module.HEAPF32.buffer, ivPtr, ivLen).slice();
+  } else {
+    // Fallback: element-by-element copy via embind
+    vv = _embindVecToF32(ems.getVV());
+    vi = _embindVecToF32(ems.getVI());
+    ii = _embindVecToF32(ems.getII());
+    iv = _embindVecToF32(ems.getIV());
+  }
+  coeffInfo.delete();
+  console.log(`    [timing] coefficients (4x ${vv.length} floats): ${(performance.now() - t_coeff).toFixed(1)}ms`);
 
   let excitation = null;
   const sigVec = ems.getExcitationSignal();
@@ -679,24 +697,32 @@ async function runSimulation(xml) {
   const ems = new Module.OpenEMS();
   ems.configure(0, 1000000, 1e-5);
 
+  let t_setup = performance.now();
   log('Loading XML config...');
   if (!ems.loadXML(xml)) throw new Error('Failed to load simulation XML');
+  log(`  [timing] loadXML: ${(performance.now() - t_setup).toFixed(1)}ms`);
 
+  t_setup = performance.now();
   log('Setting up FDTD...');
   const rc = ems.setup();
   if (rc !== 0) throw new Error(`SetupFDTD failed with code ${rc}`);
+  log(`  [timing] ems.setup (C++ operator): ${(performance.now() - t_setup).toFixed(1)}ms`);
 
   log('Running FDTD engine (WebGPU hybrid)...');
 
   // Extract GPU config
-  const config = extractGPUConfig(ems);
+  t_setup = performance.now();
+  const config = extractGPUConfig(ems, Module);
+  log(`  [timing] extractGPUConfig: ${(performance.now() - t_setup).toFixed(1)}ms`);
   log(`Grid: ${config.gridSize.join('x')}, ${config.pmlRegions.length} PML, ${config.murRegions.length} Mur`);
 
+  t_setup = performance.now();
   const { WebGPUEngine } = await import('/src/webgpu-engine.mjs');
   const gpuEngine = new WebGPUEngine();
   if (!await gpuEngine.initGPU()) throw new Error('WebGPU not available');
 
   await gpuEngine.init(config.gridSize, config.coefficients);
+  log(`  [timing] GPU init + upload: ${(performance.now() - t_setup).toFixed(1)}ms`);
   if (config.excitation) gpuEngine.configureExcitation(config.excitation);
   if (config.pmlRegions.length > 0) gpuEngine.configurePML(config.pmlRegions);
   if (config.murRegions.length > 0) gpuEngine.configureMur(buildMurConfig(config.murRegions, config.gridSize));

@@ -224,6 +224,28 @@ public:
         return extractCoeffArray(3);
     }
 
+    /**
+     * Get raw WASM heap pointers and sizes for all 4 coefficient arrays.
+     * Returns: [vv_ptr, vv_size, vi_ptr, vi_size, ii_ptr, ii_size, iv_ptr, iv_size]
+     * JS can read directly via Module.HEAPF32 for zero-copy extraction.
+     */
+    std::vector<unsigned int> getCoefficientsPtr() {
+        Operator* op = getOperator();
+        if (!op) return {};
+        auto* vv = op->vv_ptr;
+        auto* vi = op->vi_ptr;
+        auto* ii = op->ii_ptr;
+        auto* iv = op->iv_ptr;
+        if (!vv || !vi || !ii || !iv) return {};
+        if (!vv->valid() || !vi->valid() || !ii->valid() || !iv->valid()) return {};
+        return {
+            (unsigned int)(uintptr_t)vv->data(), (unsigned int)vv->size(),
+            (unsigned int)(uintptr_t)vi->data(), (unsigned int)vi->size(),
+            (unsigned int)(uintptr_t)ii->data(), (unsigned int)ii->size(),
+            (unsigned int)(uintptr_t)iv->data(), (unsigned int)iv->size()
+        };
+    }
+
     // -----------------------------------------------------------------------
     // Hybrid GPU/WASM stepping API
     // -----------------------------------------------------------------------
@@ -1003,6 +1025,7 @@ EMSCRIPTEN_BINDINGS(openems) {
         .function("getVI", &OpenEMSWrapper::getVI)
         .function("getII", &OpenEMSWrapper::getII)
         .function("getIV", &OpenEMSWrapper::getIV)
+        .function("getCoefficientsPtr", &OpenEMSWrapper::getCoefficientsPtr)
         // Hybrid GPU/WASM stepping API
         .function("initRun", &OpenEMSWrapper::initRun)
         .function("doProcess", &OpenEMSWrapper::doProcess)
