@@ -1,6 +1,6 @@
 # Project Status — openEMS Web Port
 
-**Last updated:** 2026-03-26
+**Last updated:** 2026-03-28
 
 ## Overview
 
@@ -69,16 +69,72 @@ Engine equivalence: basic vs SSE vs SSE-compressed = **bit-identical** (enforced
 MT vs basic energy: ratio = **1.000000**.
 GPU vs CPU: max diff **2.4e-7** (f32 precision limit).
 
+## Recent Changes (2026-03-28)
+
+### GPU NF2FF Pipeline — Correct Radiation Patterns
+
+- **GPU-side FD accumulation**: WGSL shader runs DFT every timestep on NF2FF surface
+  points, replacing C++ dump box processing that only sampled every ~245 steps.
+  Fixed radiation pattern (3.9 dBi → 6.8 dBi, matching 6.6 dBi native reference).
+- **GPU far-field integration**: Moved O(N_surface × N_theta × N_phi) far-field
+  computation from CPU to GPU. Each thread handles one observation angle, loops
+  over all surface points. **8.5s → 28ms (305x speedup)**.
+- **Cell interpolation in shader**: E-field 4-neighbor average, H-field linear
+  interpolation matching C++ CELL_INTERPOLATE mode.
+- **Polar radiation plot**: Replaced Cartesian with E-plane/H-plane polar projections.
+
+### S-Parameter & Impedance Fixes
+
+- **Voltage probe weight**: Fixed Weight=-1 in example XMLs for correct S11.
+- **Frequency range**: S-parameter plot limited to simulation f_max (was Nyquist).
+- **NF2FF y-face indexing**: Fixed field data transposition for y-normal faces.
+
+### Setup & Simulation Performance
+
+- **Direct WASM coefficient access**: Bypass embind element-by-element copying
+  using Float32Array views on WASM linear memory (178ms → 11ms, 16x faster).
+- **Material lookup batching**: GetMaterial2() extracts two properties from single
+  GetPropertyByCoordPriority call, halving CSX tree traversals (Calc_EC: 612→550ms).
+- **Skip redundant C++ processing**: GPU NF2FF replaces C++ dump boxes, eliminating
+  full-field GPU→CPU readbacks every ~47 steps.
+- **Pipelined probe reads**: Dispatch gather without awaiting, resolve on next
+  interval while GPU continues iterating.
+- **Energy end-criteria**: Now works when dump boxes are present.
+
+### Example Updates
+
+- **Patch antenna**: Updated to match openEMS tutorial (32×40mm patch, 200×200×150mm
+  SimBox, λ/20 mesh, ~530K cells, MUR boundaries, 0-6 GHz excitation).
+- **All examples**: Switched from PML to MUR absorbing boundaries.
+
+### Timing Breakdown (Patch Antenna, 86×87×71 grid, 30K steps)
+
+```
+Setup:
+  loadXML:              7ms
+  ems.setup (C++ op):  932ms  (Calc_EC: 550ms, CalcTimestep: 216ms)
+  extractGPUConfig:     11ms  (was 179ms, 16x faster via direct WASM access)
+  GPU init + upload:    15ms
+
+Simulation:            ~20s   (GPU FDTD + per-step NF2FF accumulation)
+
+Post-processing:
+  NF2FF GPU readback:    1ms
+  GPU far-field:        28ms  (was 8536ms on CPU, 305x faster)
+  radPower (CPU):        1ms
+  Total NF2FF:          30ms  (was 8540ms)
+```
+
 ## Phases
 
 ### Phase 6: Polish & Ecosystem — COMPLETE
 
-- 3 ported examples: Patch Antenna, MSL Notch Filter, Rect Waveguide
+- 4 ported examples: Patch Antenna, MSL Notch Filter, Rect Waveguide, Helical Antenna
   - Each with standalone HTML page, SVG plots, validation test
 - Browser UX shell (`app/index.html`): 3-panel editor/simulation/results
   - Example selector, engine type picker (WebGPU/WASM), run/stop, console log
-  - WebGPU hybrid engine: GPU FDTD loop + WASM probe/dump processing
-  - S-parameter, impedance, and radiation pattern SVG plots, tabbed results
+  - WebGPU hybrid engine: GPU FDTD loop + GPU NF2FF accumulation + far-field
+  - S-parameter, impedance plots (SVG); polar radiation pattern (E/H planes)
 - URL sharing (`src/url-share.mjs`): deflate+base64url for small configs,
   IndexedDB fallback for large configs, back/forward navigation
 
@@ -137,7 +193,7 @@ src/
   sar.mjs                 — SAR local + averaged (3 IEEE methods)
   types.mjs               — TypeScript-style type definitions
   visualization.mjs       — data preparation (S-param, Smith, radiation, impedance)
-  webgpu-engine.mjs       — WebGPU engine (buffers, pipelines, dispatch)
+  webgpu-engine.mjs       — WebGPU engine (buffers, pipelines, dispatch, NF2FF GPU accumulation + far-field)
   webgpu-fdtd.mjs         — CPU reference engine + hybrid fallback
   wasm-gpu-bridge.mjs     — WASM coefficient extraction → GPU/CPU engines
   url-share.mjs           — URL sharing (deflate+base64url, IndexedDB fallback)
@@ -145,7 +201,9 @@ src/
 
 app/
   index.html              — 3-panel browser UX shell (editor/simulation/results)
-  examples.mjs            — pre-built XML configs for 3 examples
+  sim-worker.js           — simulation web worker (GPU/WASM hybrid orchestration)
+  ems-api.mjs             — script API (OpenEMS/CSX wrappers for example scripts)
+  examples.mjs            — parametric script examples (4 examples)
 
 examples/
   patch_antenna.mjs       — Patch antenna example (port of Simple_Patch_Antenna.py)
