@@ -24,6 +24,7 @@ async function loadWASM() {
   wasmModule = await createOpenEMS({
     locateFile: (path) => '/build-wasm/' + path,
     mainScriptUrlOrBlob: '/build-wasm/openems.js',
+    printErr: (text) => { postMessage({ type: 'log', msg: text }); },
   });
   log('WASM module loaded.');
   return wasmModule;
