@@ -179,6 +179,7 @@ button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
   min-height: 300px;
 }
 #xml-container { display: none; }
+#xml-container.visible { display: block; }
 #script-container .cm-editor,
 #xml-container .cm-editor {
   height: 100%;
@@ -408,7 +409,7 @@ const cmScript = new EditorView({
       EditorView.updateListener.of(update => {
         if (update.docChanged) {
           clearTimeout(scriptExecTimer);
-          scriptExecTimer = setTimeout(executeScript, 500);
+          scriptExecTimer = setTimeout(executeScript, 3000);
         }
       }),
     ],
@@ -416,17 +417,9 @@ const cmScript = new EditorView({
   parent: document.getElementById('script-container'),
 });
 
+const xmlExtensions = [basicSetup, xml(), oneDark, themeOverrides, EditorView.editable.of(false)];
 const cmXml = new EditorView({
-  state: EditorState.create({
-    doc: '',
-    extensions: [
-      basicSetup,
-      xml(),
-      oneDark,
-      themeOverrides,
-      EditorState.readOnly.of(true),
-    ],
-  }),
+  state: EditorState.create({ doc: '', extensions: xmlExtensions }),
   parent: document.getElementById('xml-container'),
 });
 
@@ -442,9 +435,7 @@ function executeScript() {
     } else {
       generatedXml = '';
     }
-    cmXml.dispatch({
-      changes: { from: 0, to: cmXml.state.doc.length, insert: generatedXml },
-    });
+    cmXml.setState(EditorState.create({ doc: generatedXml, extensions: xmlExtensions }));
     editorError.textContent = '';
     editorError.classList.remove('visible');
     viewerDirty = true;
@@ -454,6 +445,7 @@ function executeScript() {
       viewerDirty = false;
     }
   } catch (e) {
+    console.error('Script execution error:', e);
     editorError.textContent = e.message;
     editorError.classList.add('visible');
   }
@@ -497,17 +489,17 @@ document.querySelector('.tab-group').addEventListener('click', (e) => {
 
   if (activeTab === 'script') {
     scriptEl.style.display = '';
-    xmlEl.style.display = 'none';
+    xmlEl.classList.remove('visible');
     errorEl.style.display = '';
     viewerEl.classList.remove('visible');
   } else if (activeTab === 'xml') {
     scriptEl.style.display = 'none';
-    xmlEl.style.display = '';
+    xmlEl.classList.add('visible');
     errorEl.style.display = 'none';
     viewerEl.classList.remove('visible');
   } else {
     scriptEl.style.display = 'none';
-    xmlEl.style.display = 'none';
+    xmlEl.classList.remove('visible');
     errorEl.style.display = 'none';
     viewerEl.classList.add('visible');
     if (viewerDirty) {

@@ -31,32 +31,18 @@ const patchW = 32.86, patchL = 41.37;
 // feed position
 const feedX = -5.5;
 const feedR = 50; // ohm
-const feedH = subH;
 
-// PML padding
-const pmlPad = 15;
-
-// NF2FF box inset from PML
-const nf2ffDist = 10;
+// simulation box padding
+const pad = 15;
 
 // derived
-const halfSubW = subW / 2;
-const halfSubL = subL / 2;
-const halfPatchW = patchW / 2;
-const halfPatchL = patchL / 2;
-const simXmax = halfSubW + pmlPad;
-const simYmax = halfSubL + pmlPad;
-const simZmin = -10;
-const simZmax = 20;
-const nfX = halfSubW + nf2ffDist / 2;
-const nfY = halfSubL + nf2ffDist / 2;
-const nfZmin = -6;
-const nfZmax = 15;
+const hw = subW / 2, hl = subL / 2;
+const hpw = patchW / 2, hpl = patchL / 2;
 
 // setup FDTD
 const FDTD = new OpenEMS({ NrTS: 30000, EndCriteria: 1e-5 });
 FDTD.SetGaussExcite(f0, fc);
-FDTD.SetBoundaryCond(['PML_8','PML_8','PML_8','PML_8','PML_8','PML_8']);
+FDTD.SetBoundaryCond(['MUR','MUR','MUR','MUR','MUR','MUR']);
 
 const CSX = new ContinuousStructure();
 FDTD.SetCSX(CSX);
@@ -64,32 +50,30 @@ FDTD.SetCSX(CSX);
 const mesh = CSX.GetGrid();
 mesh.SetDeltaUnit(unit);
 
-// mesh — x
-mesh.AddLine('x', [-simXmax, -halfSubW, -halfPatchW, feedX - 1, feedX, feedX + 1, 0, halfPatchW, halfSubW, simXmax]);
-mesh.SmoothMeshLines('x', 4, 1.4);
+// mesh — dense near structure edges, coarser outside
+mesh.AddLine('x', [-(hw+pad), -hw, -hpw, feedX-1, feedX, feedX+1, 0, hpw, hw, hw+pad]);
+mesh.SmoothMeshLines('x', 3, 1.4);
 
-// mesh — y
-mesh.AddLine('y', [-simYmax, -halfSubL, -halfPatchL, 0, halfPatchL, halfSubL, simYmax]);
-mesh.SmoothMeshLines('y', 4, 1.4);
+mesh.AddLine('y', [-(hl+pad), -hl, -hpl, 0, hpl, hl, hl+pad]);
+mesh.SmoothMeshLines('y', 3, 1.4);
 
-// mesh — z
-mesh.AddLine('z', [simZmin, 0, subH * 0.2, subH / 2, subH, subH + 1, 6, 10, simZmax]);
-mesh.SmoothMeshLines('z', 4, 1.4);
+mesh.AddLine('z', [-10, 0, subH*0.2, subH/2, subH, 2, 6, 10, 20]);
+mesh.SmoothMeshLines('z', 3, 1.4);
 
 // ground plane
 const ground = CSX.AddMetal('ground');
-ground.AddBox([-halfSubW, -halfSubL, 0], [halfSubW, halfSubL, 0], 10);
+ground.AddBox([-hw, -hl, 0], [hw, hl, 0], 10);
 
 // substrate
 const substrate = CSX.AddMaterial('substrate', { Epsilon: epsR });
-substrate.AddBox([-halfSubW, -halfSubL, 0], [halfSubW, halfSubL, subH], 5);
+substrate.AddBox([-hw, -hl, 0], [hw, hl, subH], 5);
 
 // patch
 const patch = CSX.AddMetal('patch');
-patch.AddBox([-halfPatchW, -halfPatchL, subH], [halfPatchW, halfPatchL, subH], 10);
+patch.AddBox([-hpw, -hpl, subH], [hpw, hpl, subH], 10);
 
 // lumped port feed
-FDTD.AddLumpedPort(1, feedR, [feedX, 0, 0], [feedX, 0, feedH], 'z', 1.0);
+FDTD.AddLumpedPort(1, feedR, [feedX, 0, 0], [feedX, 0, subH], 'z', 1.0);
 
 // NF2FF box
 FDTD.CreateNF2FFBox({ frequency: 2.4e9 });
@@ -145,7 +129,7 @@ const simZmax = 12;
 // setup FDTD
 const FDTD = new OpenEMS({ NrTS: 20000, EndCriteria: 1e-5 });
 FDTD.SetGaussExcite(f0, fc);
-FDTD.SetBoundaryCond(['PML_8','PML_8','PML_8','PML_8','PEC','PML_8']);
+FDTD.SetBoundaryCond(['MUR','MUR','MUR','MUR','PEC','MUR']);
 
 const CSX = new ContinuousStructure();
 FDTD.SetCSX(CSX);
@@ -159,10 +143,10 @@ mesh.SmoothMeshLines('x', 2, 1.4);
 
 // mesh — y
 mesh.AddLine('y', [-simYmax, -halfTraceW, 0, halfTraceW, halfTraceW + stubL, simYmax]);
-mesh.SmoothMeshLines('y', 2, 1.4);
+mesh.SmoothMeshLines('y', 1.5, 1.4);
 
 // mesh — z
-mesh.AddLine('z', [simZmin, 0, subH * 0.25, subH / 2, subH, 2, 5, simZmax]);
+mesh.AddLine('z', [simZmin, -1, 0, subH * 0.25, subH / 2, subH, 2, 5, simZmax]);
 mesh.SmoothMeshLines('z', 2, 1.4);
 
 // ground plane
@@ -233,7 +217,7 @@ const helixTop = feedH + turns * pitch;
 // setup FDTD
 const FDTD = new OpenEMS({ NrTS: 30000, EndCriteria: 1e-4 });
 FDTD.SetGaussExcite(f0, fc);
-FDTD.SetBoundaryCond(['PML_8','PML_8','PML_8','PML_8','PML_8','PML_8']);
+FDTD.SetBoundaryCond(['MUR','MUR','MUR','MUR','MUR','MUR']);
 
 const CSX = new ContinuousStructure();
 FDTD.SetCSX(CSX);
@@ -243,10 +227,10 @@ mesh.SetDeltaUnit(unit);
 
 // mesh — x, y (symmetric)
 mesh.AddLine('x', [-simXY, -nfXY, -gndRadius, -radius, 0, radius, gndRadius, nfXY, simXY]);
-mesh.SmoothMeshLines('x', 10, 1.4);
+mesh.SmoothMeshLines('x', 15, 1.4);
 
 mesh.AddLine('y', [-simXY, -nfXY, -gndRadius, -radius, 0, radius, gndRadius, nfXY, simXY]);
-mesh.SmoothMeshLines('y', 10, 1.4);
+mesh.SmoothMeshLines('y', 15, 1.4);
 
 // mesh — z
 const zLines = [simZmin, nfZmin, -10, 0, feedH];
@@ -255,7 +239,7 @@ for (let i = 0; i <= turns; i++) {
 }
 zLines.push(helixTop + 20, nfZmax, simZmax);
 mesh.AddLine('z', zLines);
-mesh.SmoothMeshLines('z', 10, 1.4);
+mesh.SmoothMeshLines('z', 15, 1.4);
 
 // helix curve — generate programmatically
 const helixX = [], helixY = [], helixZ = [];
@@ -313,7 +297,7 @@ const halfL = wgL / 2;
 // setup FDTD
 const FDTD = new OpenEMS({ NrTS: 10000, EndCriteria: 1e-5 });
 FDTD.SetGaussExcite(f0, fc);
-FDTD.SetBoundaryCond(['PML_8','PML_8','PEC','PEC','PEC','PEC']);
+FDTD.SetBoundaryCond(['MUR','MUR','PEC','PEC','PEC','PEC']);
 
 const CSX = new ContinuousStructure();
 FDTD.SetCSX(CSX);
@@ -323,15 +307,15 @@ mesh.SetDeltaUnit(unit);
 
 // mesh — x (propagation direction)
 mesh.AddLine('x', [-halfL, port1X, 0, port2X, halfL]);
-mesh.SmoothMeshLines('x', 3, 1.3);
+mesh.SmoothMeshLines('x', 4, 1.3);
 
 // mesh — y (broad wall)
 mesh.AddLine('y', [0, wgW]);
-mesh.SmoothMeshLines('y', 1.27, 1.3);
+mesh.SmoothMeshLines('y', 1.4, 1.3);
 
 // mesh — z (narrow wall)
 mesh.AddLine('z', [0, wgH]);
-mesh.SmoothMeshLines('z', 1.27, 1.3);
+mesh.SmoothMeshLines('z', 1.4, 1.3);
 
 // PEC waveguide walls (4 walls along x)
 const walls = CSX.AddMetal('wg_walls');

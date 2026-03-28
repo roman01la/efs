@@ -3,9 +3,9 @@ const BC_MAP = { PEC: 0, PMC: 1, MUR: 2 };
 
 const escapeXml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const fmtNum = (v) => {
-  const s = String(v);
-  if (s.includes('e') || s.includes('E')) return v.toExponential();
-  return s;
+  if (typeof v !== 'number') return String(v);
+  if (Math.abs(v) >= 1e6 || (Math.abs(v) > 0 && Math.abs(v) < 1e-3)) return v.toExponential();
+  return String(v);
 };
 
 function Unique(l, tol = 1e-7) {
@@ -331,7 +331,7 @@ class Property {
     }
 
     if (this.attrs.FD_Samples != null) {
-      xml += `${pad2}<FD_Samples>${this.attrs.FD_Samples}</FD_Samples>\n`;
+      xml += `${pad2}<FD_Samples>${fmtNum(this.attrs.FD_Samples)}</FD_Samples>\n`;
     }
 
     if (this.primitives.length > 0) {
@@ -492,6 +492,9 @@ class OpenEMS {
 
     const expandedStart = [...start];
     const expandedStop = [...stop];
+    const mid = (start[dirIdx] + stop[dirIdx]) / 2;
+    expandedStart[dirIdx] = mid;
+    expandedStop[dirIdx] = mid;
     for (let i = 0; i < 3; i++) {
       if (i !== dirIdx) {
         const mesh = this._csx._grid;
@@ -533,8 +536,8 @@ class OpenEMS {
     const fMax = this._f0 + this._fc;
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
     xml += `<openEMS>\n`;
-    xml += `  <FDTD NumberOfTimesteps="${this._nrTS}" endCriteria="${this._endCriteria}" f_max="${fMax}">\n`;
-    xml += `    <Excitation Type="0" f0="${this._f0}" fc="${this._fc}"/>\n`;
+    xml += `  <FDTD NumberOfTimesteps="${this._nrTS}" endCriteria="${fmtNum(this._endCriteria)}" f_max="${fmtNum(fMax)}">\n`;
+    xml += `    <Excitation Type="0" f0="${fmtNum(this._f0)}" fc="${fmtNum(this._fc)}"/>\n`;
 
     if (this._bc) {
       const dirs = ['xmin', 'xmax', 'ymin', 'ymax', 'zmin', 'zmax'];
@@ -560,7 +563,7 @@ class OpenEMS {
     if (this._csx) {
       const grid = this._csx._grid;
       xml += `  <ContinuousStructure CoordSystem="0">\n`;
-      xml += `    <RectilinearGrid DeltaUnit="${grid._deltaUnit}">\n`;
+      xml += `    <RectilinearGrid DeltaUnit="${fmtNum(grid._deltaUnit)}">\n`;
 
       for (const dir of ['x', 'y', 'z']) {
         const tag = dir.toUpperCase() + 'Lines';
@@ -598,7 +601,7 @@ class OpenEMS {
     const yMin = yLines[inset], yMax = yLines[yLines.length - 1 - inset];
     const zMin = zLines[inset], zMax = zLines[zLines.length - 1 - inset];
 
-    const fdSamples = this._nf2ff.frequency != null ? String(this._nf2ff.frequency) : null;
+    const fdSamples = this._nf2ff.frequency != null ? fmtNum(this._nf2ff.frequency) : null;
 
     const faces = [
       { name: 'xn', start: [xMin, yMin, zMin], stop: [xMin, yMax, zMax] },
