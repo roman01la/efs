@@ -192,6 +192,25 @@ button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
   background: var(--surface) !important;
   border-right: 1px solid var(--border) !important;
 }
+#editor-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+#editor-loading.hidden { display: none; }
+.spinner {
+  width: 16px; height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
 #editor-error {
   display: none;
   padding: 6px 12px;
@@ -314,6 +333,7 @@ button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
       </select>
     </div>
     <div class="panel-body">
+      <div id="editor-loading"><div class="spinner"></div>Loading editor...</div>
       <div id="script-container"></div>
       <div id="xml-container"></div>
       <div id="editor-error"></div>
@@ -380,6 +400,86 @@ const { EditorView, basicSetup } = await import(`https://esm.sh/codemirror@6.0.1
 const { xml } = await import(`https://esm.sh/@codemirror/lang-xml@6.1.0?deps=@codemirror/state@6.5.2`);
 const { javascript } = await import(`https://esm.sh/@codemirror/lang-javascript@6.2.3?deps=@codemirror/state@6.5.2`);
 const { oneDark } = await import(`https://esm.sh/@codemirror/theme-one-dark@6.1.2?deps=@codemirror/state@6.5.2`);
+const { autocompletion } = await import(`https://esm.sh/@codemirror/autocomplete@6.18.4?deps=@codemirror/state@6.5.2`);
+const { lintGutter, setDiagnostics } = await import(`https://esm.sh/@codemirror/lint@6.8.4?deps=@codemirror/state@6.5.2`);
+
+// ---- API Autocompletion ----
+const API_COMPLETIONS = {
+  OpenEMS: [
+    { label: 'SetGaussExcite', detail: '(f0, fc)', type: 'method' },
+    { label: 'SetBoundaryCond', detail: "(['MUR',...])", type: 'method' },
+    { label: 'SetCSX', detail: '(csx)', type: 'method' },
+    { label: 'AddLumpedPort', detail: '(nr, R, start, stop, dir, excite, {priority})', type: 'method' },
+    { label: 'CreateNF2FFBox', detail: '({frequency, opt_resolution})', type: 'method' },
+    { label: 'GenerateXML', detail: '()', type: 'method' },
+  ],
+  ContinuousStructure: [
+    { label: 'GetGrid', detail: '() → Mesh', type: 'method' },
+    { label: 'AddMetal', detail: '(name) → Property', type: 'method' },
+    { label: 'AddMaterial', detail: '(name, {Epsilon, Kappa, Mue}) → Property', type: 'method' },
+    { label: 'AddConductingSheet', detail: '(name, {conductivity, thickness})', type: 'method' },
+    { label: 'AddExcitation', detail: '(name, type, exciteVec) → Property', type: 'method' },
+    { label: 'AddProbe', detail: '(name, type, {weight, normDir}) → Property', type: 'method' },
+  ],
+  Mesh: [
+    { label: 'SetDeltaUnit', detail: '(unit)', type: 'method' },
+    { label: 'AddLine', detail: "(dir, values)  // dir: 'x'|'y'|'z'|'all'", type: 'method' },
+    { label: 'SmoothMeshLines', detail: "(dir, maxRes, ratio=1.5)", type: 'method' },
+    { label: 'GetLines', detail: "(dir) → number[]", type: 'method' },
+    { label: 'SetLines', detail: '(dir, lines)', type: 'method' },
+  ],
+  Property: [
+    { label: 'AddBox', detail: '(start, stop, priority)', type: 'method' },
+    { label: 'AddCylinder', detail: '(start, stop, radius, priority)', type: 'method' },
+    { label: 'AddSphere', detail: '(center, radius, priority)', type: 'method' },
+    { label: 'AddCurve', detail: '(points, priority)  // [[x,...],[y,...],[z,...]]', type: 'method' },
+    { label: 'AddWire', detail: '(points, radius, priority)', type: 'method' },
+  ],
+};
+
+// Map variable names to API types based on common patterns
+const VAR_TYPE_MAP = {
+  FDTD: 'OpenEMS', CSX: 'ContinuousStructure', mesh: 'Mesh',
+};
+const PROPERTY_METHODS = new Set(API_COMPLETIONS.ContinuousStructure
+  .filter(c => c.detail.includes('→ Property')).map(c => c.label));
+
+const GLOBALS = [
+  { label: 'OpenEMS', detail: '({NrTS, EndCriteria})', type: 'class' },
+  { label: 'ContinuousStructure', detail: '()', type: 'class' },
+  { label: 'Math', type: 'variable' },
+  { label: 'console', type: 'variable' },
+];
+
+function emsCompletionSource(context) {
+  // After a dot: suggest methods for the object
+  const dotMatch = context.matchBefore(/(\w+)\.\w*$/);
+  if (dotMatch) {
+    const varName = dotMatch.text.split('.')[0];
+    let apiType = VAR_TYPE_MAP[varName];
+    if (!apiType) {
+      // Scan doc for assignment pattern: const varName = CSX.AddMetal(...)
+      const doc = context.state.doc.toString();
+      const assignMatch = doc.match(new RegExp('(?:const|let|var)\\s+' + varName + '\\s*=\\s*(\\w+)\\.(\\w+)'));
+      if (assignMatch) {
+        const [, obj, method] = assignMatch;
+        if (PROPERTY_METHODS.has(method)) apiType = 'Property';
+        else if (method === 'GetGrid') apiType = 'Mesh';
+      }
+    }
+    if (apiType && API_COMPLETIONS[apiType]) {
+      const from = dotMatch.from + dotMatch.text.indexOf('.') + 1;
+      return { from, options: API_COMPLETIONS[apiType] };
+    }
+    return null;
+  }
+  // At word boundary: suggest globals
+  const wordMatch = context.matchBefore(/\w+$/);
+  if (wordMatch) {
+    return { from: wordMatch.from, options: GLOBALS };
+  }
+  return null;
+}
 
 const EXAMPLES = {
   patch: PATCH_ANTENNA,
@@ -406,6 +506,8 @@ const cmScript = new EditorView({
       javascript(),
       oneDark,
       themeOverrides,
+      autocompletion({ override: [emsCompletionSource] }),
+      lintGutter(),
       EditorView.updateListener.of(update => {
         if (update.docChanged) {
           clearTimeout(scriptExecTimer);
@@ -416,6 +518,7 @@ const cmScript = new EditorView({
   }),
   parent: document.getElementById('script-container'),
 });
+document.getElementById('editor-loading').classList.add('hidden');
 
 const xmlExtensions = [basicSetup, xml(), oneDark, themeOverrides, EditorView.editable.of(false)];
 const cmXml = new EditorView({
@@ -438,6 +541,7 @@ function executeScript() {
     cmXml.setState(EditorState.create({ doc: generatedXml, extensions: xmlExtensions }));
     editorError.textContent = '';
     editorError.classList.remove('visible');
+    cmScript.dispatch(setDiagnostics(cmScript.state, []));
     viewerDirty = true;
     updateRadiationVisibility();
     if (activeTab === '3d') {
@@ -448,6 +552,35 @@ function executeScript() {
     console.error('Script execution error:', e);
     editorError.textContent = e.message;
     editorError.classList.add('visible');
+
+    // Extract line number from error and show inline diagnostic
+    const diagnostics = [];
+    const lineMatch = e.stack?.match(/<anonymous>:(\d+):(\d+)/);
+    if (lineMatch) {
+      // new Function adds 2 wrapper lines, subtract to get script line
+      const line = Math.max(1, parseInt(lineMatch[1]) - 2);
+      const doc = cmScript.state.doc;
+      if (line <= doc.lines) {
+        const lineObj = doc.line(line);
+        diagnostics.push({
+          from: lineObj.from,
+          to: lineObj.to,
+          severity: 'error',
+          message: e.message,
+        });
+      }
+    }
+    if (diagnostics.length === 0) {
+      // Can't determine line — mark the whole first line
+      const firstLine = cmScript.state.doc.line(1);
+      diagnostics.push({
+        from: firstLine.from,
+        to: firstLine.to,
+        severity: 'error',
+        message: e.message,
+      });
+    }
+    cmScript.dispatch(setDiagnostics(cmScript.state, diagnostics));
   }
 }
 
@@ -976,6 +1109,7 @@ function tryPlotRadiation3D() {
     phiRad: d.phiRad,
     directivity_dBi: d.directivity_dBi,
     Dmax_dBi: d.DmaxdBi,
+    xml: generatedXml,
   });
 }
 

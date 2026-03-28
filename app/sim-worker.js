@@ -264,6 +264,258 @@ function computeProbeIntegrals(gathered, probes, probeSlices) {
 
 // ---- NF2FF helpers ----
 
+/**
+ * Parse NF2FF configuration from simulation XML.
+ * Extracts DumpBox elements for NF2FF (DumpType="10" for E, "11" for H),
+ * the FD_Samples frequency, and the face box coordinates.
+ *
+ * @param {string} xml - simulation XML
+ * @returns {Object|null} { frequency, faces: [{start, stop, normal, normalDir, normalSign}] }
+ */
+function parseNF2FFConfigFromXML(xml) {
+  // Find all nf2ff E-field dump boxes (DumpType="10").
+  // Handles both formats:
+  //   1. Single DumpBox with 6 Box primitives (hardcoded XML)
+  //   2. Six separate DumpBox elements, one per face (API-generated XML)
+  const allDumpBoxRegex = /<DumpBox\b([^>]*)>([\s\S]*?)<\/DumpBox>/gi;
+  let frequency = null;
+  const faces = [];
+  let dbMatch;
+  while ((dbMatch = allDumpBoxRegex.exec(xml)) !== null) {
+    const attrs = dbMatch[1];
+    const nameM = attrs.match(/Name="([^"]+)"/);
+    const typeM = attrs.match(/DumpType="(\d+)"/);
+    if (!nameM || !typeM || !/nf2ff/i.test(nameM[1]) || typeM[1] !== '10') continue;
+    // Skip H-field dumps (DumpType 11) — only process E-field dumps
+    // But also accept boxes without "E" in name (e.g. just "nf2ff_E" or "nf2ff_E_xn")
+
+    const dumpContent = dbMatch[2];
+
+    // Extract FD_Samples frequency (use the first one found)
+    if (frequency === null) {
+      const fdMatch = dumpContent.match(/<FD_Samples[^>]*>([^<]+)<\/FD_Samples>/i);
+      if (fdMatch) {
+        const f = parseFloat(fdMatch[1]);
+        if (!isNaN(f) && f > 0) frequency = f;
+      }
+    }
+
+    // Extract all Box primitives from this DumpBox
+    const boxRegex = /<Box\b[^>]*>\s*<P1\s+X="([^"]+)"\s+Y="([^"]+)"\s+Z="([^"]+)"[^/]*\/>\s*<P2\s+X="([^"]+)"\s+Y="([^"]+)"\s+Z="([^"]+)"[^/]*\/>\s*<\/Box>/gi;
+    let boxMatch;
+    while ((boxMatch = boxRegex.exec(dumpContent)) !== null) {
+      const start = [parseFloat(boxMatch[1]), parseFloat(boxMatch[2]), parseFloat(boxMatch[3])];
+      const stop = [parseFloat(boxMatch[4]), parseFloat(boxMatch[5]), parseFloat(boxMatch[6])];
+
+      let normalDir = -1;
+      for (let n = 0; n < 3; n++) {
+        if (Math.abs(start[n] - stop[n]) < 1e-15) {
+          normalDir = n;
+          break;
+        }
+      }
+      if (normalDir < 0) continue;
+
+      faces.push({ start, stop, normalDir });
+    }
+  }
+
+  if (faces.length === 0 || frequency === null) return null;
+
+  // Determine normal signs by pairing faces along each direction.
+  // For each direction, the face at the lower coordinate has outward normal -1,
+  // and the face at the higher coordinate has outward normal +1.
+  for (let d = 0; d < 3; d++) {
+    const dirFaces = faces.filter(f => f.normalDir === d);
+    if (dirFaces.length === 2) {
+      const pos0 = dirFaces[0].start[d];
+      const pos1 = dirFaces[1].start[d];
+      dirFaces[0].normalSign = pos0 <= pos1 ? -1 : 1;
+      dirFaces[1].normalSign = pos1 <= pos0 ? -1 : 1;
+    } else {
+      for (const f of dirFaces) f.normalSign = f.normalSign || 1;
+    }
+  }
+
+  return { frequency, faces };
+}
+
+/**
+ * Parse mesh lines from XML.
+ * @param {string} xml - simulation XML
+ * @returns {{ meshLines: [Float64Array, Float64Array, Float64Array], deltaUnit: number }|null}
+ */
+function parseMeshFromXML(xml) {
+  const duMatch = xml.match(/DeltaUnit="([^"]+)"/);
+  const deltaUnit = duMatch ? parseFloat(duMatch[1]) : 1;
+
+  const dirs = ['X', 'Y', 'Z'];
+  const meshLines = [];
+  for (const d of dirs) {
+    const re = new RegExp(`<${d}Lines>([^<]+)</${d}Lines>`, 'i');
+    const m = xml.match(re);
+    if (!m) return null;
+    const vals = m[1].split(',').map(Number);
+    meshLines.push(new Float64Array(vals));
+  }
+  return { meshLines, deltaUnit };
+}
+
+/**
+ * Find nearest mesh line index for a physical coordinate.
+ * @param {Float64Array} lines - sorted mesh line positions
+ * @param {number} coord - physical coordinate (already scaled by deltaUnit)
+ * @returns {number} nearest index
+ */
+function snapToMeshIndex(lines, coord) {
+  let bestIdx = 0;
+  let bestDist = Math.abs(lines[0] - coord);
+  for (let i = 1; i < lines.length; i++) {
+    const dist = Math.abs(lines[i] - coord);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
+/**
+ * Build NF2FF surface indices for GPU accumulation.
+ * Enumerates all grid points on each NF2FF face and creates a flat
+ * Uint32Array of [ix, iy, iz] triplets.
+ *
+ * @param {Array} faces - from parseNF2FFConfigFromXML
+ * @param {Array} meshLines - [xLines, yLines, zLines]
+ * @param {number} deltaUnit
+ * @returns {{ surfaceIndices: Uint32Array, numPoints: number,
+ *             faceSlices: Array, faceMeshes: Array }}
+ */
+function buildNF2FFSurfaceIndices(faces, meshLines, deltaUnit) {
+  const allPoints = [];
+  const faceSlices = [];
+  const faceMeshes = [];
+
+  const faceNormals = [
+    [-1, 0, 0], [1, 0, 0],
+    [0, -1, 0], [0, 1, 0],
+    [0, 0, -1], [0, 0, 1],
+  ];
+
+  for (const face of faces) {
+    const offset = allPoints.length / 3;
+    const { start, stop, normalDir } = face;
+
+    // Convert box coords to grid indices (both in same unit system)
+    const startIdx = [0, 0, 0];
+    const stopIdx = [0, 0, 0];
+    for (let n = 0; n < 3; n++) {
+      const lo = Math.min(start[n], stop[n]);
+      const hi = Math.max(start[n], stop[n]);
+      startIdx[n] = snapToMeshIndex(meshLines[n], lo);
+      stopIdx[n] = snapToMeshIndex(meshLines[n], hi);
+    }
+
+    // Extract face mesh lines (converted to meters for computeNF2FF)
+    const faceMeshX = [];
+    const faceMeshY = [];
+    const faceMeshZ = [];
+    for (let i = startIdx[0]; i <= stopIdx[0]; i++) faceMeshX.push(meshLines[0][i] * deltaUnit);
+    for (let i = startIdx[1]; i <= stopIdx[1]; i++) faceMeshY.push(meshLines[1][i] * deltaUnit);
+    for (let i = startIdx[2]; i <= stopIdx[2]; i++) faceMeshZ.push(meshLines[2][i] * deltaUnit);
+
+    const Nx = stopIdx[0] - startIdx[0] + 1;
+    const Ny = stopIdx[1] - startIdx[1] + 1;
+    const Nz = stopIdx[2] - startIdx[2] + 1;
+
+    const normalSign = face.normalSign;
+
+    // Enumerate all points on this face
+    for (let ix = startIdx[0]; ix <= stopIdx[0]; ix++) {
+      for (let iy = startIdx[1]; iy <= stopIdx[1]; iy++) {
+        for (let iz = startIdx[2]; iz <= stopIdx[2]; iz++) {
+          allPoints.push(ix, iy, iz);
+        }
+      }
+    }
+
+    const count = (allPoints.length / 3) - offset;
+    const normal = [0, 0, 0];
+    normal[normalDir] = normalSign;
+
+    faceSlices.push({ offset, count, normalDir, normalSign, startIdx, stopIdx, Nx, Ny, Nz });
+    faceMeshes.push({
+      x: new Float64Array(faceMeshX),
+      y: new Float64Array(faceMeshY),
+      z: new Float64Array(faceMeshZ),
+    });
+  }
+
+  return {
+    surfaceIndices: new Uint32Array(allPoints),
+    numPoints: allPoints.length / 3,
+    faceSlices,
+    faceMeshes,
+  };
+}
+
+/**
+ * Convert GPU-accumulated NF2FF data to surfaceData format for computeNF2FF.
+ * The GPU accumulates raw volt/curr DFT values. We divide by edge lengths
+ * to get E/H fields.
+ *
+ * @param {Float32Array} accumE - GPU E accumulation (numPoints * 6 floats)
+ * @param {Float32Array} accumH - GPU H accumulation (numPoints * 6 floats)
+ * @param {Array} faceSlices - face slice metadata
+ * @param {Array} faceMeshes - face mesh lines
+ * @param {Array} meshLines - full grid mesh lines
+ * @returns {{ faces: Array }}
+ */
+function convertGPUAccumToSurfaceData(accumE, accumH, faceSlices, faceMeshes) {
+  const faces = [];
+
+  for (let fi = 0; fi < faceSlices.length; fi++) {
+    const slice = faceSlices[fi];
+    const mesh = faceMeshes[fi];
+    const { offset, count, normalDir, normalSign, Nx, Ny, Nz } = slice;
+
+    const cellCount = Nx * Ny * Nz;
+    const E = [
+      new Float64Array(2 * cellCount),
+      new Float64Array(2 * cellCount),
+      new Float64Array(2 * cellCount),
+    ];
+    const H = [
+      new Float64Array(2 * cellCount),
+      new Float64Array(2 * cellCount),
+      new Float64Array(2 * cellCount),
+    ];
+
+    // GPU shader already outputs cell-interpolated E/H in physical units (V/m, A/m).
+    // Just copy from the flat GPU buffers into per-face per-component arrays.
+    for (let p = 0; p < count; p++) {
+      const pid = offset + p;
+      const localIz = p % Nz;
+      const localIy = Math.floor(p / Nz) % Ny;
+      const localIx = Math.floor(p / (Ny * Nz));
+      const cellIdx = localIx * Ny * Nz + localIy * Nz + localIz;
+
+      for (let comp = 0; comp < 3; comp++) {
+        E[comp][2 * cellIdx] = accumE[pid * 6 + comp * 2];
+        E[comp][2 * cellIdx + 1] = accumE[pid * 6 + comp * 2 + 1];
+        H[comp][2 * cellIdx] = accumH[pid * 6 + comp * 2];
+        H[comp][2 * cellIdx + 1] = accumH[pid * 6 + comp * 2 + 1];
+      }
+    }
+
+    const normal = [0, 0, 0];
+    normal[normalDir] = normalSign;
+    faces.push({ E, H, mesh, normal });
+  }
+
+  return { faces };
+}
+
 function readNF2FFData(Module, ems, simPath) {
   let files;
   try { files = Module.FS.readdir(simPath); } catch (e) { return null; }
@@ -335,6 +587,51 @@ async function runSimulation(xml) {
   const { indices, probeSlices } = buildGatherIndices(probes, config.gridSize);
   gpuEngine.configureProbeGather(indices);
   log(`  Probes: ${probes.length} (${indices.length} gather indices)`);
+
+  // Configure GPU-side NF2FF FD accumulation
+  let gpuNF2FFConfig = null;
+  const nf2ffXMLConfig = parseNF2FFConfigFromXML(xml);
+  if (nf2ffXMLConfig) {
+    const meshInfo = parseMeshFromXML(xml);
+    if (meshInfo) {
+      const { meshLines, deltaUnit } = meshInfo;
+      const surfInfo = buildNF2FFSurfaceIndices(nf2ffXMLConfig.faces, meshLines, deltaUnit);
+      const omega = 2 * Math.PI * nf2ffXMLConfig.frequency;
+      // Compute primal and dual edge lengths in meters for GPU cell interpolation
+      const primalEdgeLens = [];
+      const dualEdgeLens = [];
+      for (let n = 0; n < 3; n++) {
+        const lines = meshLines[n];
+        const N = lines.length;
+        const el = new Float32Array(N);
+        const del = new Float32Array(N);
+        for (let i = 0; i < N - 1; i++) el[i] = (lines[i + 1] - lines[i]) * deltaUnit;
+        if (N > 1) el[N - 1] = el[N - 2];
+        del[0] = 0.5 * el[0];
+        for (let i = 1; i < N - 1; i++) del[i] = 0.5 * (el[i - 1] + el[i]);
+        if (N > 1) del[N - 1] = 0.5 * el[N - 2];
+        primalEdgeLens.push(el);
+        dualEdgeLens.push(del);
+      }
+      gpuEngine.configureNF2FFAccumulation({
+        surfaceIndices: surfInfo.surfaceIndices,
+        numPoints: surfInfo.numPoints,
+        omega,
+        dT,
+        gridSize: config.gridSize,
+        primalEdgeLens,
+        dualEdgeLens,
+      });
+      gpuNF2FFConfig = {
+        frequency: nf2ffXMLConfig.frequency,
+        faceSlices: surfInfo.faceSlices,
+        faceMeshes: surfInfo.faceMeshes,
+        meshLines,
+        numPoints: surfInfo.numPoints,
+      };
+      log(`  NF2FF GPU accumulation: ${surfInfo.numPoints} surface points, f=${(nf2ffXMLConfig.frequency / 1e9).toFixed(3)} GHz`);
+    }
+  }
 
   // Parse XML for dump boxes and FDTD params
   // DOMParser not available in workers — use regex
@@ -419,6 +716,17 @@ async function runSimulation(xml) {
 
   if (cppProcessInterval > 0) ems.finalizeRun();
 
+  // Read back GPU NF2FF accumulation BEFORE destroying GPU engine
+  let gpuNF2FFAccum = null;
+  if (gpuNF2FFConfig) {
+    try {
+      gpuNF2FFAccum = await gpuEngine.readNF2FFAccumulation();
+      log(`  NF2FF GPU readback: ${gpuNF2FFConfig.numPoints} points, accumE size ${gpuNF2FFAccum.accumE.length}`);
+    } catch (e) {
+      log(`  NF2FF GPU readback failed: ${e.message}`);
+    }
+  }
+
   // Write probe data to WASM FS (only when C++ processing is not active,
   // since C++ probes already write correct data via doProcess)
   if (cppProcessInterval === 0) for (let p = 0; p < probes.length; p++) {
@@ -451,19 +759,49 @@ async function runSimulation(xml) {
     }
   } catch (e) {}
 
-  // NF2FF data
+  // NF2FF data — prefer GPU-accumulated data, fall back to C++ HDF5
   let nf2ffData = null;
-  const nf2ffInfo = readNF2FFData(Module, ems, simPath);
-  if (nf2ffInfo?.freqHz) {
+  let nf2ffFreqHz = null;
+  let surfaceData = null;
+
+  if (gpuNF2FFAccum && gpuNF2FFConfig) {
+    // Use GPU-accumulated DFT data (runs every timestep, no undersampling)
+    nf2ffFreqHz = gpuNF2FFConfig.frequency;
     try {
-      const { readNF2FFSurfaceData, computeNF2FF } = await import('/src/nf2ff.mjs');
-      const surfaceData = readNF2FFSurfaceData(ems, simPath, nf2ffInfo.boxName, { frequency: nf2ffInfo.freqHz });
+      surfaceData = convertGPUAccumToSurfaceData(
+        gpuNF2FFAccum.accumE, gpuNF2FFAccum.accumH,
+        gpuNF2FFConfig.faceSlices, gpuNF2FFConfig.faceMeshes,
+      );
+      log(`  NF2FF using GPU-accumulated data (${surfaceData.faces.length} faces)`);
+    } catch (e) {
+      log(`  GPU NF2FF conversion failed: ${e.message}`);
+    }
+  }
+
+  if (!surfaceData) {
+    // Fall back to C++ HDF5 FD dump data
+    const nf2ffInfo = readNF2FFData(Module, ems, simPath);
+    if (nf2ffInfo?.freqHz) {
+      nf2ffFreqHz = nf2ffInfo.freqHz;
+      try {
+        const { readNF2FFSurfaceData } = await import('/src/nf2ff.mjs');
+        surfaceData = readNF2FFSurfaceData(ems, simPath, nf2ffInfo.boxName, { frequency: nf2ffInfo.freqHz });
+        log(`  NF2FF using C++ HDF5 data (${surfaceData.faces.length} faces)`);
+      } catch (e) {
+        log(`  C++ NF2FF reading failed: ${e.message}`);
+      }
+    }
+  }
+
+  if (surfaceData && nf2ffFreqHz) {
+    try {
+      const { computeNF2FF } = await import('/src/nf2ff.mjs');
 
       // Full 3D grid for radiation pattern
       const thetaRad3d = [], phiRad3d = [];
       for (let t = 0; t <= 180; t += 3) thetaRad3d.push(t * Math.PI / 180);
       for (let p = 0; p <= 360; p += 5) phiRad3d.push(p * Math.PI / 180);
-      const result = computeNF2FF(surfaceData, nf2ffInfo.freqHz, thetaRad3d, phiRad3d, [0, 0, 0]);
+      const result = computeNF2FF(surfaceData, nf2ffFreqHz, thetaRad3d, phiRad3d, [0, 0, 0]);
       const nAngles = thetaRad3d.length * phiRad3d.length;
       const E_norm = new Float64Array(nAngles);
       for (let i = 0; i < nAngles; i++) {
@@ -503,14 +841,14 @@ async function runSimulation(xml) {
       }
 
       nf2ffData = {
-        freqHz: nf2ffInfo.freqHz, Dmax, DmaxdBi,
+        freqHz: nf2ffFreqHz, Dmax, DmaxdBi,
         // 2D cuts
         thetaDeg: thetaDeg2d, xzPattern, yzPattern,
         // 3D grid
         thetaRad: Array.from(thetaRad3d), phiRad: Array.from(phiRad3d),
         directivity_dBi, nTheta: nTheta3d, nPhi: nPhi3d,
       };
-      log(`Far-field computed: Dmax = ${DmaxdBi.toFixed(1)} dBi at ${(nf2ffInfo.freqHz / 1e9).toFixed(3)} GHz`);
+      log(`Far-field computed: Dmax = ${DmaxdBi.toFixed(1)} dBi at ${(nf2ffFreqHz / 1e9).toFixed(3)} GHz`);
     } catch (e) {
       log(`NF2FF computation failed: ${e.message}`);
     }

@@ -179,7 +179,11 @@ export function computeNF2FF(surfaceData, freq, theta, phi, center = [0, 0, 0], 
       // For each surface point, compute equivalent currents and accumulate integrals
       for (let iP = 0; iP < numP; iP++) {
         for (let iPP = 0; iPP < numPP; iPP++) {
-          const idx = iP * numPP + iPP;
+          // Field data from readHDF5FDField is stored in (x,y,z) order:
+          //   cell = ix * Ny * Nz + iy * Nz + iz
+          // For ny=1 (y-face), iP=iz and iPP=ix, so the index is transposed
+          // relative to the naive iP*numPP+iPP ordering.
+          const idx = (ny === 1) ? (iPP * numP + iP) : (iP * numPP + iPP);
           let area = edgeLenP[iP] * edgeLenPP[iPP];
 
           // For cylindrical mesh ny==2 surface: multiply by rho for alpha edge

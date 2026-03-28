@@ -523,6 +523,158 @@ function apply3DWorkgroupSize(code, workgroupSize) {
 
 const PML_WORKGROUP_SIZE_3D = [4, 4, 4];
 
+const NF2FF_ACCUMULATE_WGSL = /* wgsl */`
+struct NF2FFParams {
+    numTS: u32,
+    numPoints: u32,
+    Nx: u32,
+    Ny: u32,
+    Nz: u32,
+    // Edge length buffer offsets: [primalX, primalY, primalZ, dualX, dualY, dualZ]
+    elOffPX: u32,
+    elOffPY: u32,
+    elOffPZ: u32,
+    elOffDX: u32,
+    elOffDY: u32,
+    elOffDZ: u32,
+    _pad0: u32,
+    omega: f32,
+    dT: f32,
+    _pad1: f32,
+    _pad2: f32,
+};
+
+@group(0) @binding(0) var<storage, read> volt: array<f32>;
+@group(0) @binding(1) var<storage, read> curr: array<f32>;
+@group(0) @binding(2) var<uniform> nf2ffParams: NF2FFParams;
+@group(0) @binding(3) var<storage, read> points: array<u32>;
+@group(0) @binding(4) var<storage, read_write> accumE: array<f32>;
+@group(0) @binding(5) var<storage, read_write> accumH: array<f32>;
+@group(0) @binding(6) var<storage, read> edgeLens: array<f32>;
+
+// Get linear field index for position (x,y,z)
+fn fieldIdx(x: u32, y: u32, z: u32) -> u32 {
+    return x * nf2ffParams.Ny * nf2ffParams.Nz + y * nf2ffParams.Nz + z;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+    let pid = gid.x;
+    if (pid >= nf2ffParams.numPoints) { return; }
+
+    let ix = points[pid * 3u];
+    let iy = points[pid * 3u + 1u];
+    let iz = points[pid * 3u + 2u];
+
+    let Nx = nf2ffParams.Nx;
+    let Ny = nf2ffParams.Ny;
+    let Nz = nf2ffParams.Nz;
+    let compStride = Nx * Ny * Nz;
+    let base = fieldIdx(ix, iy, iz);
+
+    // --- E-field: CELL_INTERPOLATE (average of 4 neighbors in nP,nPP plane) ---
+    // E_n = average of volt[n] at 4 positions / primalEdgeLen[n][pos_n]
+    // If at last grid line in ANY direction, E = 0.
+    let atBoundary = (ix >= Nx - 1u) || (iy >= Ny - 1u) || (iz >= Nz - 1u);
+
+    var Ex: f32 = 0.0;
+    var Ey: f32 = 0.0;
+    var Ez: f32 = 0.0;
+
+    if (!atBoundary) {
+        // Ex: nP=y, nPP=z → average at (iy,iz), (iy+1,iz), (iy+1,iz+1), (iy,iz+1)
+        let elX = edgeLens[nf2ffParams.elOffPX + ix];
+        Ex = (volt[base] + volt[fieldIdx(ix, iy+1u, iz)]
+            + volt[fieldIdx(ix, iy+1u, iz+1u)] + volt[fieldIdx(ix, iy, iz+1u)])
+            / (4.0 * elX);
+
+        // Ey: nP=z, nPP=x → average at (iz,ix), (iz+1,ix), (iz+1,ix+1), (iz,ix+1)
+        let elY = edgeLens[nf2ffParams.elOffPY + iy];
+        Ey = (volt[compStride + base] + volt[compStride + fieldIdx(ix, iy, iz+1u)]
+            + volt[compStride + fieldIdx(ix+1u, iy, iz+1u)] + volt[compStride + fieldIdx(ix+1u, iy, iz)])
+            / (4.0 * elY);
+
+        // Ez: nP=x, nPP=y → average at (ix,iy), (ix+1,iy), (ix+1,iy+1), (ix,iy+1)
+        let elZ = edgeLens[nf2ffParams.elOffPZ + iz];
+        Ez = (volt[2u*compStride + base] + volt[2u*compStride + fieldIdx(ix+1u, iy, iz)]
+            + volt[2u*compStride + fieldIdx(ix+1u, iy+1u, iz)] + volt[2u*compStride + fieldIdx(ix, iy+1u, iz)])
+            / (4.0 * elZ);
+    }
+
+    // --- H-field: CELL_INTERPOLATE (linear interpolation along n direction) ---
+    // H_n = lerp(curr[n][pos]/dualEl[pos_n], curr[n][pos+n]/dualEl[pos_n+1], deltaRel)
+    // deltaRel = dualEl[pos_n] / (dualEl[pos_n] + dualEl[pos_n+1])
+    var Hx: f32 = 0.0;
+    var Hy: f32 = 0.0;
+    var Hz: f32 = 0.0;
+
+    // Hx: interpolate along x
+    let dxEl0 = edgeLens[nf2ffParams.elOffDX + ix];
+    if (dxEl0 > 0.0) {
+        Hx = curr[base] / dxEl0;
+        if (ix < Nx - 1u) {
+            let dxEl1 = edgeLens[nf2ffParams.elOffDX + ix + 1u];
+            let dr = dxEl0 / (dxEl0 + dxEl1);
+            let HxUp = curr[fieldIdx(ix+1u, iy, iz)] / dxEl1;
+            Hx = Hx * (1.0 - dr) + HxUp * dr;
+        }
+    }
+
+    // Hy: interpolate along y
+    let dyEl0 = edgeLens[nf2ffParams.elOffDY + iy];
+    if (dyEl0 > 0.0) {
+        Hy = curr[compStride + base] / dyEl0;
+        if (iy < Ny - 1u) {
+            let dyEl1 = edgeLens[nf2ffParams.elOffDY + iy + 1u];
+            let dr = dyEl0 / (dyEl0 + dyEl1);
+            let HyUp = curr[compStride + fieldIdx(ix, iy+1u, iz)] / dyEl1;
+            Hy = Hy * (1.0 - dr) + HyUp * dr;
+        }
+    }
+
+    // Hz: interpolate along z
+    let dzEl0 = edgeLens[nf2ffParams.elOffDZ + iz];
+    if (dzEl0 > 0.0) {
+        Hz = curr[2u*compStride + base] / dzEl0;
+        if (iz < Nz - 1u) {
+            let dzEl1 = edgeLens[nf2ffParams.elOffDZ + iz + 1u];
+            let dr = dzEl0 / (dzEl0 + dzEl1);
+            let HzUp = curr[2u*compStride + fieldIdx(ix, iy, iz+1u)] / dzEl1;
+            Hz = Hz * (1.0 - dr) + HzUp * dr;
+        }
+    }
+
+    // --- DFT accumulation ---
+    let omega = nf2ffParams.omega;
+    let dT = nf2ffParams.dT;
+    let ts = f32(nf2ffParams.numTS);
+
+    // E at numTS * dT, H at (numTS + 0.5) * dT
+    let phase_e = omega * ts * dT;
+    let cos_e = cos(phase_e);
+    let sin_e = sin(phase_e);
+    let phase_h = omega * (ts + 0.5) * dT;
+    let cos_h = cos(phase_h);
+    let sin_h = sin(phase_h);
+
+    let base_e = pid * 6u;
+    accumE[base_e + 0u] += Ex * cos_e * dT;
+    accumE[base_e + 1u] += Ex * (-sin_e) * dT;
+    accumE[base_e + 2u] += Ey * cos_e * dT;
+    accumE[base_e + 3u] += Ey * (-sin_e) * dT;
+    accumE[base_e + 4u] += Ez * cos_e * dT;
+    accumE[base_e + 5u] += Ez * (-sin_e) * dT;
+
+    let base_h = pid * 6u;
+    accumH[base_h + 0u] += Hx * cos_h * dT;
+    accumH[base_h + 1u] += Hx * (-sin_h) * dT;
+    accumH[base_h + 2u] += Hy * cos_h * dT;
+    accumH[base_h + 3u] += Hy * (-sin_h) * dT;
+    accumH[base_h + 4u] += Hz * cos_h * dT;
+    accumH[base_h + 5u] += Hz * (-sin_h) * dT;
+}
+`;
+
 /**
  * WebGPU FDTD Engine.
  *
@@ -584,6 +736,17 @@ export class WebGPUEngine {
         this.murApplyPipeline = null;
         this.murBindGroup = null;
         this.murConfigured = false;
+
+        // NF2FF FD accumulation state
+        this._nf2ffPipeline = null;
+        this._nf2ffBindGroup = null;
+        this._nf2ffParamsBuffer = null;
+        this._nf2ffPointsBuffer = null;
+        this._nf2ffAccumEBuffer = null;
+        this._nf2ffAccumHBuffer = null;
+        this._nf2ffNumPoints = 0;
+        this._nf2ffOmega = 0;
+        this._nf2ffDT = 0;
 
         // Steady-state state
         this.ssPipeline = null;
@@ -1746,6 +1909,15 @@ export class WebGPUEngine {
                 }
                 this.stepCurrent(null, { pass });
                 pass.end();
+                // NF2FF FD accumulation (separate pass for memory barrier)
+                if (this._nf2ffPipeline) {
+                    this._updateNF2FFParams(this.numTS + 1);
+                    const nf2ffPass = encoder.beginComputePass();
+                    nf2ffPass.setPipeline(this._nf2ffPipeline);
+                    nf2ffPass.setBindGroup(0, this._nf2ffBindGroup);
+                    nf2ffPass.dispatchWorkgroups(Math.ceil(this._nf2ffNumPoints / 64));
+                    nf2ffPass.end();
+                }
                 this.device.queue.submit([encoder.finish()]);
                 this.numTS++;
                 continue;
@@ -1782,6 +1954,16 @@ export class WebGPUEngine {
             // === POST-CURRENT (C++ DoPostCurrentUpdates) ===
             this.stepPML(encoder, 3);       // Priority +1M
             this.stepTFSFCurrent(encoder);  // Priority +50K
+
+            // NF2FF FD accumulation (after all field updates)
+            if (this._nf2ffPipeline) {
+                this._updateNF2FFParams(this.numTS + 1);
+                const nf2ffPass = encoder.beginComputePass();
+                nf2ffPass.setPipeline(this._nf2ffPipeline);
+                nf2ffPass.setBindGroup(0, this._nf2ffBindGroup);
+                nf2ffPass.dispatchWorkgroups(Math.ceil(this._nf2ffNumPoints / 64));
+                nf2ffPass.end();
+            }
 
             this.device.queue.submit([encoder.finish()]);
             this.numTS++;
@@ -1924,6 +2106,129 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         const outSize = this._gatherCount * 2 * 4;
         const data = await this._readBuffer(this._gatherOutBuffer, outSize);
         return new Float32Array(data);
+    }
+
+    /**
+     * Configure GPU-side NF2FF frequency-domain accumulation.
+     * This creates a compute shader that accumulates the DFT of E/H fields
+     * at specified surface points every timestep.
+     *
+     * @param {Object} config
+     * @param {Uint32Array} config.surfaceIndices - flat [ix, iy, iz] triplets
+     * @param {number} config.numPoints - total surface points
+     * @param {number} config.omega - angular frequency (2*PI*freq)
+     * @param {number} config.dT - simulation timestep
+     * @param {number[]} config.gridSize - [Nx, Ny, Nz]
+     */
+    configureNF2FFAccumulation(config) {
+        const { surfaceIndices, numPoints, omega, dT, gridSize, primalEdgeLens, dualEdgeLens } = config;
+        if (numPoints === 0) return;
+
+        this._nf2ffNumPoints = numPoints;
+        this._nf2ffOmega = omega;
+        this._nf2ffDT = dT;
+
+        // Upload surface point indices (ix, iy, iz triplets)
+        this._nf2ffPointsBuffer = this._createAndUploadBuffer(
+            surfaceIndices, GPUBufferUsage.STORAGE);
+
+        // Accumulation buffers: numPoints * 6 floats (3 components * re/im)
+        const accumSize = numPoints * 6 * 4;
+        this._nf2ffAccumEBuffer = this.device.createBuffer({
+            size: accumSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+        this._nf2ffAccumHBuffer = this.device.createBuffer({
+            size: accumSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+
+        // Edge length buffer: [primalX, primalY, primalZ, dualX, dualY, dualZ]
+        const elOffsets = [0];
+        for (let i = 0; i < 3; i++) elOffsets.push(elOffsets[elOffsets.length - 1] + primalEdgeLens[i].length);
+        for (let i = 0; i < 3; i++) elOffsets.push(elOffsets[elOffsets.length - 1] + dualEdgeLens[i].length);
+        const totalEdgeFloats = elOffsets[elOffsets.length - 1];
+        const edgeLenData = new Float32Array(totalEdgeFloats);
+        let elOff = 0;
+        for (let i = 0; i < 3; i++) { edgeLenData.set(primalEdgeLens[i], elOff); elOff += primalEdgeLens[i].length; }
+        for (let i = 0; i < 3; i++) { edgeLenData.set(dualEdgeLens[i], elOff); elOff += dualEdgeLens[i].length; }
+        this._nf2ffEdgeLenBuffer = this._createAndUploadBuffer(edgeLenData, GPUBufferUsage.STORAGE);
+
+        // Params buffer: NF2FFParams struct (64 bytes)
+        this._nf2ffParamsBuffer = this.device.createBuffer({
+            size: 64,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        const paramsData = new ArrayBuffer(64);
+        const u32 = new Uint32Array(paramsData);
+        const f32 = new Float32Array(paramsData);
+        u32[0] = 0;                // numTS (updated each step)
+        u32[1] = numPoints;
+        u32[2] = gridSize[0];      // Nx
+        u32[3] = gridSize[1];      // Ny
+        u32[4] = gridSize[2];      // Nz
+        u32[5] = elOffsets[0];     // elOffPX
+        u32[6] = elOffsets[1];     // elOffPY
+        u32[7] = elOffsets[2];     // elOffPZ
+        u32[8] = elOffsets[3];     // elOffDX
+        u32[9] = elOffsets[4];     // elOffDY
+        u32[10] = elOffsets[5];    // elOffDZ
+        u32[11] = 0;               // _pad0
+        f32[12] = omega;
+        f32[13] = dT;
+        f32[14] = 0;               // _pad1
+        f32[15] = 0;               // _pad2
+        this.device.queue.writeBuffer(this._nf2ffParamsBuffer, 0, paramsData);
+
+        // Create pipeline
+        const module = this.device.createShaderModule({ code: NF2FF_ACCUMULATE_WGSL });
+        this._nf2ffPipeline = this.device.createComputePipeline({
+            layout: 'auto',
+            compute: { module, entryPoint: 'main' },
+        });
+
+        // Create bind group
+        this._nf2ffBindGroup = this.device.createBindGroup({
+            layout: this._nf2ffPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.voltBuffer } },
+                { binding: 1, resource: { buffer: this.currBuffer } },
+                { binding: 2, resource: { buffer: this._nf2ffParamsBuffer } },
+                { binding: 3, resource: { buffer: this._nf2ffPointsBuffer } },
+                { binding: 4, resource: { buffer: this._nf2ffAccumEBuffer } },
+                { binding: 5, resource: { buffer: this._nf2ffAccumHBuffer } },
+                { binding: 6, resource: { buffer: this._nf2ffEdgeLenBuffer } },
+            ],
+        });
+    }
+
+    /**
+     * Update the numTS value in the NF2FF params buffer.
+     * Call this before dispatching the NF2FF accumulation shader.
+     * @param {number} numTS - current timestep number to use for DFT phase
+     */
+    _updateNF2FFParams(numTS) {
+        if (!this._nf2ffParamsBuffer) return;
+        const data = new Uint32Array([numTS]);
+        this.device.queue.writeBuffer(this._nf2ffParamsBuffer, 0, data);
+    }
+
+    /**
+     * Read back the accumulated NF2FF E and H DFT buffers from GPU.
+     * @returns {Promise<{accumE: Float32Array, accumH: Float32Array}>}
+     */
+    async readNF2FFAccumulation() {
+        if (!this._nf2ffPipeline) return null;
+        const size = this._nf2ffNumPoints * 6 * 4;
+        const [eData, hData] = await Promise.all([
+            this._readBuffer(this._nf2ffAccumEBuffer, size),
+            this._readBuffer(this._nf2ffAccumHBuffer, size),
+        ]);
+        return {
+            accumE: new Float32Array(eData),
+            accumH: new Float32Array(hData),
+        };
     }
 
     /**
@@ -2102,6 +2407,11 @@ fn main() {
         // Destroy gather/energy buffers
         for (const buf of [this._gatherIndexBuffer, this._gatherOutBuffer,
                            this._energyPartialBuffer, this._energyResultBuffer]) {
+            if (buf) buf.destroy();
+        }
+        // Destroy NF2FF buffers
+        for (const buf of [this._nf2ffParamsBuffer, this._nf2ffPointsBuffer,
+                           this._nf2ffAccumEBuffer, this._nf2ffAccumHBuffer]) {
             if (buf) buf.destroy();
         }
 

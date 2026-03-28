@@ -9,38 +9,45 @@
 /**
  * Patch Antenna example.
  *
- * 32.86 x 41.37 mm patch on FR4 substrate (epsilon_r = 3.38, 1.524 mm thick).
- * 60 x 60 mm ground plane. Lumped port feed at x = -5.5 mm, 50 Ohm.
- * Gaussian excitation 0-6 GHz, 30000 timesteps, end criteria 1e-5.
+ * 32 x 40 mm patch on substrate (epsilon_r = 3.38, 1.524 mm thick).
+ * 60 x 60 mm ground plane. Lumped port feed at x = -6 mm, 50 Ohm.
+ * Gaussian excitation 1-3 GHz, 30000 timesteps, end criteria 1e-4.
+ * ~70K cells, matching the openEMS Simple_Patch_Antenna tutorial.
  */
 export const PATCH_ANTENNA = {
   name: 'Patch Antenna',
   script: `
-// Patch Antenna — parametric design
+// Patch Antenna — matches openEMS Simple_Patch_Antenna tutorial
 const unit = 1e-3; // all lengths in mm
+const C0 = 299792458;
+const EPS0 = 8.854187817e-12;
 const f0 = 3e9;    // center frequency
 const fc = 3e9;    // 20dB corner frequency
 
 // substrate
 const epsR = 3.38;
+const kappa = 1e-3 * 2 * Math.PI * 2.45e9 * EPS0 * epsR;
 const subW = 60, subL = 60, subH = 1.524;
 
 // patch dimensions
-const patchW = 32.86, patchL = 41.37;
+const patchW = 32, patchL = 40;
 
 // feed position
-const feedX = -5.5;
+const feedX = -6;
 const feedR = 50; // ohm
 
-// simulation box padding
-const pad = 15;
+// simulation box (200 x 200 x 150 mm)
+const SimBox = [200, 200, 150];
+
+// mesh resolution: lambda/20 at highest frequency
+const mesh_res = C0 / (f0 + fc) / unit / 20;
 
 // derived
 const hw = subW / 2, hl = subL / 2;
 const hpw = patchW / 2, hpl = patchL / 2;
 
 // setup FDTD
-const FDTD = new OpenEMS({ NrTS: 30000, EndCriteria: 1e-5 });
+const FDTD = new OpenEMS({ NrTS: 30000, EndCriteria: 1e-4 });
 FDTD.SetGaussExcite(f0, fc);
 FDTD.SetBoundaryCond(['MUR','MUR','MUR','MUR','MUR','MUR']);
 
@@ -50,22 +57,37 @@ FDTD.SetCSX(CSX);
 const mesh = CSX.GetGrid();
 mesh.SetDeltaUnit(unit);
 
-// mesh — dense near structure edges, coarser outside
-mesh.AddLine('x', [-(hw+pad), -hw, -hpw, feedX-1, feedX, feedX+1, 0, hpw, hw, hw+pad]);
-mesh.SmoothMeshLines('x', 3, 1.4);
+// mesh — simulation box extents
+mesh.AddLine('x', [-SimBox[0]/2, SimBox[0]/2]);
+mesh.AddLine('y', [-SimBox[1]/2, SimBox[1]/2]);
+mesh.AddLine('z', [-SimBox[2]/3, SimBox[2]*2/3]);
 
-mesh.AddLine('y', [-(hl+pad), -hl, -hpl, 0, hpl, hl, hl+pad]);
-mesh.SmoothMeshLines('y', 3, 1.4);
+// patch edges
+mesh.AddLine('x', [-hpw, hpw]);
+mesh.AddLine('y', [-hpl, hpl]);
 
-mesh.AddLine('z', [-10, 0, subH*0.2, subH/2, subH, 2, 6, 10, 20]);
-mesh.SmoothMeshLines('z', 3, 1.4);
+// substrate z-lines
+for (let i = 0; i <= 4; i++) mesh.AddLine('z', subH * i / 4);
+
+// ground/substrate edges
+mesh.AddLine('x', [-hw, hw]);
+mesh.AddLine('y', [-hl, hl]);
+
+// smooth all directions to target resolution
+mesh.SmoothMeshLines('x', mesh_res, 1.4);
+mesh.SmoothMeshLines('y', mesh_res, 1.4);
+mesh.SmoothMeshLines('z', mesh_res, 1.4);
+
+// add feed and port snap lines AFTER smoothing so they're preserved exactly
+mesh.AddLine('x', [feedX, 0]);
+mesh.AddLine('y', 0);
 
 // ground plane
 const ground = CSX.AddMetal('ground');
 ground.AddBox([-hw, -hl, 0], [hw, hl, 0], 10);
 
-// substrate
-const substrate = CSX.AddMaterial('substrate', { Epsilon: epsR });
+// substrate (with loss tangent)
+const substrate = CSX.AddMaterial('substrate', { Epsilon: epsR, Kappa: kappa });
 substrate.AddBox([-hw, -hl, 0], [hw, hl, subH], 5);
 
 // patch
@@ -75,7 +97,7 @@ patch.AddBox([-hpw, -hpl, subH], [hpw, hpl, subH], 10);
 // lumped port feed
 FDTD.AddLumpedPort(1, feedR, [feedX, 0, 0], [feedX, 0, subH], 'z', 1.0);
 
-// NF2FF box
+// NF2FF box at first resonance (~2.4 GHz)
 FDTD.CreateNF2FFBox({ frequency: 2.4e9 });
 
 return FDTD.GenerateXML();
