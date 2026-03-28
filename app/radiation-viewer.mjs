@@ -1,5 +1,6 @@
 import * as THREE from 'https://esm.sh/three@0.170.0';
 import { OrbitControls } from 'https://esm.sh/three@0.170.0/addons/controls/OrbitControls.js';
+import { buildMeshesFromXML } from '/app/geometry-viewer.mjs';
 
 const JET_STOPS = [
   [0.0, 0x0000cc],
@@ -100,7 +101,39 @@ export function createRadiationViewer(container) {
   scene.add(new THREE.AxesHelper(0.3));
 
   let patternMesh = null;
+  let antennaGroup = null;
+  let showAntenna = false;
   let animId = null;
+
+  // Lighting for antenna geometry (only visible when antenna is shown)
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+  dirLight.position.set(1, 2, 1.5);
+  scene.add(ambientLight, dirLight);
+
+  // Toggle button
+  const toggleBtn = document.createElement('button');
+  toggleBtn.textContent = 'Show Antenna';
+  Object.assign(toggleBtn.style, {
+    position: 'absolute', left: '12px', top: '12px', zIndex: '10',
+    padding: '4px 10px', fontSize: '10px', fontFamily: 'Inter, sans-serif',
+    fontWeight: '500', border: '1px solid #2a2a35', borderRadius: '4px',
+    background: '#1e1e26', color: '#8888a0', cursor: 'pointer',
+  });
+  toggleBtn.addEventListener('click', () => {
+    showAntenna = !showAntenna;
+    toggleBtn.textContent = showAntenna ? 'Hide Antenna' : 'Show Antenna';
+    toggleBtn.style.borderColor = showAntenna ? '#6366f1' : '#2a2a35';
+    toggleBtn.style.color = showAntenna ? '#c7d2fe' : '#8888a0';
+    if (antennaGroup) antennaGroup.visible = showAntenna;
+    if (patternMesh) {
+      patternMesh.material.transparent = showAntenna;
+      patternMesh.material.opacity = showAntenna ? 0.55 : 1;
+      patternMesh.material.depthWrite = !showAntenna;
+      patternMesh.material.needsUpdate = true;
+    }
+  });
+  container.appendChild(toggleBtn);
 
   const animate = () => {
     animId = requestAnimationFrame(animate);
@@ -121,7 +154,7 @@ export function createRadiationViewer(container) {
 
   return {
     update(data) {
-      const { thetaRad, phiRad, directivity_dBi, Dmax_dBi } = data;
+      const { thetaRad, phiRad, directivity_dBi, Dmax_dBi, xml } = data;
       const nTheta = thetaRad.length;
       const nPhi = phiRad.length;
       const minClamp = Dmax_dBi - 30;
@@ -131,6 +164,42 @@ export function createRadiationViewer(container) {
         patternMesh.geometry.dispose();
         patternMesh.material.dispose();
         patternMesh = null;
+      }
+
+      // Build antenna geometry
+      if (antennaGroup) {
+        antennaGroup.traverse(child => {
+          child.geometry?.dispose();
+          if (child.material) {
+            if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+            else child.material.dispose();
+          }
+        });
+        scene.remove(antennaGroup);
+        antennaGroup = null;
+      }
+      if (xml) {
+        const meshes = buildMeshesFromXML(xml);
+        if (meshes.length > 0) {
+          // Geometry stays at FDTD origin (0,0,0) — the NF2FF integration center
+          const inner = new THREE.Group();
+          const bbox = new THREE.Box3();
+          for (const m of meshes) {
+            inner.add(m);
+            bbox.union(new THREE.Box3().setFromObject(m));
+          }
+          const size = new THREE.Vector3();
+          bbox.getSize(size);
+          const maxDim = Math.max(size.x, size.y, size.z) || 1;
+
+          // Scale to fit inside pattern, rotate Z-up → Y-up
+          antennaGroup = new THREE.Group();
+          antennaGroup.add(inner);
+          antennaGroup.scale.setScalar(0.4 / maxDim);
+          antennaGroup.rotation.x = -Math.PI / 2;
+          antennaGroup.visible = showAntenna;
+          scene.add(antennaGroup);
+        }
       }
 
       const positions = new Float32Array(nTheta * nPhi * 3);
@@ -199,10 +268,20 @@ export function createRadiationViewer(container) {
         patternMesh.geometry.dispose();
         patternMesh.material.dispose();
       }
+      if (antennaGroup) {
+        antennaGroup.traverse(child => {
+          child.geometry?.dispose();
+          if (child.material) {
+            if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+            else child.material.dispose();
+          }
+        });
+      }
       refGeo.dispose();
       refMat.dispose();
       renderer.dispose();
       renderer.domElement.remove();
+      toggleBtn.remove();
       const bar = container.querySelector('.radiation-colorbar');
       if (bar) bar.remove();
     },

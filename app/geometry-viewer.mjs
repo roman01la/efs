@@ -213,6 +213,32 @@ function fitCamera(camera, controls, bbox) {
   controls.update();
 }
 
+export function buildMeshesFromXML(xml) {
+  const doc = new DOMParser().parseFromString(xml, 'text/xml');
+  const cs = doc.querySelector('ContinuousStructure');
+  if (!cs) return [];
+  const gridEl = cs.querySelector('RectilinearGrid');
+  const deltaUnit = parseFloat(gridEl?.getAttribute('DeltaUnit') || '1');
+  const meshes = [];
+  const propsEl = cs.querySelector('Properties');
+  if (propsEl) {
+    for (const propEl of propsEl.children) {
+      const propType = propEl.tagName;
+      if (propType === 'DumpBox' || propType === 'ProbeBox') continue;
+      const material = makeMaterial(propType);
+      const primsEl = propEl.querySelector('Primitives');
+      if (!primsEl) continue;
+      for (const primEl of primsEl.children) {
+        const builder = PRIMITIVE_BUILDERS[primEl.tagName];
+        if (!builder) continue;
+        const obj = builder(primEl, deltaUnit, material);
+        if (obj) meshes.push(obj);
+      }
+    }
+  }
+  return meshes;
+}
+
 export function createViewer(container) {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(window.devicePixelRatio);
