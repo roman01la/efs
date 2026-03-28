@@ -733,7 +733,6 @@ async function runSimulation(xml) {
   const probes = parseProbeInfo(ems);
   const dT = ems.getSimDT();
   const { indices, probeSlices } = buildGatherIndices(probes, config.gridSize);
-  gpuEngine.configureProbeGather(indices);
   log(`  Probes: ${probes.length} (${indices.length} gather indices)`);
 
   // Configure GPU-side NF2FF FD accumulation
@@ -802,24 +801,18 @@ async function runSimulation(xml) {
   const probeTS = probes.map(() => ({ time: [], values: [] }));
 
   const baseInterval = probes.length > 0 ? probes[0].processInterval : 24;
-  const maxProbeSteps = fMax > 0 ? Math.floor(0.5 / (fMax * dT)) : baseInterval * 10;
-  const probeMult = Math.max(1, Math.floor(maxProbeSteps / baseInterval));
-  const sampleInterval = baseInterval * probeMult;
+  const sampleInterval = baseInterval; // sample every processInterval — GPU buffering makes this free
+
+  const maxSamples = Math.ceil(maxTS / sampleInterval) + 1;
+  gpuEngine.configureProbeGatherBuffered(indices, { maxSamples, sampleInterval });
 
   let maxEnergy = 0;
   const energyCheckInterval = 1000;
 
-  // GPU batch size: run as many steps as possible between readbacks.
-  // Readbacks needed for: probe sampling, energy checks, and C++ dump box processing.
   const readbackInterval = cppProcessInterval > 0
-    ? Math.min(cppProcessInterval, sampleInterval, energyCheckInterval)
-    : Math.min(sampleInterval, energyCheckInterval);
+    ? Math.min(cppProcessInterval, energyCheckInterval)
+    : energyCheckInterval;
   let _voltStage = 0, _currStage = 0;
-
-  // Pipelined probe reading: dispatch the gather command (non-blocking),
-  // continue GPU iteration, and only await the result at the next probe interval.
-  let pendingProbeRead = null;
-  let pendingProbeTime = 0;
 
   while (totalSteps < maxTS && !stopRequested) {
     const stepsThisBatch = Math.min(readbackInterval, maxTS - totalSteps);
@@ -828,19 +821,6 @@ async function runSimulation(xml) {
 
     // C++ processing for dump boxes (needs synchronous field readback)
     if (cppProcessInterval > 0 && totalSteps % cppProcessInterval === 0) {
-      // Must resolve any pending probe read first (GPU sync point)
-      if (pendingProbeRead) {
-        const gathered = await pendingProbeRead;
-        if (gathered) {
-          const integrals = computeProbeIntegrals(gathered, probes, probeSlices);
-          for (let p = 0; p < probes.length; p++) {
-            const isDual = probes[p].type === 1;
-            probeTS[p].time.push((pendingProbeTime + (isDual ? 0.5 : 0)) * dT);
-            probeTS[p].values.push(integrals[p]);
-          }
-        }
-        pendingProbeRead = null;
-      }
       const fields = await gpuEngine.getFields();
       if (!_voltStage) {
         const n = fields.volt.length * 4;
@@ -855,38 +835,8 @@ async function runSimulation(xml) {
       if (nextStep <= 0) break;
     }
 
-    // Probe gather — resolve previous read, then dispatch next (non-blocking)
-    if (totalSteps % sampleInterval === 0) {
-      if (pendingProbeRead) {
-        const gathered = await pendingProbeRead;
-        if (gathered) {
-          const integrals = computeProbeIntegrals(gathered, probes, probeSlices);
-          for (let p = 0; p < probes.length; p++) {
-            const isDual = probes[p].type === 1;
-            probeTS[p].time.push((pendingProbeTime + (isDual ? 0.5 : 0)) * dT);
-            probeTS[p].values.push(integrals[p]);
-          }
-        }
-      }
-      // Dispatch next probe gather — GPU starts the readback but we don't wait
-      pendingProbeRead = gpuEngine.readProbeGather();
-      pendingProbeTime = totalSteps;
-    }
-
     // Energy end-criteria (less frequent, OK to sync here)
     if (totalSteps % energyCheckInterval < stepsThisBatch) {
-      if (pendingProbeRead) {
-        const gathered = await pendingProbeRead;
-        if (gathered) {
-          const integrals = computeProbeIntegrals(gathered, probes, probeSlices);
-          for (let p = 0; p < probes.length; p++) {
-            const isDual = probes[p].type === 1;
-            probeTS[p].time.push((pendingProbeTime + (isDual ? 0.5 : 0)) * dT);
-            probeTS[p].values.push(integrals[p]);
-          }
-        }
-        pendingProbeRead = null;
-      }
       const energy = await gpuEngine.computeEnergy();
       if (energy > maxEnergy) maxEnergy = energy;
       if (maxEnergy > 0 && (energy / maxEnergy) <= endCrit) {
@@ -899,14 +849,16 @@ async function runSimulation(xml) {
     if (totalSteps % 1000 < stepsThisBatch) log(`  Step ${totalSteps}/${maxTS}`);
   }
 
-  // Resolve any final pending probe read
-  if (pendingProbeRead) {
-    const gathered = await pendingProbeRead;
-    if (gathered) {
+  const gatherResult = await gpuEngine.readProbeGatherBuffered();
+  if (gatherResult) {
+    const { data, numSamples, stride } = gatherResult;
+    for (let s = 0; s < numSamples; s++) {
+      const gathered = data.subarray(s * stride, (s + 1) * stride);
+      const sampleStep = (s + 1) * sampleInterval;
       const integrals = computeProbeIntegrals(gathered, probes, probeSlices);
       for (let p = 0; p < probes.length; p++) {
         const isDual = probes[p].type === 1;
-        probeTS[p].time.push((pendingProbeTime + (isDual ? 0.5 : 0)) * dT);
+        probeTS[p].time.push((sampleStep + (isDual ? 0.5 : 0)) * dT);
         probeTS[p].values.push(integrals[p]);
       }
     }
@@ -1012,12 +964,17 @@ async function runSimulation(xml) {
       for (const v of E_norm) if (v > maxE) maxE = v;
       for (const tDeg of thetaDeg2d) {
         const tAbs = Math.abs(tDeg);
-        const tIdx = Math.min(Math.round(tAbs / 3), nTheta3d - 1);
+        const tFrac = tAbs / 3; // fractional index into 3° grid
+        const tIdx0 = Math.min(Math.floor(tFrac), nTheta3d - 1);
+        const tIdx1 = Math.min(tIdx0 + 1, nTheta3d - 1);
+        const frac = tFrac - tIdx0; // interpolation weight
         const phiOff = tDeg < 0 ? Math.round(180 / 5) : 0; // opposite hemisphere
-        const xzIdx = tIdx * nPhi3d + ((phi0Idx + phiOff) % nPhi3d);
-        const yzIdx = tIdx * nPhi3d + ((phi90Idx + phiOff) % nPhi3d);
-        xzPattern.push(20 * Math.log10(Math.max(E_norm[xzIdx] / maxE, 1e-15)) + DmaxdBi);
-        yzPattern.push(20 * Math.log10(Math.max(E_norm[yzIdx] / maxE, 1e-15)) + DmaxdBi);
+        const xzP0 = phi0Idx + phiOff, xzP1 = xzP0;
+        const yzP0 = phi90Idx + phiOff, yzP1 = yzP0;
+        const xzE = E_norm[tIdx0 * nPhi3d + (xzP0 % nPhi3d)] * (1 - frac) + E_norm[tIdx1 * nPhi3d + (xzP1 % nPhi3d)] * frac;
+        const yzE = E_norm[tIdx0 * nPhi3d + (yzP0 % nPhi3d)] * (1 - frac) + E_norm[tIdx1 * nPhi3d + (yzP1 % nPhi3d)] * frac;
+        xzPattern.push(20 * Math.log10(Math.max(xzE / maxE, 1e-15)) + DmaxdBi);
+        yzPattern.push(20 * Math.log10(Math.max(yzE / maxE, 1e-15)) + DmaxdBi);
       }
 
       // Build directivity_dBi array for 3D viewer

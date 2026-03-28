@@ -2104,6 +2104,15 @@ export class WebGPUEngine {
                     nf2ffPass.dispatchWorkgroups(Math.ceil(this._nf2ffNumPoints / 64));
                     nf2ffPass.end();
                 }
+                if (this._gatherBufferedPipeline && (this.numTS + 1) % this._gatherSampleInterval === 0 && this._gatherSampleIndex < this._gatherMaxSamples) {
+                    this._updateGatherSampleIndex(this._gatherSampleIndex);
+                    const gatherPass = encoder.beginComputePass();
+                    gatherPass.setPipeline(this._gatherBufferedPipeline);
+                    gatherPass.setBindGroup(0, this._gatherBufferedBindGroup);
+                    gatherPass.dispatchWorkgroups(Math.ceil(this._gatherCount / 64));
+                    gatherPass.end();
+                    this._gatherSampleIndex++;
+                }
                 this.device.queue.submit([encoder.finish()]);
                 this.numTS++;
                 continue;
@@ -2149,6 +2158,15 @@ export class WebGPUEngine {
                 nf2ffPass.setBindGroup(0, this._nf2ffBindGroup);
                 nf2ffPass.dispatchWorkgroups(Math.ceil(this._nf2ffNumPoints / 64));
                 nf2ffPass.end();
+            }
+            if (this._gatherBufferedPipeline && (this.numTS + 1) % this._gatherSampleInterval === 0 && this._gatherSampleIndex < this._gatherMaxSamples) {
+                this._updateGatherSampleIndex(this._gatherSampleIndex);
+                const gatherPass = encoder.beginComputePass();
+                gatherPass.setPipeline(this._gatherBufferedPipeline);
+                gatherPass.setBindGroup(0, this._gatherBufferedBindGroup);
+                gatherPass.dispatchWorkgroups(Math.ceil(this._gatherCount / 64));
+                gatherPass.end();
+                this._gatherSampleIndex++;
             }
 
             this.device.queue.submit([encoder.finish()]);
@@ -2271,6 +2289,79 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
                 { binding: 3, resource: { buffer: this._gatherOutBuffer } },
             ],
         });
+    }
+
+    configureProbeGatherBuffered(indices, { maxSamples, sampleInterval }) {
+        if (indices.length === 0) return;
+        this._gatherCount = indices.length;
+        this._gatherMaxSamples = maxSamples;
+        this._gatherSampleInterval = sampleInterval;
+        this._gatherSampleIndex = 0;
+
+        this._gatherIndexBuffer = this._createAndUploadBuffer(
+            indices, GPUBufferUsage.STORAGE);
+
+        const ringSize = maxSamples * indices.length * 2 * 4;
+        this._gatherRingBuffer = this.device.createBuffer({
+            size: ringSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+
+        this._gatherParamsBuffer = this.device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        const code = /* wgsl */ `
+struct GatherParams {
+    sampleIndex: u32,
+    stride: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+@group(0) @binding(0) var<storage, read> volt: array<f32>;
+@group(0) @binding(1) var<storage, read> curr: array<f32>;
+@group(0) @binding(2) var<storage, read> indices: array<u32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> params: GatherParams;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+    let i = gid.x;
+    if (i >= arrayLength(&indices)) { return; }
+    let idx = indices[i];
+    let base = params.sampleIndex * params.stride;
+    output[base + i * 2u] = volt[idx];
+    output[base + i * 2u + 1u] = curr[idx];
+}`;
+        const module = this.device.createShaderModule({ code });
+        this._gatherBufferedPipeline = this.device.createComputePipeline({
+            layout: 'auto',
+            compute: { module, entryPoint: 'main' },
+        });
+        this._gatherBufferedBindGroup = this.device.createBindGroup({
+            layout: this._gatherBufferedPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.voltBuffer } },
+                { binding: 1, resource: { buffer: this.currBuffer } },
+                { binding: 2, resource: { buffer: this._gatherIndexBuffer } },
+                { binding: 3, resource: { buffer: this._gatherRingBuffer } },
+                { binding: 4, resource: { buffer: this._gatherParamsBuffer } },
+            ],
+        });
+    }
+
+    _updateGatherSampleIndex(sampleIndex) {
+        if (!this._gatherParamsBuffer) return;
+        const data = new Uint32Array([sampleIndex, this._gatherCount * 2, 0, 0]);
+        this.device.queue.writeBuffer(this._gatherParamsBuffer, 0, data);
+    }
+
+    async readProbeGatherBuffered() {
+        if (!this._gatherRingBuffer || this._gatherSampleIndex === 0) return null;
+        const outSize = this._gatherSampleIndex * this._gatherCount * 2 * 4;
+        const data = await this._readBuffer(this._gatherRingBuffer, outSize);
+        return { data: new Float32Array(data), numSamples: this._gatherSampleIndex, stride: this._gatherCount * 2 };
     }
 
     /**
@@ -2704,6 +2795,7 @@ fn main() {
         for (const buf of (this._ssBuffers || [])) { if (buf) buf.destroy(); }
         // Destroy gather/energy buffers
         for (const buf of [this._gatherIndexBuffer, this._gatherOutBuffer,
+                           this._gatherRingBuffer, this._gatherParamsBuffer,
                            this._energyPartialBuffer, this._energyResultBuffer]) {
             if (buf) buf.destroy();
         }
