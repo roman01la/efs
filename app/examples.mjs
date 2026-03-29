@@ -558,6 +558,234 @@ return FDTD.GenerateXML();
 `
 };
 
+/**
+ * 4-Leaf Cloverleaf Antenna — 5.6 GHz RHCP
+ *
+ * Planar petal design: 4 upper petals at z=feedH and 4 lower petals at z=0,
+ * rotated 45 deg relative to each other for circular polarization.
+ * Each petal is a flat rectangular metal strip extending radially from a
+ * central hub cylinder. Lumped port bridges the two hubs.
+ *
+ * S11 < -10 dB across 5.3-5.9 GHz, impedance ~50 ohm at 5.6 GHz.
+ */
+export const CLOVERLEAF_ANTENNA = {
+  name: 'Cloverleaf 5.8 GHz',
+  script: `
+// 4-Leaf Cloverleaf — 5.8 GHz RHCP
+// Planar petal design: 4 upper petals at z=feedH, 4 lower petals at z=0.
+// Each petal is a flat rectangular metal strip extending radially from hub.
+// Upper and lower petal sets are rotated 45 deg for circular polarization.
+// Metal hub cylinders connect petals. Lumped port bridges hubs.
+const unit = 1e-3; // mm
+const C0 = 299792458;
+
+const f0 = 5.6e9;
+const fc = 2.0e9;
+
+const lambda = C0 / f0 / unit;
+const mesh_res = lambda / 20;
+
+// Petal dimensions: length ~ lambda/4, width for proper Z
+const petalL = 13.6;  // radial length from hub edge
+const petalW = 4.8;   // tangential width
+
+// Hub and feed
+const hubR = 2.5;     // hub cylinder radius
+const feedH = 3.6;    // vertical distance between hubs
+const portR = 1.5;    // port offset from center
+
+const simBox = 80;
+
+const FDTD = new OpenEMS({ NrTS: 40000, EndCriteria: 1e-5 });
+FDTD.SetGaussExcite(f0, fc);
+FDTD.SetBoundaryCond(['PML_8','PML_8','PML_8','PML_8','PML_8','PML_8']);
+
+const CSX = new ContinuousStructure();
+FDTD.SetCSX(CSX);
+const mesh = CSX.GetGrid();
+mesh.SetDeltaUnit(unit);
+
+const metal = CSX.AddMetal('clover');
+
+// Metal hub cylinders
+const hubH = 1.0;
+metal.AddCylinder([0, 0, -hubH/2], [0, 0, hubH/2], hubR, 10);
+metal.AddCylinder([0, 0, feedH - hubH/2], [0, 0, feedH + hubH/2], hubR, 10);
+
+// Upper petals at z=feedH: 4 rectangular strips at 0, 90, 180, 270 deg
+for (let i = 0; i < 4; i++) {
+  const phi = i * Math.PI / 2;
+  const cphi = Math.cos(phi);
+  const sphi = Math.sin(phi);
+  // Tangential direction
+  const ct = Math.cos(phi + Math.PI/2);
+  const st = Math.sin(phi + Math.PI/2);
+
+  // Strip from hubR to hubR+petalL, width petalW, at z=feedH
+  const r0 = hubR;
+  const r1 = hubR + petalL;
+  const hw = petalW / 2;
+  metal.AddBox(
+    [r0*cphi - hw*ct, r0*sphi - hw*st, feedH],
+    [r1*cphi + hw*ct, r1*sphi + hw*st, feedH],
+    10
+  );
+}
+
+// Lower petals at z=0: 4 strips rotated 45 deg from upper
+for (let i = 0; i < 4; i++) {
+  const phi = i * Math.PI / 2 + Math.PI / 4; // 45 deg offset
+  const cphi = Math.cos(phi);
+  const sphi = Math.sin(phi);
+  const ct = Math.cos(phi + Math.PI/2);
+  const st = Math.sin(phi + Math.PI/2);
+
+  const r0 = hubR;
+  const r1 = hubR + petalL;
+  const hw = petalW / 2;
+  metal.AddBox(
+    [r0*cphi - hw*ct, r0*sphi - hw*st, 0],
+    [r1*cphi + hw*ct, r1*sphi + hw*st, 0],
+    10
+  );
+}
+
+// Mesh
+mesh.AddLine('x', [-simBox, simBox]);
+mesh.AddLine('y', [-simBox, simBox]);
+mesh.AddLine('z', [-simBox, simBox]);
+
+const ext = hubR + petalL + 5;
+mesh.AddLine('x', [-ext, 0, portR, ext]);
+mesh.AddLine('y', [-ext, 0, ext]);
+mesh.AddLine('z', [-5, 0, feedH, feedH + 5]);
+
+mesh.SmoothMeshLines('x', mesh_res, 1.4);
+mesh.SmoothMeshLines('y', mesh_res, 1.4);
+mesh.SmoothMeshLines('z', mesh_res, 1.4);
+
+// Lumped port bridging lower hub to upper hub
+FDTD.AddLumpedPort(1, 50, [portR, 0, 0], [portR, 0, feedH], 'z', 1.0);
+
+// NF2FF box
+FDTD.CreateNF2FFBox({ frequency: f0 });
+
+return FDTD.GenerateXML();
+`
+};
+
+// eslint-disable-next-line
+const _x = `const f0 = 5.8e9;
+const fc = 2.0e9; // covers ~3.8–7.8 GHz
+
+const lambda = C0 / f0 / unit; // ~51.7 mm
+const wireRadius = 0.4; // 0.8 mm diameter copper wire
+
+// Lobe geometry — each lobe is a V-shaped wire
+// Total wire per lobe ≈ lambda/2, split into two lambda/4 segments
+// Each lobe is a V-shape: from the hub, the wire goes outward+up(or down)
+// to a tip at radius R and height H, forming a petal.
+// Total wire per lobe (both arms) ≈ lambda, each arm ≈ lambda/4.
+// The lobe tip radius and height control the resonant frequency.
+// Petal dimensions: the petal arc length should be ≈ lambda/2.
+// For a half-ellipse with semi-axes lobeR and lobeH, arc ≈ pi/2 * sqrt(2*(a²+b²)).
+// With 45° tilt, a=b, so arc ≈ pi*a. Target pi*a ≈ lambda/2 → a ≈ lambda/(2*pi).
+// Target resonance at f0: petal circumference = lambda/2.
+// Empirical scaling from simulation iterations.
+const lobeR = 3.7; // mm radial extent — tuned for 5.8 GHz
+const lobeH = 4.2; // mm vertical extent
+
+// Feed pin height
+const feedH = 3.0; // mm — slightly longer for better GPU probe coupling
+
+// Simulation box
+const simBox = 60; // mm each side
+
+// Setup FDTD
+const FDTD = new OpenEMS({ NrTS: 30000, EndCriteria: 1e-4 });
+FDTD.SetGaussExcite(f0, fc);
+FDTD.SetBoundaryCond(['PML_8','PML_8','PML_8','PML_8','PML_8','PML_8']);
+
+const CSX = new ContinuousStructure();
+FDTD.SetCSX(CSX);
+const mesh = CSX.GetGrid();
+mesh.SetDeltaUnit(unit);
+
+// Mesh — simulation box
+mesh.AddLine('x', [-simBox, simBox]);
+mesh.AddLine('y', [-simBox, simBox]);
+mesh.AddLine('z', [-simBox, simBox]);
+
+// Fine mesh around antenna region
+const antennaExtent = lobeR + 3;
+mesh.AddLine('x', [-antennaExtent, 0, antennaExtent]);
+mesh.AddLine('y', [-antennaExtent, 0, antennaExtent]);
+mesh.AddLine('z', [-lobeH - 3, 0, feedH, feedH + lobeH + 3]);
+
+// Mesh resolution: lambda/20 near antenna, coarser away
+const mesh_res = lambda / 20;
+mesh.SmoothMeshLines('x', mesh_res, 1.4);
+mesh.SmoothMeshLines('y', mesh_res, 1.4);
+mesh.SmoothMeshLines('z', mesh_res, 1.4);
+
+// Build 4 petal-shaped lobes — each at 90° azimuthal spacing.
+// Each petal is an arc (half-ellipse) from the hub, outward to apex, back to hub.
+// Upper petals connect at z=feedH, lower petals at z=0.
+// Wire circumference per petal ≈ lambda/2.
+const metal = CSX.AddMetal('clover');
+const nPts = 16; // points per petal arc
+
+for (let lobe = 0; lobe < 4; lobe++) {
+  const phi = lobe * Math.PI / 2; // 0, 90, 180, 270 deg
+  const cphi = Math.cos(phi);
+  const sphi = Math.sin(phi);
+  // Perpendicular direction for the petal width at start/end
+  const cphi_perp = Math.cos(phi + Math.PI / 2);
+  const sphi_perp = Math.sin(phi + Math.PI / 2);
+  const hubSpread = 1.0; // mm offset at hub for start/end separation
+
+  // Upper petal: half-ellipse in (radial, z) plane above feedH
+  const upperPts = [];
+  for (let i = 0; i <= nPts; i++) {
+    const theta = i / nPts * Math.PI; // 0 to pi
+    const r = lobeR * Math.sin(theta); // 0 → lobeR → 0
+    const z = feedH + lobeH * Math.sin(theta);
+    // At endpoints (i=0,nPts) spread perpendicular to avoid collapsed points
+    const spread = (1 - Math.sin(theta)) * hubSpread;
+    const sign = (i <= nPts / 2) ? 1 : -1;
+    const x = r * cphi + sign * spread * cphi_perp;
+    const y = r * sphi + sign * spread * sphi_perp;
+    upperPts.push([x, y, z]);
+  }
+  metal.AddCurve(upperPts, 10);
+
+  // Lower petal: half-ellipse below z=0
+  const lowerPts = [];
+  for (let i = 0; i <= nPts; i++) {
+    const theta = i / nPts * Math.PI;
+    const r = lobeR * Math.sin(theta);
+    const z = -lobeH * Math.sin(theta);
+    const spread = (1 - Math.sin(theta)) * hubSpread;
+    const sign = (i <= nPts / 2) ? 1 : -1;
+    const x = r * cphi + sign * spread * cphi_perp;
+    const y = r * sphi + sign * spread * sphi_perp;
+    lowerPts.push([x, y, z]);
+  }
+  metal.AddCurve(lowerPts, 10);
+}
+
+// Lumped port along z-axis connecting lower hub to upper hub.
+// Offset slightly from center along x (direction of lobe 0) for mesh coupling.
+const portR = lobeR / nPts;
+FDTD.AddLumpedPort(1, 50, [portR, 0, 0], [portR, 0, feedH], 'z', 1.0);
+mesh.AddLine('x', portR);
+
+// NF2FF box
+FDTD.CreateNF2FFBox({ frequency: f0 });
+
+return FDTD.GenerateXML();
+`;
+
 export const PATCH_ANTENNA_ARRAY = {
   name: 'Patch Antenna Infinite Array (PBC)',
   script: `

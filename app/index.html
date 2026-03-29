@@ -331,6 +331,7 @@ button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
         <option value="helical">Helical Antenna</option>
         <option value="waveguide">Rect Waveguide</option>
         <option value="uwb_comb">UWB Comb Dipole</option>
+        <option value="cloverleaf">Cloverleaf 5.8 GHz</option>
         <option value="pbc_array">Patch Antenna Infinite Array (PBC)</option>
       </select>
     </div>
@@ -408,7 +409,7 @@ button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
 <div id="loading-overlay"><span>Loading WASM module...</span></div>
 
 <script type="module">
-import { PATCH_ANTENNA, MSL_NOTCH_FILTER, HELICAL_ANTENNA, RECT_WAVEGUIDE, UWB_COMB_DIPOLE, PATCH_ANTENNA_ARRAY } from '/app/examples.mjs';
+import { PATCH_ANTENNA, MSL_NOTCH_FILTER, HELICAL_ANTENNA, RECT_WAVEGUIDE, UWB_COMB_DIPOLE, CLOVERLEAF_ANTENNA, PATCH_ANTENNA_ARRAY } from '/app/examples.mjs';
 import { OpenEMS, ContinuousStructure } from '/app/ems-api.mjs';
 import { encodeConfig, decodeConfig, shareConfig, loadSharedConfig } from '/src/url-share.mjs';
 import { createViewer } from '/app/geometry-viewer.mjs';
@@ -509,6 +510,7 @@ const EXAMPLES = {
   helical: HELICAL_ANTENNA,
   waveguide: RECT_WAVEGUIDE,
   uwb_comb: UWB_COMB_DIPOLE,
+  cloverleaf: CLOVERLEAF_ANTENNA,
   pbc_array: PATCH_ANTENNA_ARRAY,
 };
 
