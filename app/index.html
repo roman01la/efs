@@ -1019,7 +1019,9 @@ function tryPlotSParams(probes, simFMax) {
   const Uf = dft(ut.time, ut.values, freq);
   const If = dft(it.time, it.values, freq);
 
-  const Z0 = 50;
+  // Extract port reference impedance from XML (LumpedElement R attribute)
+  const rMatch = generatedXml.match(/<LumpedElement[^>]*R="([^"]+)"/);
+  const Z0 = rMatch ? parseFloat(rMatch[1]) : 50;
   const s11_dB = new Float64Array(nf);
   const z_re = new Float64Array(nf);
   const z_im = new Float64Array(nf);
@@ -1053,7 +1055,7 @@ function tryPlotSParams(probes, simFMax) {
   }
 
   plotSVG(document.getElementById('plot-sparam'), {
-    title: 'S11 (Return Loss)',
+    title: Z0 !== 50 ? `S11 (Return Loss, Z\u2080=${Z0}\u2126)` : 'S11 (Return Loss)',
     xLabel: 'Frequency (GHz)',
     yLabel: 'S11 (dB)',
     lines: [{ x: freqGHz, y: s11Arr, label: 'S11', color: '#818cf8' }],
@@ -1062,24 +1064,24 @@ function tryPlotSParams(probes, simFMax) {
   });
 
   logConsole('S-parameter plot updated.');
-  window._lastZdata = { freqGHz, z_re, z_im };
+  window._lastZdata = { freqGHz, z_re, z_im, Z0 };
 }
 
 function tryPlotImpedance(probes) {
   setTimeout(() => {
     if (!window._lastZdata) return;
-    const { freqGHz, z_re, z_im } = window._lastZdata;
+    const { freqGHz, z_re, z_im, Z0 = 50 } = window._lastZdata;
     const zReArr = Array.from(z_re), zImArr = Array.from(z_im);
 
-    // Find frequency where Z is closest to 50+j0 (minimize |Z - 50|)
+    // Find frequency where Z is closest to Z0+j0 (minimize |Z - Z0|)
     // Only consider points where Re(Z) > 5 ohm (antenna is radiating)
     let bestZIdx = -1, bestZDist = Infinity;
     for (let i = 1; i < freqGHz.length; i++) {
       if (zReArr[i] < 5) continue;
-      const d = Math.sqrt((zReArr[i] - 50) ** 2 + zImArr[i] ** 2);
+      const d = Math.sqrt((zReArr[i] - Z0) ** 2 + zImArr[i] ** 2);
       if (d < bestZDist && isFinite(d)) { bestZDist = d; bestZIdx = i; }
     }
-    const zMarkers = bestZIdx > 0 && bestZDist < 200 ? [{
+    const zMarkers = bestZIdx > 0 && bestZDist < Z0 * 4 ? [{
       x: freqGHz[bestZIdx], y: zReArr[bestZIdx],
       label: `${freqGHz[bestZIdx].toFixed(2)} GHz, ${zReArr[bestZIdx].toFixed(0)}+j${zImArr[bestZIdx].toFixed(0)}\u2126`,
       color: '#34d399',
@@ -1093,7 +1095,7 @@ function tryPlotImpedance(probes) {
         { x: freqGHz, y: zReArr, label: 'Re(Z)', color: '#818cf8' },
         { x: freqGHz, y: zImArr, label: 'Im(Z)', color: '#f87171' },
       ],
-      refLines: [{ value: 50, label: '50\u2126', color: '#55556a' }],
+      refLines: [{ value: Z0, label: `${Z0}\u2126`, color: '#55556a' }],
       markers: zMarkers,
     });
     logConsole('Impedance plot updated.');
