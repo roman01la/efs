@@ -973,11 +973,12 @@ async function runSimulation(xml) {
     try {
       const pointMeta = buildNF2FFPointMetadata(gpuNF2FFConfig.faceSlices, gpuNF2FFConfig.faceMeshes);
 
-      // Build theta/phi arrays (same 3D grid as before)
+      // Build theta/phi arrays for 3D radiation pattern
+      const thetaStep3d = 2, phiStep3d = 2;
       const thetaRad3d = [];
       const phiRad3d = [];
-      for (let t = 0; t <= 180; t += 3) thetaRad3d.push(t * Math.PI / 180);
-      for (let p = 0; p <= 360; p += 5) phiRad3d.push(p * Math.PI / 180);
+      for (let t = 0; t <= 180; t += thetaStep3d) thetaRad3d.push(t * Math.PI / 180);
+      for (let p = 0; p <= 360; p += phiStep3d) phiRad3d.push(p * Math.PI / 180);
 
       const gpuFarFieldResult = await gpuEngine.computeNF2FFfarField({
         pointMeta,
@@ -1018,7 +1019,7 @@ async function runSimulation(xml) {
 
       // Extract 2D cuts (phi=0 xz-plane, phi=90 yz-plane) for the 2D plot
       const phi0Idx = 0;
-      const phi90Idx = Math.round(90 / 5); // index for phi=90deg
+      const phi90Idx = Math.round(90 / phiStep3d); // index for phi=90deg
       const thetaDeg2d = [];
       for (let t = -180; t < 180; t += 2) thetaDeg2d.push(t);
       const xzPattern = [], yzPattern = [];
@@ -1026,11 +1027,11 @@ async function runSimulation(xml) {
       for (const v of E_norm) if (v > maxE) maxE = v;
       for (const tDeg of thetaDeg2d) {
         const tAbs = Math.abs(tDeg);
-        const tFrac = tAbs / 3; // fractional index into 3° grid
+        const tFrac = tAbs / thetaStep3d; // fractional index into theta grid
         const tIdx0 = Math.min(Math.floor(tFrac), nTheta3d - 1);
         const tIdx1 = Math.min(tIdx0 + 1, nTheta3d - 1);
         const frac = tFrac - tIdx0; // interpolation weight
-        const phiOff = tDeg < 0 ? Math.round(180 / 5) : 0; // opposite hemisphere
+        const phiOff = tDeg < 0 ? Math.round(180 / phiStep3d) : 0; // opposite hemisphere
         const xzP0 = phi0Idx + phiOff, xzP1 = xzP0;
         const yzP0 = phi90Idx + phiOff, yzP1 = yzP0;
         const xzE = E_norm[tIdx0 * nPhi3d + (xzP0 % nPhi3d)] * (1 - frac) + E_norm[tIdx1 * nPhi3d + (xzP1 % nPhi3d)] * frac;
