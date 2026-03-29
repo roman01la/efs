@@ -784,6 +784,8 @@ async function runSimulation(xml) {
         primalEdgeLens.push(el);
         dualEdgeLens.push(del);
       }
+      const nf2ffMaxTS = ems.getMaxTimesteps();
+      const nf2ffWindowType = config.pbcAxes.length > 0 ? 1 : 0;
       gpuEngine.configureNF2FFAccumulation({
         surfaceIndices: surfInfo.surfaceIndices,
         numPoints: surfInfo.numPoints,
@@ -792,6 +794,8 @@ async function runSimulation(xml) {
         gridSize: config.gridSize,
         primalEdgeLens,
         dualEdgeLens,
+        maxTS: nf2ffMaxTS,
+        windowType: nf2ffWindowType,
       });
       gpuNF2FFConfig = {
         frequency: nf2ffXMLConfig.frequency,

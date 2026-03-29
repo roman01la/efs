@@ -651,8 +651,12 @@ struct NF2FFParams {
     _pad0: u32,
     omega: f32,
     dT: f32,
+    maxTS: u32,
+    windowType: u32,
+    windowNorm: f32,
     _pad1: f32,
     _pad2: f32,
+    _pad3: f32,
 };
 
 @group(0) @binding(0) var<storage, read> volt: array<f32>;
@@ -760,6 +764,15 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let dT = nf2ffParams.dT;
     let ts = f32(nf2ffParams.numTS);
 
+    // Windowed DFT: apply window function to suppress spectral leakage (e.g. PBC)
+    var window_w: f32 = 1.0;
+    if (nf2ffParams.windowType == 1u && nf2ffParams.maxTS > 1u) {
+        let n_f = f32(nf2ffParams.numTS);
+        let N_f = f32(nf2ffParams.maxTS - 1u);
+        window_w = 0.5 * (1.0 - cos(2.0 * 3.14159265358979 * n_f / N_f));
+    }
+    let wdT = window_w * nf2ffParams.windowNorm * dT;
+
     // E at numTS * dT, H at (numTS + 0.5) * dT
     let phase_e = omega * ts * dT;
     let cos_e = cos(phase_e);
@@ -769,20 +782,20 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let sin_h = sin(phase_h);
 
     let base_e = pid * 6u;
-    accumE[base_e + 0u] += Ex * cos_e * dT;
-    accumE[base_e + 1u] += Ex * (-sin_e) * dT;
-    accumE[base_e + 2u] += Ey * cos_e * dT;
-    accumE[base_e + 3u] += Ey * (-sin_e) * dT;
-    accumE[base_e + 4u] += Ez * cos_e * dT;
-    accumE[base_e + 5u] += Ez * (-sin_e) * dT;
+    accumE[base_e + 0u] += Ex * cos_e * wdT;
+    accumE[base_e + 1u] += Ex * (-sin_e) * wdT;
+    accumE[base_e + 2u] += Ey * cos_e * wdT;
+    accumE[base_e + 3u] += Ey * (-sin_e) * wdT;
+    accumE[base_e + 4u] += Ez * cos_e * wdT;
+    accumE[base_e + 5u] += Ez * (-sin_e) * wdT;
 
     let base_h = pid * 6u;
-    accumH[base_h + 0u] += Hx * cos_h * dT;
-    accumH[base_h + 1u] += Hx * (-sin_h) * dT;
-    accumH[base_h + 2u] += Hy * cos_h * dT;
-    accumH[base_h + 3u] += Hy * (-sin_h) * dT;
-    accumH[base_h + 4u] += Hz * cos_h * dT;
-    accumH[base_h + 5u] += Hz * (-sin_h) * dT;
+    accumH[base_h + 0u] += Hx * cos_h * wdT;
+    accumH[base_h + 1u] += Hx * (-sin_h) * wdT;
+    accumH[base_h + 2u] += Hy * cos_h * wdT;
+    accumH[base_h + 3u] += Hy * (-sin_h) * wdT;
+    accumH[base_h + 4u] += Hz * cos_h * wdT;
+    accumH[base_h + 5u] += Hz * (-sin_h) * wdT;
 }
 `;
 
@@ -2714,7 +2727,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
      * @param {number[]} config.gridSize - [Nx, Ny, Nz]
      */
     configureNF2FFAccumulation(config) {
-        const { surfaceIndices, numPoints, omega, dT, gridSize, primalEdgeLens, dualEdgeLens } = config;
+        const { surfaceIndices, numPoints, omega, dT, gridSize, primalEdgeLens, dualEdgeLens,
+                maxTS = 0, windowType = 0 } = config;
         if (numPoints === 0) return;
 
         this._nf2ffNumPoints = numPoints;
@@ -2747,13 +2761,25 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         for (let i = 0; i < 3; i++) { edgeLenData.set(dualEdgeLens[i], elOff); elOff += dualEdgeLens[i].length; }
         this._nf2ffEdgeLenBuffer = this._createAndUploadBuffer(edgeLenData, GPUBufferUsage.STORAGE);
 
-        // Params buffer: NF2FFParams struct (64 bytes)
+        // Compute window normalization factor
+        let windowNorm = 1.0;
+        if (windowType === 1 && maxTS > 1) {
+            let sum = 0;
+            for (let n = 0; n < maxTS; n++) {
+                sum += 0.5 * (1 - Math.cos(2 * Math.PI * n / (maxTS - 1)));
+            }
+            windowNorm = 1.0 / sum;
+        }
+        this._nf2ffMaxTS = maxTS;
+        this._nf2ffWindowType = windowType;
+
+        // Params buffer: NF2FFParams struct (80 bytes, 16-byte aligned)
         this._nf2ffParamsBuffer = this.device.createBuffer({
-            size: 64,
+            size: 80,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
 
-        const paramsData = new ArrayBuffer(64);
+        const paramsData = new ArrayBuffer(80);
         const u32 = new Uint32Array(paramsData);
         const f32 = new Float32Array(paramsData);
         u32[0] = 0;                // numTS (updated each step)
@@ -2770,8 +2796,12 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         u32[11] = 0;               // _pad0
         f32[12] = omega;
         f32[13] = dT;
-        f32[14] = 0;               // _pad1
-        f32[15] = 0;               // _pad2
+        u32[14] = maxTS;           // maxTS
+        u32[15] = windowType;      // windowType
+        f32[16] = windowNorm;      // windowNorm
+        f32[17] = 0;               // _pad1
+        f32[18] = 0;               // _pad2
+        f32[19] = 0;               // _pad3
         this.device.queue.writeBuffer(this._nf2ffParamsBuffer, 0, paramsData);
 
         // Create pipeline

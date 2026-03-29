@@ -454,9 +454,8 @@ mesh.SmoothMeshLines('x', mesh_res, 1.4);
 mesh.SmoothMeshLines('y', mesh_res, 1.4);
 mesh.SmoothMeshLines('z', mesh_res, 1.4);
 
-// add feed snap lines AFTER smoothing so they're preserved exactly
+// add feed x snap line AFTER smoothing so it's preserved exactly
 mesh.AddLine('x', cx);
-mesh.AddLine('y', cy + feedY);
 
 // ground plane — covers full unit cell (tiles infinitely via PBC)
 const ground = CSX.AddMetal('ground');
@@ -473,9 +472,8 @@ patch.AddBox([cx - hpw, cy - hpl, subH], [cx + hpw, cy + hpl, subH], 10);
 // lumped port feed (from ground to patch)
 FDTD.AddLumpedPort(1, feedR, [cx, cy + feedY, 0], [cx, cy + feedY, subH], 'z', 1.0);
 
-// No NF2FF for PBC — unit cell S-parameters and impedance are the
-// meaningful outputs. Far-field array pattern is computed analytically
-// from S11 and array factor.
+// No NF2FF for this PBC example — S-parameters and impedance are the
+// meaningful outputs for unit cell array analysis.
 
 return FDTD.GenerateXML();
 `
