@@ -1072,12 +1072,14 @@ function tryPlotImpedance(probes) {
     const zReArr = Array.from(z_re), zImArr = Array.from(z_im);
 
     // Find frequency where Z is closest to 50+j0 (minimize |Z - 50|)
-    let bestZIdx = 1, bestZDist = Infinity;
+    // Only consider points where Re(Z) > 5 ohm (antenna is radiating)
+    let bestZIdx = -1, bestZDist = Infinity;
     for (let i = 1; i < freqGHz.length; i++) {
+      if (zReArr[i] < 5) continue;
       const d = Math.sqrt((zReArr[i] - 50) ** 2 + zImArr[i] ** 2);
       if (d < bestZDist && isFinite(d)) { bestZDist = d; bestZIdx = i; }
     }
-    const zMarkers = bestZDist < 200 ? [{
+    const zMarkers = bestZIdx > 0 && bestZDist < 200 ? [{
       x: freqGHz[bestZIdx], y: zReArr[bestZIdx],
       label: `${freqGHz[bestZIdx].toFixed(2)} GHz, ${zReArr[bestZIdx].toFixed(0)}+j${zImArr[bestZIdx].toFixed(0)}\u2126`,
       color: '#34d399',
