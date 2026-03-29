@@ -613,20 +613,35 @@ class OpenEMS {
     if (minLen < 7) return;
     const inset = Math.min(3, Math.floor((minLen - 1) / 2));
 
-    const xMin = xLines[inset], xMax = xLines[xLines.length - 1 - inset];
-    const yMin = yLines[inset], yMax = yLines[yLines.length - 1 - inset];
-    const zMin = zLines[inset], zMax = zLines[zLines.length - 1 - inset];
+    // Skip NF2FF faces on PBC axes — periodic faces have cancelling contributions.
+    // For PBC axes, use full unit cell extent (no inset) on the remaining faces.
+    const bc = this._bc || [];
+    const xPBC = bc[0] === 'PBC' && bc[1] === 'PBC';
+    const yPBC = bc[2] === 'PBC' && bc[3] === 'PBC';
+    const zPBC = bc[4] === 'PBC' && bc[5] === 'PBC';
+
+    const xMin = xPBC ? xLines[0] : xLines[inset];
+    const xMax = xPBC ? xLines[xLines.length - 1] : xLines[xLines.length - 1 - inset];
+    const yMin = yPBC ? yLines[0] : yLines[inset];
+    const yMax = yPBC ? yLines[yLines.length - 1] : yLines[yLines.length - 1 - inset];
+    const zMin = zPBC ? zLines[0] : zLines[inset];
+    const zMax = zPBC ? zLines[zLines.length - 1] : zLines[zLines.length - 1 - inset];
 
     const fdSamples = this._nf2ff.frequency != null ? fmtNum(this._nf2ff.frequency) : null;
 
-    const faces = [
-      { name: 'xn', start: [xMin, yMin, zMin], stop: [xMin, yMax, zMax] },
-      { name: 'xp', start: [xMax, yMin, zMin], stop: [xMax, yMax, zMax] },
-      { name: 'yn', start: [xMin, yMin, zMin], stop: [xMax, yMin, zMax] },
-      { name: 'yp', start: [xMin, yMax, zMin], stop: [xMax, yMax, zMax] },
-      { name: 'zn', start: [xMin, yMin, zMin], stop: [xMax, yMax, zMin] },
-      { name: 'zp', start: [xMin, yMin, zMax], stop: [xMax, yMax, zMax] },
-    ];
+    const faces = [];
+    if (!xPBC) {
+      faces.push({ name: 'xn', start: [xMin, yMin, zMin], stop: [xMin, yMax, zMax] });
+      faces.push({ name: 'xp', start: [xMax, yMin, zMin], stop: [xMax, yMax, zMax] });
+    }
+    if (!yPBC) {
+      faces.push({ name: 'yn', start: [xMin, yMin, zMin], stop: [xMax, yMin, zMax] });
+      faces.push({ name: 'yp', start: [xMin, yMax, zMin], stop: [xMax, yMax, zMax] });
+    }
+    if (!zPBC) {
+      faces.push({ name: 'zn', start: [xMin, yMin, zMin], stop: [xMax, yMax, zMin] });
+      faces.push({ name: 'zp', start: [xMin, yMin, zMax], stop: [xMax, yMax, zMax] });
+    }
 
     for (const field of ['E', 'H']) {
       const dumpType = field === 'E' ? 10 : 11;

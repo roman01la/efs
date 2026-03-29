@@ -420,7 +420,7 @@ const hpw = patchW / 2;
 const hpl = patchL / 2;
 
 // setup FDTD
-const FDTD = new OpenEMS({ NrTS: 30000, EndCriteria: 1e-4 });
+const FDTD = new OpenEMS({ NrTS: 50000, EndCriteria: 1e-4 });
 FDTD.SetGaussExcite(f0, fc);
 // PBC in X/Y (periodic array), PML in ±Z (radiation/absorption)
 FDTD.SetBoundaryCond(['PBC', 'PBC', 'PBC', 'PBC', 'PML_8', 'PML_8']);
@@ -473,8 +473,9 @@ patch.AddBox([cx - hpw, cy - hpl, subH], [cx + hpw, cy + hpl, subH], 10);
 // lumped port feed (from ground to patch)
 FDTD.AddLumpedPort(1, feedR, [cx, cy + feedY, 0], [cx, cy + feedY, subH], 'z', 1.0);
 
-// NF2FF box for far-field pattern
-FDTD.CreateNF2FFBox({ frequency: f0 });
+// No NF2FF for PBC — unit cell S-parameters and impedance are the
+// meaningful outputs. Far-field array pattern is computed analytically
+// from S11 and array factor.
 
 return FDTD.GenerateXML();
 `
