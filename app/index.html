@@ -330,6 +330,7 @@ button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
         <option value="msl">MSL Notch Filter</option>
         <option value="helical">Helical Antenna</option>
         <option value="waveguide">Rect Waveguide</option>
+        <option value="pbc_array">Patch Antenna Infinite Array (PBC)</option>
       </select>
     </div>
     <div class="panel-body">
@@ -388,7 +389,7 @@ button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
 <div id="loading-overlay"><span>Loading WASM module...</span></div>
 
 <script type="module">
-import { PATCH_ANTENNA, MSL_NOTCH_FILTER, HELICAL_ANTENNA, RECT_WAVEGUIDE } from '/app/examples.mjs';
+import { PATCH_ANTENNA, MSL_NOTCH_FILTER, HELICAL_ANTENNA, RECT_WAVEGUIDE, PATCH_ANTENNA_ARRAY } from '/app/examples.mjs';
 import { OpenEMS, ContinuousStructure } from '/app/ems-api.mjs';
 import { encodeConfig, decodeConfig, shareConfig, loadSharedConfig } from '/src/url-share.mjs';
 import { createViewer } from '/app/geometry-viewer.mjs';
@@ -486,6 +487,7 @@ const EXAMPLES = {
   msl: MSL_NOTCH_FILTER,
   helical: HELICAL_ANTENNA,
   waveguide: RECT_WAVEGUIDE,
+  pbc_array: PATCH_ANTENNA_ARRAY,
 };
 
 let viewerDirty = true;

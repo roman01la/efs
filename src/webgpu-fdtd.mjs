@@ -1323,6 +1323,16 @@ export class WebGPUFDTD {
     }
 
     /**
+     * Configure periodic boundary conditions.
+     */
+    configurePBC(config) {
+        if (this._useGPU) {
+            this._gpuEngine.configurePBC(config);
+        }
+        // CPU engine does not currently support PBC
+    }
+
+    /**
      * Configure steady-state detection.
      */
     configureSteadyState(config) {

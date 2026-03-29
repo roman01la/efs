@@ -24,6 +24,7 @@ function bcToXML(bc) {
   if (bc === 'PEC') return '0';
   if (bc === 'PMC') return '1';
   if (bc === 'MUR') return '2';
+  if (bc === 'PBC') return '-1';
   if (typeof bc === 'string' && bc.startsWith('PML_')) {
     return '3';
   }
@@ -65,6 +66,9 @@ export class Simulation {
     /** @type {BoundaryType[]} */
     this._boundary = ['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC'];
 
+    /** @type {{x: number, y: number, z: number}} Bloch phase shift [rad] per axis */
+    this._blochPhase = { x: 0, y: 0, z: 0 };
+
     /** @type {import('./ports.mjs').Port[]} */
     this._ports = [];
 
@@ -87,7 +91,26 @@ export class Simulation {
    */
   setBoundaryConditions(bc) {
     if (bc.length !== 6) throw new Error('BoundaryConditions must have 6 elements');
+    // Validate PBC: must be paired on same axis
+    const axisNames = ['x', 'y', 'z'];
+    for (let a = 0; a < 3; a++) {
+      const lo = bc[a * 2];
+      const hi = bc[a * 2 + 1];
+      if ((lo === 'PBC') !== (hi === 'PBC')) {
+        throw new Error(`PBC must be set on both ${axisNames[a]}min and ${axisNames[a]}max`);
+      }
+    }
     this._boundary = bc;
+  }
+
+  /**
+   * Set Bloch/Floquet phase shift for periodic boundary conditions.
+   * @param {{x?: number, y?: number, z?: number}} phase - phase shift [rad] per axis
+   */
+  setBlochPhaseShift(phase) {
+    if (phase.x !== undefined) this._blochPhase.x = phase.x;
+    if (phase.y !== undefined) this._blochPhase.y = phase.y;
+    if (phase.z !== undefined) this._blochPhase.z = phase.z;
   }
 
   /**
@@ -423,6 +446,10 @@ export class Simulation {
         `PML_zmin="${pmlSizes[4]}"`, `PML_zmax="${pmlSizes[5]}"`
       );
     }
+    // Bloch phase shift for periodic boundaries
+    if (this._blochPhase.x !== 0) bcAttrs.push(`BlochPhase_x="${this._blochPhase.x}"`);
+    if (this._blochPhase.y !== 0) bcAttrs.push(`BlochPhase_y="${this._blochPhase.y}"`);
+    if (this._blochPhase.z !== 0) bcAttrs.push(`BlochPhase_z="${this._blochPhase.z}"`);
     lines.push(`    <BoundaryCond ${bcAttrs.join(' ')}/>`);
     lines.push(`  </FDTD>`);
 
@@ -529,11 +556,14 @@ export class Simulation {
       else if (e.type === 'custom') lines.push(`    <Excitation Type="10" f0="${e.f0}" fc="${e.fmax}" Function="${e.func}"/>`);
     }
     const bc = this._boundary;
-    const n = (b) => b === 'PEC' ? '0' : b === 'PMC' ? '1' : b === 'MUR' ? '2' : (typeof b === 'string' && b.startsWith('PML_')) ? '3' : '0';
+    const n = (b) => b === 'PBC' ? '-1' : b === 'PEC' ? '0' : b === 'PMC' ? '1' : b === 'MUR' ? '2' : (typeof b === 'string' && b.startsWith('PML_')) ? '3' : '0';
     const p = (b) => (typeof b === 'string' && b.startsWith('PML_')) ? parseInt(b.slice(4), 10) || 8 : 0;
     const ba = [`xmin="${n(bc[0])}"`,`xmax="${n(bc[1])}"`,`ymin="${n(bc[2])}"`,`ymax="${n(bc[3])}"`,`zmin="${n(bc[4])}"`,`zmax="${n(bc[5])}"`];
     if (bc.some(b => typeof b === 'string' && b.startsWith('PML_')))
       ba.push(`PML_xmin="${p(bc[0])}"`,`PML_xmax="${p(bc[1])}"`,`PML_ymin="${p(bc[2])}"`,`PML_ymax="${p(bc[3])}"`,`PML_zmin="${p(bc[4])}"`,`PML_zmax="${p(bc[5])}"`);
+    if (this._blochPhase.x !== 0) ba.push(`BlochPhase_x="${this._blochPhase.x}"`);
+    if (this._blochPhase.y !== 0) ba.push(`BlochPhase_y="${this._blochPhase.y}"`);
+    if (this._blochPhase.z !== 0) ba.push(`BlochPhase_z="${this._blochPhase.z}"`);
     lines.push(`    <BoundaryCond ${ba.join(' ')}/>`);
     lines.push('  </FDTD>', '</openEMS>');
     return lines.join('\n');

@@ -369,3 +369,113 @@ iProbe2.AddBox([port2X, 0, 0], [port2X, wgW, wgH], 0);
 return FDTD.GenerateXML();
 `
 };
+
+/**
+ * Patch Antenna Infinite Array (PBC) example.
+ *
+ * Single unit cell of an infinite rectangular patch antenna array.
+ * PBC (Periodic Boundary Conditions) in X and Y simulate an infinite
+ * planar array. PML in ±Z allows radiation.
+ * Patch on substrate (epsilon_r = 3.38, 1.524 mm thick) over ground plane.
+ * Element spacing ~0.6λ at 2.4 GHz (75 mm). Lumped port feed, 50 Ohm.
+ * Gaussian excitation 1-3.8 GHz, 30000 timesteps, end criteria 1e-4.
+ */
+export const PATCH_ANTENNA_ARRAY = {
+  name: 'Patch Antenna Infinite Array (PBC)',
+  script: `
+// Patch Antenna Infinite Array — one unit cell with PBC in X/Y
+const unit = 1e-3; // all lengths in mm
+const C0 = 299792458;
+const EPS0 = 8.854187817e-12;
+const f0 = 2.4e9;  // center frequency
+const fc = 1.4e9;  // 20dB corner frequency (covers 1-3.8 GHz)
+
+// substrate
+const epsR = 3.38;
+const kappa = 1e-3 * 2 * Math.PI * 2.45e9 * EPS0 * epsR;
+const subH = 1.524;
+
+// patch dimensions (tuned for ~2.4 GHz on this substrate)
+const patchW = 32;  // mm (radiating edge, along x)
+const patchL = 26;  // mm (resonant length, along y)
+
+// unit cell / element spacing (~0.6λ at 2.4 GHz = 75 mm)
+const lambda0 = C0 / f0 / unit; // free-space wavelength in mm
+const cellX = 75;  // element spacing in x
+const cellY = 75;  // element spacing in y
+
+// feed position (offset from center in y)
+const feedY = -4;
+const feedR = 50; // ohm
+
+// simulation box height (PML in ±Z)
+const simZmin = -30;
+const simZmax = 40;
+
+// mesh resolution: lambda/20 at highest frequency
+const mesh_res = C0 / (f0 + fc) / unit / 20;
+
+// derived
+const hpw = patchW / 2;
+const hpl = patchL / 2;
+
+// setup FDTD
+const FDTD = new OpenEMS({ NrTS: 30000, EndCriteria: 1e-4 });
+FDTD.SetGaussExcite(f0, fc);
+// PBC in X/Y (periodic array), PML in ±Z (radiation/absorption)
+FDTD.SetBoundaryCond(['PBC', 'PBC', 'PBC', 'PBC', 'PML_8', 'PML_8']);
+
+const CSX = new ContinuousStructure();
+FDTD.SetCSX(CSX);
+
+const mesh = CSX.GetGrid();
+mesh.SetDeltaUnit(unit);
+
+// mesh — unit cell extents (0 to cellX, 0 to cellY)
+// PBC requires mesh from 0 to period in periodic directions
+mesh.AddLine('x', [0, cellX]);
+mesh.AddLine('y', [0, cellY]);
+mesh.AddLine('z', [simZmin, simZmax]);
+
+// patch edges (centered in unit cell)
+const cx = cellX / 2;
+const cy = cellY / 2;
+mesh.AddLine('x', [cx - hpw, cx + hpw]);
+mesh.AddLine('y', [cy - hpl, cy + hpl]);
+
+// substrate z-lines
+for (let i = 0; i <= 4; i++) mesh.AddLine('z', subH * i / 4);
+
+// feed position
+mesh.AddLine('y', [cy + feedY]);
+
+// smooth all directions to target resolution
+mesh.SmoothMeshLines('x', mesh_res, 1.4);
+mesh.SmoothMeshLines('y', mesh_res, 1.4);
+mesh.SmoothMeshLines('z', mesh_res, 1.4);
+
+// add feed snap lines AFTER smoothing so they're preserved exactly
+mesh.AddLine('x', cx);
+mesh.AddLine('y', cy + feedY);
+
+// ground plane — covers full unit cell (tiles infinitely via PBC)
+const ground = CSX.AddMetal('ground');
+ground.AddBox([0, 0, 0], [cellX, cellY, 0], 10);
+
+// substrate — fills full unit cell (tiles infinitely via PBC)
+const substrate = CSX.AddMaterial('substrate', { Epsilon: epsR, Kappa: kappa });
+substrate.AddBox([0, 0, 0], [cellX, cellY, subH], 5);
+
+// patch — centered in unit cell
+const patch = CSX.AddMetal('patch');
+patch.AddBox([cx - hpw, cy - hpl, subH], [cx + hpw, cy + hpl, subH], 10);
+
+// lumped port feed (from ground to patch)
+FDTD.AddLumpedPort(1, feedR, [cx, cy + feedY, 0], [cx, cy + feedY, subH], 'z', 1.0);
+
+// NF2FF box for far-field pattern
+FDTD.CreateNF2FFBox({ frequency: f0 });
+
+return FDTD.GenerateXML();
+`
+};

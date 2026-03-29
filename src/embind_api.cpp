@@ -96,6 +96,12 @@ public:
     int getNormDir() const { return m_normDir; }
 };
 
+// Accessor for protected boundary condition fields on Operator_Base.
+class OperatorBase_Accessor : public Operator_Base {
+public:
+    const int* getBC() const { return m_BC; }
+};
+
 static std::atomic<int> g_xmlPathCounter{0};
 
 class OpenEMSWrapper {
@@ -206,6 +212,19 @@ public:
             op->GetNumberOfLines(1),
             op->GetNumberOfLines(2)
         };
+    }
+
+    /**
+     * Get the 6 boundary condition type values from the operator.
+     * Returns [xmin, xmax, ymin, ymax, zmin, zmax] as signed ints cast to int.
+     * PEC=0, PMC=1, MUR=2, PML=3, PBC=-1.
+     */
+    std::vector<int> getBoundaryConditions() {
+        Operator* op = getOperator();
+        if (!op) return {};
+        auto* acc = reinterpret_cast<OperatorBase_Accessor*>(op);
+        const int* bc = acc->getBC();
+        return { bc[0], bc[1], bc[2], bc[3], bc[4], bc[5] };
     }
 
     std::vector<float> getVV() {
@@ -1008,6 +1027,7 @@ private:
 EMSCRIPTEN_BINDINGS(openems) {
     register_vector<std::string>("VectorString");
     register_vector<float>("VectorFloat");
+    register_vector<int>("VectorInt");
     register_vector<unsigned int>("VectorUInt");
 
     class_<OpenEMSWrapper>("OpenEMS")
@@ -1021,6 +1041,7 @@ EMSCRIPTEN_BINDINGS(openems) {
         .function("readFile", &OpenEMSWrapper::readFile)
         .function("listFiles", &OpenEMSWrapper::listFiles)
         .function("getGridSize", &OpenEMSWrapper::getGridSize)
+        .function("getBoundaryConditions", &OpenEMSWrapper::getBoundaryConditions)
         .function("getVV", &OpenEMSWrapper::getVV)
         .function("getVI", &OpenEMSWrapper::getVI)
         .function("getII", &OpenEMSWrapper::getII)

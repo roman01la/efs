@@ -1,5 +1,5 @@
 const DIR_MAP = { x: 0, y: 1, z: 2 };
-const BC_MAP = { PEC: 0, PMC: 1, MUR: 2 };
+const BC_MAP = { PEC: 0, PMC: 1, MUR: 2, PBC: -1 };
 
 const escapeXml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const fmtNum = (v) => {
@@ -449,6 +449,7 @@ class OpenEMS {
     this._f0 = 0;
     this._fc = 0;
     this._bc = null;
+    this._blochPhase = { x: 0, y: 0, z: 0 };
     this._csx = null;
     this._ports = [];
     this._nf2ff = null;
@@ -461,6 +462,16 @@ class OpenEMS {
 
   SetBoundaryCond(conds) {
     this._bc = conds;
+  }
+
+  /**
+   * Set Bloch/Floquet phase shift for periodic boundary conditions.
+   * @param {{x?: number, y?: number, z?: number}} phase - phase shift [rad] per axis
+   */
+  SetBlochPhaseShift(phase) {
+    if (phase.x !== undefined) this._blochPhase.x = phase.x;
+    if (phase.y !== undefined) this._blochPhase.y = phase.y;
+    if (phase.z !== undefined) this._blochPhase.z = phase.z;
   }
 
   SetCSX(csx) {
@@ -553,8 +564,13 @@ class OpenEMS {
           bcAttrs.push(`${dirs[i]}="${BC_MAP[cond] ?? 0}"`);
         }
       }
+      const blochAttrs = [];
+      if (this._blochPhase.x !== 0) blochAttrs.push(`BlochPhase_x="${this._blochPhase.x}"`);
+      if (this._blochPhase.y !== 0) blochAttrs.push(`BlochPhase_y="${this._blochPhase.y}"`);
+      if (this._blochPhase.z !== 0) blochAttrs.push(`BlochPhase_z="${this._blochPhase.z}"`);
       xml += `    <BoundaryCond ${bcAttrs.join(' ')}`;
       if (pmlAttrs.length > 0) xml += `\n                  ${pmlAttrs.join(' ')}`;
+      if (blochAttrs.length > 0) xml += `\n                  ${blochAttrs.join(' ')}`;
       xml += `/>\n`;
     }
 

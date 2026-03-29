@@ -1,6 +1,6 @@
 # Project Status — openEMS Web Port
 
-**Last updated:** 2026-03-28
+**Last updated:** 2026-03-29
 
 ## Overview
 
@@ -69,7 +69,29 @@ Engine equivalence: basic vs SSE vs SSE-compressed = **bit-identical** (enforced
 MT vs basic energy: ratio = **1.000000**.
 GPU vs CPU: max diff **2.4e-7** (f32 precision limit).
 
-## Recent Changes (2026-03-28)
+## Recent Changes (2026-03-29)
+
+### Periodic Boundary Conditions (PBC) with Bloch Phase Support
+
+- **Basic PBC**: Post-update GPU copy kernel copies tangential E/H fields between
+  first and last boundary planes of each periodic axis. Matches native openEMS
+  `engine_ext_cylinder.cpp` copy direction and face indexing.
+- **Bloch/Floquet PBC**: Optional complex phase rotation `exp(j*phi)` at boundaries
+  using small 2D auxiliary buffers for imaginary projection. Zero overhead when
+  phase=0 (no aux buffers allocated). Enables oblique incidence on periodic structures.
+- **New WGSL shader**: `src/shaders/pbc_copy.wgsl` — unified copy + rotation kernel
+  with per-axis `imagOffset` for multi-axis Bloch and `solverBound` for correct
+  current loop bounds.
+- **C++ accessor**: `getBoundaryConditions()` reads `m_BC[6]` from operator via
+  `OperatorBase_Accessor` to detect BC=-1 (periodic) axes at runtime.
+- **Validation**: PBC must be paired on both sides of axis; PBC+PML/MUR on same
+  axis is rejected.
+- **New example**: "Patch Antenna Infinite Array (PBC)" — single unit cell (75mm
+  spacing, ~0.6λ at 2.4 GHz) with PBC in X/Y and PML in Z.
+- **JS API**: `SetBoundaryCond(['PBC', ...])` and `SetBlochPhaseShift({x, y, z})`
+  emit `xmin="-1"` and `BlochPhase_x/y/z` XML attributes.
+
+## Changes (2026-03-28)
 
 ### GPU NF2FF Pipeline — Correct Radiation Patterns
 
@@ -129,7 +151,7 @@ Post-processing:
 
 ### Phase 6: Polish & Ecosystem — COMPLETE
 
-- 4 ported examples: Patch Antenna, MSL Notch Filter, Rect Waveguide, Helical Antenna
+- 5 ported examples: Patch Antenna, MSL Notch Filter, Rect Waveguide, Helical Antenna, Patch Antenna Infinite Array (PBC)
   - Each with standalone HTML page, SVG plots, validation test
 - Browser UX shell (`app/index.html`): 3-panel editor/simulation/results
   - Example selector, engine type picker (WebGPU/WASM), run/stop, console log
@@ -197,13 +219,13 @@ src/
   webgpu-fdtd.mjs         — CPU reference engine + hybrid fallback
   wasm-gpu-bridge.mjs     — WASM coefficient extraction → GPU/CPU engines
   url-share.mjs           — URL sharing (deflate+base64url, IndexedDB fallback)
-  shaders/                — 9 WGSL compute shaders
+  shaders/                — 10 WGSL compute shaders (incl. pbc_copy.wgsl)
 
 app/
   index.html              — 3-panel browser UX shell (editor/simulation/results)
   sim-worker.js           — simulation web worker (GPU/WASM hybrid orchestration)
   ems-api.mjs             — script API (OpenEMS/CSX wrappers for example scripts)
-  examples.mjs            — parametric script examples (4 examples)
+  examples.mjs            — parametric script examples (5 examples)
 
 examples/
   patch_antenna.mjs       — Patch antenna example (port of Simple_Patch_Antenna.py)

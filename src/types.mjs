@@ -8,8 +8,9 @@
  */
 
 /**
- * @typedef {'PEC' | 'PMC' | 'MUR' | string} BoundaryType
- * PEC=0, PMC=1, MUR=2, PML_N=3 (N cells). String 'PML_8' means PML with 8 cells.
+ * @typedef {'PEC' | 'PMC' | 'MUR' | 'PBC' | string} BoundaryType
+ * PEC=0, PMC=1, MUR=2, PML_N=3 (N cells), PBC=-1 (periodic).
+ * String 'PML_8' means PML with 8 cells.
  */
 
 /**

@@ -472,6 +472,117 @@ fn mur_apply(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+const PBC_COPY_WGSL = /* wgsl */`
+struct PBCParams {
+    axis: u32,
+    mode: u32,
+    srcFaceIdx: u32,
+    dstFaceIdx: u32,
+    faceSize0: u32,
+    faceSize1: u32,
+    cosPhase: f32,
+    sinPhase: f32,
+    numLinesX: u32,
+    numLinesY: u32,
+    numLinesZ: u32,
+    imagOffset: u32,
+    solverBound0: u32,
+    solverBound1: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> volt: array<f32>;
+@group(0) @binding(1) var<storage, read_write> curr: array<f32>;
+
+@group(1) @binding(0) var<uniform> pbc: PBCParams;
+@group(1) @binding(1) var<storage, read_write> imag_buf: array<f32>;
+
+fn field_idx(n: u32, x: u32, y: u32, z: u32) -> u32 {
+    let Ny = pbc.numLinesY;
+    let Nz = pbc.numLinesZ;
+    return n * pbc.numLinesX * Ny * Nz + x * Ny * Nz + y * Nz + z;
+}
+
+fn face_to_grid(axis: u32, faceIdx: u32, i0: u32, i1: u32) -> vec3<u32> {
+    var pos: vec3<u32>;
+    if (axis == 0u) {
+        pos = vec3<u32>(faceIdx, i0, i1);
+    } else if (axis == 1u) {
+        pos = vec3<u32>(i1, faceIdx, i0);
+    } else {
+        pos = vec3<u32>(i0, i1, faceIdx);
+    }
+    return pos;
+}
+
+@compute @workgroup_size(8, 8)
+fn pbc_copy(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i0 = gid.x;
+    let i1 = gid.y;
+
+    if (i0 >= pbc.solverBound0 || i1 >= pbc.solverBound1) {
+        return;
+    }
+
+    let axis = pbc.axis;
+    let tang0 = (axis + 1u) % 3u;
+    let tang1 = (axis + 2u) % 3u;
+
+    let srcPos = face_to_grid(axis, pbc.srcFaceIdx, i0, i1);
+    let dstPos = face_to_grid(axis, pbc.dstFaceIdx, i0, i1);
+
+    let faceLinear = i0 * pbc.faceSize1 + i1;
+
+    if (pbc.mode == 0u) {
+        let srcIdx0 = field_idx(tang0, srcPos.x, srcPos.y, srcPos.z);
+        let dstIdx0 = field_idx(tang0, dstPos.x, dstPos.y, dstPos.z);
+        let srcIdx1 = field_idx(tang1, srcPos.x, srcPos.y, srcPos.z);
+        let dstIdx1 = field_idx(tang1, dstPos.x, dstPos.y, dstPos.z);
+
+        if (pbc.sinPhase == 0.0) {
+            volt[dstIdx0] = pbc.cosPhase * volt[srcIdx0];
+            volt[dstIdx1] = pbc.cosPhase * volt[srcIdx1];
+        } else {
+            let imOff0 = pbc.imagOffset + faceLinear;
+            let imOff1 = pbc.imagOffset + pbc.faceSize0 * pbc.faceSize1 + faceLinear;
+            let srcReal0 = volt[srcIdx0];
+            let srcImag0 = imag_buf[imOff0];
+            volt[dstIdx0] = pbc.cosPhase * srcReal0 - pbc.sinPhase * srcImag0;
+            imag_buf[imOff0] = pbc.sinPhase * srcReal0 + pbc.cosPhase * srcImag0;
+
+            let srcReal1 = volt[srcIdx1];
+            let srcImag1 = imag_buf[imOff1];
+            volt[dstIdx1] = pbc.cosPhase * srcReal1 - pbc.sinPhase * srcImag1;
+            imag_buf[imOff1] = pbc.sinPhase * srcReal1 + pbc.cosPhase * srcImag1;
+        }
+    } else {
+        let srcIdx0 = field_idx(tang0, srcPos.x, srcPos.y, srcPos.z);
+        let dstIdx0 = field_idx(tang0, dstPos.x, dstPos.y, dstPos.z);
+        let srcIdx1 = field_idx(tang1, srcPos.x, srcPos.y, srcPos.z);
+        let dstIdx1 = field_idx(tang1, dstPos.x, dstPos.y, dstPos.z);
+
+        if (pbc.sinPhase == 0.0) {
+            curr[dstIdx0] = pbc.cosPhase * curr[srcIdx0];
+            curr[dstIdx1] = pbc.cosPhase * curr[srcIdx1];
+        } else {
+            let imBase = pbc.imagOffset + 2u * pbc.faceSize0 * pbc.faceSize1;
+            let imOff0 = imBase + faceLinear;
+            let imOff1 = imBase + pbc.faceSize0 * pbc.faceSize1 + faceLinear;
+            let srcReal0 = curr[srcIdx0];
+            let srcImag0 = imag_buf[imOff0];
+            curr[dstIdx0] = pbc.cosPhase * srcReal0 - pbc.sinPhase * srcImag0;
+            imag_buf[imOff0] = pbc.sinPhase * srcReal0 + pbc.cosPhase * srcImag0;
+
+            let srcReal1 = curr[srcIdx1];
+            let srcImag1 = imag_buf[imOff1];
+            curr[dstIdx1] = pbc.cosPhase * srcReal1 - pbc.sinPhase * srcImag1;
+            imag_buf[imOff1] = pbc.sinPhase * srcReal1 + pbc.cosPhase * srcImag1;
+        }
+    }
+}
+`;
+
 const STEADY_STATE_WGSL = /* wgsl */`
 struct Params {
     numLines: vec3<u32>,
@@ -922,6 +1033,13 @@ export class WebGPUEngine {
         this.murApplyPipeline = null;
         this.murBindGroup = null;
         this.murConfigured = false;
+
+        // PBC state
+        this.pbcPipeline = null;
+        this.pbcVoltRegions = [];   // array of { bindGroup, dispatch }
+        this.pbcCurrRegions = [];   // array of { bindGroup, dispatch }
+        this.pbcConfigured = false;
+        this._pbcBuffers = [];
 
         // NF2FF FD accumulation state
         this._nf2ffPipeline = null;
@@ -1829,6 +1947,201 @@ export class WebGPUEngine {
     }
 
     // -----------------------------------------------------------------------
+    // Periodic Boundary Conditions (PBC) Extension
+    // -----------------------------------------------------------------------
+
+    /**
+     * Configure periodic boundary conditions.
+     *
+     * @param {Object} config - {
+     *   axes: Array<{
+     *     axis: number,        // 0=x, 1=y, 2=z
+     *     phase: number,       // Bloch phase shift [rad] (0 for simple PBC)
+     *   }>
+     * }
+     */
+    configurePBC(config) {
+        if (!this.device) throw new Error('WebGPU device not initialized.');
+        if (!config.axes || config.axes.length === 0) return;
+
+        const [Nx, Ny, Nz] = this.numLines;
+        const numLinesDims = [Nx, Ny, Nz];
+
+        // Build explicit bind group layouts
+        const pbcGroup0Layout = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+            ],
+        });
+        const pbcGroup1Layout = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+            ],
+        });
+        const pbcPipelineLayout = this.device.createPipelineLayout({
+            bindGroupLayouts: [pbcGroup0Layout, pbcGroup1Layout],
+        });
+
+        const pbcModule = this._getOrCreateShaderModule(PBC_COPY_WGSL);
+        this.pbcPipeline = this.device.createComputePipeline({
+            layout: pbcPipelineLayout, compute: { module: pbcModule, entryPoint: 'pbc_copy' },
+        });
+
+        // Shared group 0 bind group with volt and curr
+        this._pbcCoreBindGroup = this.device.createBindGroup({
+            layout: pbcGroup0Layout,
+            entries: [
+                { binding: 0, resource: { buffer: this.voltBuffer } },
+                { binding: 1, resource: { buffer: this.currBuffer } },
+            ],
+        });
+
+        const hasBloch = config.axes.some(a => a.phase !== 0);
+
+        // Compute total imaginary buffer size: for each axis, 4 face-sized buffers
+        // (2 tangential components x 2 field types = volt tang0, volt tang1, curr tang0, curr tang1)
+        let totalImagSize = 0;
+        if (hasBloch) {
+            for (const a of config.axes) {
+                if (a.phase !== 0) {
+                    const tang0 = (a.axis + 1) % 3;
+                    const tang1 = (a.axis + 2) % 3;
+                    const faceSize = numLinesDims[tang0] * numLinesDims[tang1];
+                    totalImagSize += 4 * faceSize; // volt tang0/tang1 + curr tang0/tang1
+                }
+            }
+        }
+        // Ensure minimum buffer size (WebGPU requires at least 4 bytes)
+        const imagBufSize = Math.max(totalImagSize * 4, 4);
+        const imagBuffer = this.device.createBuffer({
+            size: imagBufSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+
+        this.pbcVoltRegions = [];
+        this.pbcCurrRegions = [];
+        this._pbcBuffers = [imagBuffer];
+        let imagOffset = 0;
+
+        for (const axisConfig of config.axes) {
+            const axis = axisConfig.axis;
+            const phase = axisConfig.phase || 0;
+            const cosPhase = Math.cos(phase);
+            const sinPhase = Math.sin(phase);
+
+            const tang0 = (axis + 1) % 3;
+            const tang1 = (axis + 2) % 3;
+            const faceSize0 = numLinesDims[tang0];
+            const faceSize1 = numLinesDims[tang1];
+
+            // Voltage copy: source = numLines[axis] - 2, dest = 0
+            const voltSrcFace = numLinesDims[axis] - 2;
+            const voltDstFace = 0;
+
+            // Current copy: source = 0, dest = numLines[axis] - 2
+            const currSrcFace = 0;
+            const currDstFace = numLinesDims[axis] - 2;
+
+            // PBCParams: 16 u32/f32 values = 64 bytes
+            const createParamsBuffer = (mode, srcFace, dstFace, imagOffset, solverBound0, solverBound1) => {
+                const buf = this.device.createBuffer({
+                    size: 64,
+                    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                });
+                const data = new ArrayBuffer(64);
+                const u32View = new Uint32Array(data);
+                const f32View = new Float32Array(data);
+                u32View[0] = axis;
+                u32View[1] = mode;
+                u32View[2] = srcFace;
+                u32View[3] = dstFace;
+                u32View[4] = faceSize0;
+                u32View[5] = faceSize1;
+                f32View[6] = cosPhase;
+                f32View[7] = sinPhase;
+                u32View[8] = Nx;
+                u32View[9] = Ny;
+                u32View[10] = Nz;
+                u32View[11] = imagOffset;
+                u32View[12] = solverBound0;
+                u32View[13] = solverBound1;
+                u32View[14] = 0; // _pad0
+                u32View[15] = 0; // _pad1
+                this.device.queue.writeBuffer(buf, 0, data);
+                this._pbcBuffers.push(buf);
+                return buf;
+            };
+
+            const axisImagOffset = (phase !== 0) ? imagOffset : 0;
+            const voltParamsBuf = createParamsBuffer(0, voltSrcFace, voltDstFace, axisImagOffset, faceSize0, faceSize1);
+            const currParamsBuf = createParamsBuffer(1, currSrcFace, currDstFace, axisImagOffset, faceSize0 - 1, faceSize1 - 1);
+
+            // Advance imaginary buffer offset for next axis
+            if (phase !== 0) {
+                imagOffset += 4 * faceSize0 * faceSize1;
+            }
+
+            const dispatchX = Math.ceil(faceSize0 / 8);
+            const dispatchY = Math.ceil(faceSize1 / 8);
+
+            const voltBindGroup = this.device.createBindGroup({
+                layout: pbcGroup1Layout,
+                entries: [
+                    { binding: 0, resource: { buffer: voltParamsBuf } },
+                    { binding: 1, resource: { buffer: imagBuffer } },
+                ],
+            });
+
+            const currBindGroup = this.device.createBindGroup({
+                layout: pbcGroup1Layout,
+                entries: [
+                    { binding: 0, resource: { buffer: currParamsBuf } },
+                    { binding: 1, resource: { buffer: imagBuffer } },
+                ],
+            });
+
+            this.pbcVoltRegions.push({ bindGroup: voltBindGroup, dispatchX, dispatchY });
+            this.pbcCurrRegions.push({ bindGroup: currBindGroup, dispatchX, dispatchY });
+        }
+
+        this.pbcConfigured = true;
+    }
+
+    /**
+     * Dispatch PBC voltage copy (high face -> low face).
+     * @param {GPUCommandEncoder} encoder
+     */
+    stepPBCVoltage(encoder) {
+        if (!this.pbcConfigured) return;
+        for (const region of this.pbcVoltRegions) {
+            const pass = encoder.beginComputePass();
+            pass.setPipeline(this.pbcPipeline);
+            pass.setBindGroup(0, this._pbcCoreBindGroup);
+            pass.setBindGroup(1, region.bindGroup);
+            pass.dispatchWorkgroups(region.dispatchX, region.dispatchY, 1);
+            pass.end();
+        }
+    }
+
+    /**
+     * Dispatch PBC current copy (low face -> high face).
+     * @param {GPUCommandEncoder} encoder
+     */
+    stepPBCCurrent(encoder) {
+        if (!this.pbcConfigured) return;
+        for (const region of this.pbcCurrRegions) {
+            const pass = encoder.beginComputePass();
+            pass.setPipeline(this.pbcPipeline);
+            pass.setBindGroup(0, this._pbcCoreBindGroup);
+            pass.setBindGroup(1, region.bindGroup);
+            pass.dispatchWorkgroups(region.dispatchX, region.dispatchY, 1);
+            pass.end();
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Steady-State Detection Extension
     // -----------------------------------------------------------------------
 
@@ -2056,7 +2369,8 @@ export class WebGPUEngine {
             && !this.adeConfigured
             && !this.rlcConfigured
             && !this.murConfigured
-            && !this.tfsfConfigured;
+            && !this.tfsfConfigured
+            && !this.pbcConfigured;
     }
 
     _getVoltage3DWorkgroupSize() {
@@ -2131,6 +2445,7 @@ export class WebGPUEngine {
             // === POST-VOLTAGE (C++ DoPostVoltageUpdates) ===
             this.stepPML(encoder, 1);       // Priority +1M
             this.stepTFSFVoltage(encoder);  // Priority +50K
+            this.stepPBCVoltage(encoder);   // PBC: copy high→low E-tangential
             this.stepMurPost(encoder);      // Priority 0 — Mur accumulate
 
             // === APPLY TO VOLTAGES (C++ Apply2Voltages) ===
@@ -2149,6 +2464,7 @@ export class WebGPUEngine {
             // === POST-CURRENT (C++ DoPostCurrentUpdates) ===
             this.stepPML(encoder, 3);       // Priority +1M
             this.stepTFSFCurrent(encoder);  // Priority +50K
+            this.stepPBCCurrent(encoder);   // PBC: copy low→high H-tangential
 
             // NF2FF FD accumulation (after all field updates)
             if (this._nf2ffPipeline) {

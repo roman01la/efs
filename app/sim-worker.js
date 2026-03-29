@@ -43,7 +43,6 @@ function extractGPUConfig(ems, Module) {
   const gridSizeVec = ems.getGridSize();
   const gridSize = [gridSizeVec.get(0), gridSizeVec.get(1), gridSizeVec.get(2)];
   gridSizeVec.delete();
-  const t_coeff = performance.now();
   const coeffInfo = ems.getCoefficientsPtr();
   let vv, vi, ii, iv;
   if (coeffInfo.size() === 8) {
@@ -64,7 +63,6 @@ function extractGPUConfig(ems, Module) {
     iv = _embindVecToF32(ems.getIV());
   }
   coeffInfo.delete();
-  console.log(`    [timing] coefficients (4x ${vv.length} floats): ${(performance.now() - t_coeff).toFixed(1)}ms`);
 
   let excitation = null;
   const sigVec = ems.getExcitationSignal();
@@ -130,7 +128,25 @@ function extractGPUConfig(ems, Module) {
     vec.delete();
   }
 
-  return { gridSize, coefficients: { vv, vi, ii, iv }, excitation, pmlRegions, murRegions };
+  // Detect PBC axes from operator boundary conditions
+  const pbcAxes = [];
+  try {
+    const bcVec = ems.getBoundaryConditions();
+    if (bcVec && bcVec.size() === 6) {
+      for (let a = 0; a < 3; a++) {
+        const lo = bcVec.get(a * 2);
+        const hi = bcVec.get(a * 2 + 1);
+        if (lo === -1 && hi === -1) {
+          pbcAxes.push({ axis: a, phase: 0 });
+        }
+      }
+      bcVec.delete();
+    }
+  } catch (e) {
+    // getBoundaryConditions may not be available in older WASM builds
+  }
+
+  return { gridSize, coefficients: { vv, vi, ii, iv }, excitation, pmlRegions, murRegions, pbcAxes };
 }
 
 function parseProbeInfo(ems) {
@@ -698,35 +714,43 @@ async function runSimulation(xml) {
   const ems = new Module.OpenEMS();
   ems.configure(0, 1000000, 1e-5);
 
-  let t_setup = performance.now();
   log('Loading XML config...');
   if (!ems.loadXML(xml)) throw new Error('Failed to load simulation XML');
-  log(`  [timing] loadXML: ${(performance.now() - t_setup).toFixed(1)}ms`);
 
-  t_setup = performance.now();
   log('Setting up FDTD...');
   const rc = ems.setup();
   if (rc !== 0) throw new Error(`SetupFDTD failed with code ${rc}`);
-  log(`  [timing] ems.setup (C++ operator): ${(performance.now() - t_setup).toFixed(1)}ms`);
 
   log('Running FDTD engine (WebGPU hybrid)...');
 
   // Extract GPU config
-  t_setup = performance.now();
   const config = extractGPUConfig(ems, Module);
-  log(`  [timing] extractGPUConfig: ${(performance.now() - t_setup).toFixed(1)}ms`);
   log(`Grid: ${config.gridSize.join('x')}, ${config.pmlRegions.length} PML, ${config.murRegions.length} Mur`);
 
-  t_setup = performance.now();
   const { WebGPUEngine } = await import('/src/webgpu-engine.mjs');
   const gpuEngine = new WebGPUEngine();
   if (!await gpuEngine.initGPU()) throw new Error('WebGPU not available');
 
   await gpuEngine.init(config.gridSize, config.coefficients);
-  log(`  [timing] GPU init + upload: ${(performance.now() - t_setup).toFixed(1)}ms`);
   if (config.excitation) gpuEngine.configureExcitation(config.excitation);
   if (config.pmlRegions.length > 0) gpuEngine.configurePML(config.pmlRegions);
   if (config.murRegions.length > 0) gpuEngine.configureMur(buildMurConfig(config.murRegions, config.gridSize));
+  if (config.pbcAxes.length > 0) {
+    // Parse Bloch phase from XML if present
+    const blochPhases = [0, 0, 0];
+    const bcMatch = xml.match(/<BoundaryCond[^>]*>/);
+    if (bcMatch) {
+      const bcTag = bcMatch[0];
+      for (let a = 0; a < 3; a++) {
+        const axisName = ['x', 'y', 'z'][a];
+        const phaseMatch = bcTag.match(new RegExp(`BlochPhase_${axisName}="([^"]+)"`));
+        if (phaseMatch) blochPhases[a] = parseFloat(phaseMatch[1]);
+      }
+    }
+    const pbcConfig = { axes: config.pbcAxes.map(a => ({ axis: a.axis, phase: blochPhases[a.axis] })) };
+    gpuEngine.configurePBC(pbcConfig);
+    log(`  PBC: ${config.pbcAxes.length} periodic axes` + (blochPhases.some(p => p !== 0) ? ` (Bloch: [${blochPhases.join(', ')}])` : ''));
+  }
   log('WebGPU engine initialized.');
   log(`  Excitation: ${config.excitation?.pos?.length || 0} sources`);
 
@@ -805,6 +829,8 @@ async function runSimulation(xml) {
 
   const maxSamples = Math.ceil(maxTS / sampleInterval) + 1;
   gpuEngine.configureProbeGatherBuffered(indices, { maxSamples, sampleInterval });
+  const tsEnabled = gpuEngine.enableTimestampProfile?.() ?? false;
+  log(`  Timestamp profiling: ${tsEnabled ? 'enabled' : 'not available'}`);
 
   let maxEnergy = 0;
   const energyCheckInterval = 1000;
@@ -849,6 +875,47 @@ async function runSimulation(xml) {
     if (totalSteps % 1000 < stepsThisBatch) log(`  Step ${totalSteps}/${maxTS}`);
   }
 
+  // GPU occupancy analysis
+  {
+    const cells = config.gridSize[0] * config.gridSize[1] * config.gridSize[2];
+    const sync = () => gpuEngine.device.queue.onSubmittedWorkDone();
+
+    // Warm up
+    gpuEngine.iterate(100);
+    await sync();
+
+    // Measure multiple batch sizes
+    for (const n of [100, 500, 1000]) {
+      await sync();
+      const t = performance.now();
+      gpuEngine.iterate(n);
+      await sync();
+      const ms = performance.now() - t;
+      const mcells = cells * n / 1e6;
+      log(`  GPU bench ${n} steps: ${ms.toFixed(1)} ms, ${(ms * 1000 / n).toFixed(1)} us/step, ${(mcells / (ms / 1000)).toFixed(0)} MCells/s`);
+    }
+
+    // Bandwidth analysis
+    // Per cell per step: volt read 6 curr neighbors + 1 self = 7 reads, 3 writes = 40B
+    //                    curr read 6 volt neighbors + 1 self + 1 coeff = 8 reads, 1 write = 36B
+    //                    Total: ~76 bytes/cell/step (conservative)
+    const bytesPerCell = 76;
+    await sync();
+    const tRef = performance.now();
+    gpuEngine.iterate(1000);
+    await sync();
+    const refMs = performance.now() - tRef;
+    const refMCells = cells * 1000 / 1e6;
+    const throughput = refMCells / (refMs / 1000);
+    const bwGB = throughput * 1e6 * bytesPerCell / 1e9;
+    log(`  ---`);
+    log(`  Grid: ${config.gridSize.join('x')} = ${cells} cells`);
+    log(`  Throughput: ${throughput.toFixed(0)} MCells/s`);
+    log(`  Est. bandwidth: ${bwGB.toFixed(0)} GB/s (${bytesPerCell} bytes/cell)`);
+    log(`  M2 Max peak BW: 400 GB/s → ~${(bwGB / 400 * 100).toFixed(0)}% utilization`);
+    log(`  Step time: ${(refMs / 1000).toFixed(1)} us/step`);
+  }
+
   const gatherResult = await gpuEngine.readProbeGatherBuffered();
   if (gatherResult) {
     const { data, numSamples, stride } = gatherResult;
@@ -870,9 +937,7 @@ async function runSimulation(xml) {
   let gpuNF2FFAccum = null;
   if (gpuNF2FFConfig) {
     try {
-      const t_readback = performance.now();
       gpuNF2FFAccum = await gpuEngine.readNF2FFAccumulation();
-      log(`  [timing] NF2FF GPU readback: ${(performance.now() - t_readback).toFixed(1)}ms (${gpuNF2FFConfig.numPoints} points)`);
     } catch (e) {
       log(`  NF2FF GPU readback failed: ${e.message}`);
     }
@@ -900,10 +965,7 @@ async function runSimulation(xml) {
   if (gpuNF2FFAccum && gpuNF2FFConfig) {
     const nf2ffFreqHz = gpuNF2FFConfig.frequency;
     try {
-      // Build point metadata for GPU far-field shader
-      const t_meta = performance.now();
       const pointMeta = buildNF2FFPointMetadata(gpuNF2FFConfig.faceSlices, gpuNF2FFConfig.faceMeshes);
-      log(`  [timing] NF2FF buildPointMetadata: ${(performance.now() - t_meta).toFixed(1)}ms`);
 
       // Build theta/phi arrays (same 3D grid as before)
       const thetaRad3d = [];
@@ -911,8 +973,6 @@ async function runSimulation(xml) {
       for (let t = 0; t <= 180; t += 3) thetaRad3d.push(t * Math.PI / 180);
       for (let p = 0; p <= 360; p += 5) phiRad3d.push(p * Math.PI / 180);
 
-      // GPU far-field computation
-      const t_farfield = performance.now();
       const gpuFarFieldResult = await gpuEngine.computeNF2FFfarField({
         pointMeta,
         theta: new Float32Array(thetaRad3d),
@@ -922,7 +982,6 @@ async function runSimulation(xml) {
         radius: 1,
         numPoints: gpuNF2FFConfig.numPoints,
       });
-      log(`  [timing] GPU far-field: ${(performance.now() - t_farfield).toFixed(1)}ms (${thetaRad3d.length}x${phiRad3d.length} angles, ${gpuNF2FFConfig.numPoints} surface points)`);
 
       // Destroy GPU engine after all GPU work is done
       gpuEngine.destroy();
@@ -945,10 +1004,7 @@ async function runSimulation(xml) {
         if (P_rad_i > P_max) P_max = P_rad_i;
       }
 
-      // Compute radiated power on CPU from accumE/accumH/pointMeta
-      const t_radpower = performance.now();
       const radPower = computeRadPower(gpuNF2FFAccum.accumE, gpuNF2FFAccum.accumH, pointMeta, gpuNF2FFConfig.numPoints);
-      log(`  [timing] CPU radPower: ${(performance.now() - t_radpower).toFixed(1)}ms`);
 
       // Compute Dmax
       const Dmax = radPower > 0 ? P_max * 4 * Math.PI * 1 * 1 / radPower : 0; // radius=1
