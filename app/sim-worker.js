@@ -839,7 +839,7 @@ async function runSimulation(xml) {
   log(`  Timestamp profiling: ${tsEnabled ? 'enabled' : 'not available'}`);
 
   let maxEnergy = 0;
-  const energyCheckInterval = 1000;
+  const energyCheckInterval = 100;
 
   const readbackInterval = cppProcessInterval > 0
     ? Math.min(cppProcessInterval, energyCheckInterval)

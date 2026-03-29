@@ -2992,16 +2992,56 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         pass2.dispatchWorkgroups(1);
         pass2.end();
 
+        // Double-buffered readback: copy result to current staging buffer,
+        // start mapping it, then read the PREVIOUS buffer (already mapped).
+        const currentIdx = this._energyReadbackIdx;
+        const prevIdx = 1 - currentIdx;
+        const currentBuf = this._energyReadbackBuffers[currentIdx];
+
+        encoder.copyBufferToBuffer(this._energyResultBuffer, 0, currentBuf, 0, 4);
         this.device.queue.submit([encoder.finish()]);
 
-        const data = await this._readBuffer(this._energyResultBuffer, 4);
-        return new Float32Array(data)[0];
+        // Fire-and-forget map of the current buffer (will be read next call)
+        const mapPromise = currentBuf.mapAsync(GPUMapMode.READ);
+        const prevPending = this._energyPendingMap;
+
+        // Read the previous buffer's result (mapped last call)
+        if (prevPending) {
+            await prevPending;
+            const prevBuf = this._energyReadbackBuffers[prevIdx];
+            const data = new Float32Array(prevBuf.getMappedRange().slice(0));
+            prevBuf.unmap();
+            this._energyLastValue = data[0];
+        }
+
+        this._energyPendingMap = mapPromise;
+        this._energyReadbackIdx = prevIdx;
+
+        return this._energyLastValue;
+    }
+
+    /**
+     * Flush pending energy readback — call at simulation end for final accurate value.
+     * @returns {Promise<number>}
+     */
+    async flushEnergy() {
+        if (this._energyPendingMap) {
+            await this._energyPendingMap;
+            const buf = this._energyReadbackBuffers[this._energyReadbackIdx];
+            const data = new Float32Array(buf.getMappedRange().slice(0));
+            buf.unmap();
+            this._energyLastValue = data[0];
+            this._energyPendingMap = null;
+        }
+        return this._energyLastValue;
     }
 
     _setupEnergyReduction() {
-        const totalCells = this.totalCells; // Nx * Ny * Nz
+        const [Nx, Ny, Nz] = this.numLines;
+        const componentStride = Nx * Ny * Nz; // stride between x/y/z components in flat buffer
+        const innerCells = (Nx - 1) * (Ny - 1) * (Nz - 1); // match native openEMS bounds
         const WG_SIZE = 256;
-        this._energyWorkgroups = Math.ceil(totalCells / WG_SIZE);
+        this._energyWorkgroups = Math.ceil(innerCells / WG_SIZE);
 
         // Partial sums buffer
         this._energyPartialBuffer = this.device.createBuffer({
@@ -3015,7 +3055,19 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
         });
 
+        // Double-buffered readback for non-blocking energy reads
+        this._energyReadbackBuffers = [
+            this.device.createBuffer({ size: 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+            this.device.createBuffer({ size: 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+        ];
+        this._energyReadbackIdx = 0;
+        this._energyPendingMap = null;
+        this._energyLastValue = 0;
+
         // First pass: compute partial sums per workgroup
+        // Iterate over (Nx-1)*(Ny-1)*(Nz-1) interior cells to match native openEMS
+        const innerNy = Ny - 1;
+        const innerNz = Nz - 1;
         const code1 = /* wgsl */ `
 @group(0) @binding(0) var<storage, read> volt: array<f32>;
 @group(0) @binding(1) var<storage, read> curr: array<f32>;
@@ -3027,14 +3079,23 @@ var<workgroup> wg_sums: array<f32, ${WG_SIZE}>;
 fn main(@builtin(global_invocation_id) gid: vec3u,
         @builtin(local_invocation_id) lid: vec3u,
         @builtin(workgroup_id) wid: vec3u) {
-    let totalCells = ${totalCells}u;
-    let totalElems = totalCells * 3u;
+    let innerCells = ${innerCells}u;
+    let componentStride = ${componentStride}u;
+    let innerNy = ${innerNy}u;
+    let innerNz = ${innerNz}u;
+    let Ny = ${Ny}u;
+    let Nz = ${Nz}u;
     let i = gid.x;
     var sum: f32 = 0.0;
-    // Each thread sums 3 components for its cell
-    if (i < totalCells) {
+    // Each thread maps linear index to 3D interior coordinate and sums 3 components
+    if (i < innerCells) {
+        let x = i / (innerNy * innerNz);
+        let rem = i % (innerNy * innerNz);
+        let y = rem / innerNz;
+        let z = rem % innerNz;
+        let flatIdx = x * Ny * Nz + y * Nz + z;
         for (var n = 0u; n < 3u; n = n + 1u) {
-            let idx = n * totalCells + i;
+            let idx = n * componentStride + flatIdx;
             let v = volt[idx];
             let c = curr[idx];
             sum = sum + v * v + c * c;
@@ -3144,6 +3205,12 @@ fn main() {
                            this._gatherRingBuffer, this._gatherParamsBuffer,
                            this._energyPartialBuffer, this._energyResultBuffer]) {
             if (buf) buf.destroy();
+        }
+        // Destroy energy readback double-buffers
+        if (this._energyReadbackBuffers) {
+            for (const buf of this._energyReadbackBuffers) {
+                if (buf) buf.destroy();
+            }
         }
         // Destroy NF2FF buffers
         for (const buf of [this._nf2ffParamsBuffer, this._nf2ffPointsBuffer,
