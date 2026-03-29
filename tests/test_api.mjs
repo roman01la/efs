@@ -12,11 +12,12 @@ const ROOT = join(__dirname, '..');
 
 import { C0, MUE0, EPS0, Z0, linspace, dftTime2Freq, dftMagnitude, complexDivide, complexAbs, parseProbe, findPeaks, calcSParam } from '../src/analysis.mjs';
 import { Simulation } from '../src/simulation.mjs';
-import { LumpedPort, MSLPort, WaveguidePort, RectWGPort } from '../src/ports.mjs';
+import { LumpedPort, MSLPort, CoaxialPort, WaveguidePort, RectWGPort } from '../src/ports.mjs';
 import { createNF2FFBox, NF2FFBox, NF2FFResult, computeNF2FF, readNF2FFSurfaceData } from '../src/nf2ff.mjs';
 import { computeLocalSAR, computeAveragedSAR, findPeakSAR } from '../src/sar.mjs';
 import { meshHintFromBox, meshCombine, meshEstimateCflTimestep, smoothMeshLines } from '../src/automesh.mjs';
 import { prepareSParamData, prepareSmithData, prepareRadiationPattern, prepareImpedanceData, prepareTimeDomainData } from '../src/visualization.mjs';
+import { OpenEMS, ContinuousStructure } from '../app/ems-api.mjs';
 
 // Normalize CSXCAD XML float precision (full double → 6-digit) for test assertions
 function normFloats(s) {
@@ -2295,6 +2296,660 @@ async function testCSXCADBindings() {
 }
 
 // -----------------------------------------------------------------------
+// Test: ems-api.mjs Polygon XML generation
+// -----------------------------------------------------------------------
+function testEmsApiPolygonXML() {
+  console.log('\n=== Test: Polygon XML (ems-api) ===');
+
+  const CSX = new ContinuousStructure();
+  const metal = CSX.AddMetal('patch');
+  metal.AddPolygon([[0, 0], [10, 0], [5, 8.66]], 2, 1.524, 5);
+
+  const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+  FDTD.SetGaussExcite(1e9, 0.5e9);
+  FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  FDTD.SetCSX(CSX);
+  CSX.GetGrid().SetDeltaUnit(1e-3);
+  CSX.GetGrid().AddLine('x', [0, 10]);
+  CSX.GetGrid().AddLine('y', [0, 10]);
+  CSX.GetGrid().AddLine('z', [0, 2]);
+  const xml = FDTD.GenerateXML();
+
+  assert(xml.includes('<Polygon NormDir="2" Elevation="1.524" Priority="5">'), 'ems-api Polygon has NormDir, Elevation and Priority');
+  assert(xml.includes('<Vertex X1="0" X2="0"/>'), 'ems-api Polygon vertex uses X1/X2 attributes');
+  assert(xml.includes('<Vertex X1="10" X2="0"/>'), 'ems-api Polygon second vertex correct');
+  assert(xml.includes('<Vertex X1="5" X2="8.66"/>'), 'ems-api Polygon third vertex correct');
+  assert(xml.includes('</Polygon>'), 'ems-api Polygon closing tag');
+  const vertexCount = (xml.match(/<Vertex X1="/g) || []).length;
+  assert(vertexCount === 3, `ems-api Polygon has 3 vertices (found ${vertexCount})`);
+
+  // Test normDir=0 (X-normal)
+  const CSX2 = new ContinuousStructure();
+  const metal2 = CSX2.AddMetal('wall');
+  metal2.AddPolygon([[0, 0], [1, 0], [1, 1]], 0, 5.0, 3);
+  const FDTD2 = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+  FDTD2.SetGaussExcite(1e9, 0.5e9);
+  FDTD2.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  FDTD2.SetCSX(CSX2);
+  CSX2.GetGrid().SetDeltaUnit(1e-3);
+  CSX2.GetGrid().AddLine('x', [0, 10]);
+  CSX2.GetGrid().AddLine('y', [0, 10]);
+  CSX2.GetGrid().AddLine('z', [0, 10]);
+  const xml2 = FDTD2.GenerateXML();
+  assert(xml2.includes('<Polygon NormDir="0" Elevation="5" Priority="3">'), 'ems-api Polygon normDir=0');
+
+}
+
+// -----------------------------------------------------------------------
+// Test: ems-api.mjs LinPoly XML generation
+// -----------------------------------------------------------------------
+function testEmsApiLinPolyXML() {
+  console.log('\n=== Test: LinPoly XML (ems-api) ===');
+
+  const CSX = new ContinuousStructure();
+  const metal = CSX.AddMetal('extrusion');
+  metal.AddLinPoly([[0, 0], [10, 0], [5, 8.66]], 2, 0, 5.0, 5);
+
+  const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+  FDTD.SetGaussExcite(1e9, 0.5e9);
+  FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  FDTD.SetCSX(CSX);
+  CSX.GetGrid().SetDeltaUnit(1e-3);
+  CSX.GetGrid().AddLine('x', [0, 10]);
+  CSX.GetGrid().AddLine('y', [0, 10]);
+  CSX.GetGrid().AddLine('z', [0, 10]);
+  const xml = FDTD.GenerateXML();
+
+  assert(xml.includes('<LinPoly NormDir="2" Elevation="0" Length="5" Priority="5">'), 'ems-api LinPoly has NormDir, Elevation, Length and Priority');
+  assert(xml.includes('<Vertex X1="0" X2="0"/>'), 'ems-api LinPoly vertex uses X1/X2 attributes');
+  assert(xml.includes('</LinPoly>'), 'ems-api LinPoly closing tag');
+  const vertexCount = (xml.match(/<Vertex X1="/g) || []).length;
+  assert(vertexCount === 3, `ems-api LinPoly has 3 vertices (found ${vertexCount})`);
+
+  // Test normDir=1 (Y-normal)
+  const CSX2 = new ContinuousStructure();
+  const metal2 = CSX2.AddMetal('slab');
+  metal2.AddLinPoly([[0, 0], [1, 0], [1, 1], [0, 1]], 1, 2.0, 3.0, 8);
+  const FDTD2 = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+  FDTD2.SetGaussExcite(1e9, 0.5e9);
+  FDTD2.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  FDTD2.SetCSX(CSX2);
+  CSX2.GetGrid().SetDeltaUnit(1e-3);
+  CSX2.GetGrid().AddLine('x', [0, 10]);
+  CSX2.GetGrid().AddLine('y', [0, 10]);
+  CSX2.GetGrid().AddLine('z', [0, 10]);
+  const xml2 = FDTD2.GenerateXML();
+  assert(xml2.includes('<LinPoly NormDir="1" Elevation="2" Length="3" Priority="8">'), 'ems-api LinPoly normDir=1');
+}
+
+// -----------------------------------------------------------------------
+// Test: ems-api.mjs RotPoly XML generation
+// -----------------------------------------------------------------------
+function testEmsApiRotPolyXML() {
+  console.log('\n=== Test: RotPoly XML (ems-api) ===');
+
+  const CSX = new ContinuousStructure();
+  const metal = CSX.AddMetal('revolved');
+  metal.AddRotPoly([[1, 0], [1, 5], [0.5, 5]], 2, 2, 0, Math.PI, 7);
+
+  const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+  FDTD.SetGaussExcite(1e9, 0.5e9);
+  FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  FDTD.SetCSX(CSX);
+  CSX.GetGrid().SetDeltaUnit(1e-3);
+  CSX.GetGrid().AddLine('x', [0, 10]);
+  CSX.GetGrid().AddLine('y', [0, 10]);
+  CSX.GetGrid().AddLine('z', [0, 10]);
+  const xml = FDTD.GenerateXML();
+
+  assert(xml.includes('<RotPoly NormDir="2" RotAxisDir="2" Elevation="0" Priority="7">'), 'ems-api RotPoly has NormDir, RotAxisDir, Elevation, Priority');
+  assert(xml.includes('<Angles Start="0" Stop="' + Math.PI + '"/>'), 'ems-api RotPoly has Angles with Start/Stop attributes');
+  assert(xml.includes('<Vertex X1="1" X2="0"/>'), 'ems-api RotPoly vertex uses X1/X2 attributes');
+  assert(xml.includes('</RotPoly>'), 'ems-api RotPoly closing tag');
+  const vertexCount = (xml.match(/<Vertex X1="/g) || []).length;
+  assert(vertexCount === 3, `ems-api RotPoly has 3 vertices (found ${vertexCount})`);
+
+  // Test full revolution with different axes
+  const CSX2 = new ContinuousStructure();
+  const metal2 = CSX2.AddMetal('torus');
+  metal2.AddRotPoly([[1, 0], [2, 0], [2, 1]], 0, 1, 0, 2 * Math.PI, 4);
+  const FDTD2 = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+  FDTD2.SetGaussExcite(1e9, 0.5e9);
+  FDTD2.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  FDTD2.SetCSX(CSX2);
+  CSX2.GetGrid().SetDeltaUnit(1e-3);
+  CSX2.GetGrid().AddLine('x', [0, 10]);
+  CSX2.GetGrid().AddLine('y', [0, 10]);
+  CSX2.GetGrid().AddLine('z', [0, 10]);
+  const xml2 = FDTD2.GenerateXML();
+  assert(xml2.includes('<RotPoly NormDir="0" RotAxisDir="1" Elevation="0" Priority="4">'), 'ems-api RotPoly normDir=0, rotAxisDir=1');
+  assert(xml2.includes(`<Angles Start="0" Stop="${2 * Math.PI}"/>`), 'ems-api RotPoly full revolution angle');
+}
+
+// -----------------------------------------------------------------------
+// Test: ems-api.mjs CSTransform (Translate/Rotate/Scale) XML generation
+// -----------------------------------------------------------------------
+function testEmsApiTransformXML() {
+  console.log('\n=== Test: CSTransform XML (ems-api) ===');
+
+  // Box with Translate
+  {
+    const CSX = new ContinuousStructure();
+    const mesh = CSX.GetGrid();
+    mesh.SetDeltaUnit(1e-3);
+    mesh.AddLine('x', [-10, 10]);
+    mesh.AddLine('y', [-10, 10]);
+    mesh.AddLine('z', [-5, 5]);
+    const metal = CSX.AddMetal('shifted');
+    metal.AddBox([0, 0, 0], [5, 5, 1], 10).Translate(5, 0, 0);
+
+    const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+    FDTD.SetGaussExcite(1e9, 0.5e9);
+    FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    FDTD.SetCSX(CSX);
+    const xml = FDTD.GenerateXML();
+
+    assert(xml.includes('<Transformation>'), 'Box with Translate has <Transformation> element');
+    assert(xml.includes('<Translate Argument="5,0,0"/>'), 'Box Translate Argument is comma-separated');
+    assert(xml.includes('</Transformation>'), 'Box Translate has closing </Transformation>');
+  }
+
+  // Box with multiple chained transforms (Translate + Rotate_Z)
+  {
+    const CSX = new ContinuousStructure();
+    const mesh = CSX.GetGrid();
+    mesh.SetDeltaUnit(1e-3);
+    mesh.AddLine('x', [-10, 10]);
+    mesh.AddLine('y', [-10, 10]);
+    mesh.AddLine('z', [-5, 5]);
+    const metal = CSX.AddMetal('rotated');
+    metal.AddBox([0, 0, 0], [5, 5, 1], 10).Translate(1, 2, 3).Rotate_Z(0.785398);
+
+    const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+    FDTD.SetGaussExcite(1e9, 0.5e9);
+    FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    FDTD.SetCSX(CSX);
+    const xml = FDTD.GenerateXML();
+
+    assert(xml.includes('<Translate Argument="1,2,3"/>'), 'Chained: Translate present');
+    assert(xml.includes('<Rotate_Z Argument="0.785398"/>'), 'Chained: Rotate_Z present');
+    // Both must be inside the same Transformation block
+    const txBlock = xml.slice(xml.indexOf('<Transformation>'), xml.indexOf('</Transformation>'));
+    assert(txBlock.includes('<Translate') && txBlock.includes('<Rotate_Z'), 'Both transforms in same Transformation block');
+  }
+
+  // Polygon with Scale3
+  {
+    const CSX = new ContinuousStructure();
+    const mesh = CSX.GetGrid();
+    mesh.SetDeltaUnit(1e-3);
+    mesh.AddLine('x', [-10, 10]);
+    mesh.AddLine('y', [-10, 10]);
+    mesh.AddLine('z', [-5, 5]);
+    const metal = CSX.AddMetal('scaled');
+    metal.AddPolygon([[0, 0], [5, 0], [5, 5]], 2, 0, 10).Scale3(2, 3, 1);
+
+    const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+    FDTD.SetGaussExcite(1e9, 0.5e9);
+    FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    FDTD.SetCSX(CSX);
+    const xml = FDTD.GenerateXML();
+
+    assert(xml.includes('<Scale3 Argument="2,3,1"/>'), 'Polygon Scale3 Argument is comma-separated');
+    assert(xml.includes('<Polygon NormDir="2"'), 'Polygon primitive still present');
+  }
+
+  // No transforms — backward compatibility
+  {
+    const CSX = new ContinuousStructure();
+    const mesh = CSX.GetGrid();
+    mesh.SetDeltaUnit(1e-3);
+    mesh.AddLine('x', [-10, 10]);
+    mesh.AddLine('y', [-10, 10]);
+    mesh.AddLine('z', [-5, 5]);
+    const metal = CSX.AddMetal('plain');
+    metal.AddBox([0, 0, 0], [5, 5, 1], 10);
+
+    const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+    FDTD.SetGaussExcite(1e9, 0.5e9);
+    FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    FDTD.SetCSX(CSX);
+    const xml = FDTD.GenerateXML();
+
+    assert(!xml.includes('<Transformation>'), 'No transforms: no <Transformation> element');
+    // Box should still be single-line (no newlines between <Box> and </Box>)
+    const boxMatch = xml.match(/<Box Priority="10">.*<\/Box>/);
+    assert(boxMatch !== null, 'No transforms: Box remains single-line');
+  }
+
+  // All transform types
+  {
+    const CSX = new ContinuousStructure();
+    const mesh = CSX.GetGrid();
+    mesh.SetDeltaUnit(1e-3);
+    mesh.AddLine('x', [-10, 10]);
+    mesh.AddLine('y', [-10, 10]);
+    mesh.AddLine('z', [-5, 5]);
+    const metal = CSX.AddMetal('all');
+    metal.AddBox([0, 0, 0], [1, 1, 1], 5)
+      .Rotate_X(0.1)
+      .Rotate_Y(0.2)
+      .Rotate_Origin(0, 0, 1, 1.5708)
+      .Scale(2.5);
+
+    const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+    FDTD.SetGaussExcite(1e9, 0.5e9);
+    FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    FDTD.SetCSX(CSX);
+    const xml = FDTD.GenerateXML();
+
+    assert(xml.includes('<Rotate_X Argument="0.1"/>'), 'Rotate_X present');
+    assert(xml.includes('<Rotate_Y Argument="0.2"/>'), 'Rotate_Y present');
+    assert(xml.includes('<Rotate_Origin Argument="0,0,1,1.5708"/>'), 'Rotate_Origin present');
+    assert(xml.includes('<Scale Argument="2.5"/>'), 'Scale present');
+  }
+}
+
+// -----------------------------------------------------------------------
+// Test: ems-api.mjs anisotropic material XML generation
+// -----------------------------------------------------------------------
+function testAnisotropicMaterial() {
+  console.log('\n=== Test: Anisotropic Material XML (ems-api) ===');
+
+  // Scalar-only (backward compatible, isotropic)
+  {
+    const CSX = new ContinuousStructure();
+    CSX.AddMaterial('substrate', { Epsilon: 4.6, Kappa: 0.001 });
+    const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+    FDTD.SetGaussExcite(1e9, 0.5e9);
+    FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    FDTD.SetCSX(CSX);
+    CSX.GetGrid().SetDeltaUnit(1e-3);
+    CSX.GetGrid().AddLine('x', [0, 1]);
+    CSX.GetGrid().AddLine('y', [0, 1]);
+    CSX.GetGrid().AddLine('z', [0, 1]);
+    const xml = FDTD.GenerateXML();
+    assert(xml.includes('Epsilon="4.6"'), 'Scalar Epsilon in XML');
+    assert(xml.includes('Kappa="0.001"'), 'Scalar Kappa in XML');
+    assert(!xml.includes('Isotropy'), 'No Isotropy attr for isotropic material');
+  }
+
+  // Anisotropic arrays
+  {
+    const CSX = new ContinuousStructure();
+    CSX.AddMaterial('aniso', { Epsilon: [4.6, 4.8, 5.0], Mue: [1, 1, 1.2] });
+    const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+    FDTD.SetGaussExcite(1e9, 0.5e9);
+    FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    FDTD.SetCSX(CSX);
+    CSX.GetGrid().SetDeltaUnit(1e-3);
+    CSX.GetGrid().AddLine('x', [0, 1]);
+    CSX.GetGrid().AddLine('y', [0, 1]);
+    CSX.GetGrid().AddLine('z', [0, 1]);
+    const xml = FDTD.GenerateXML();
+    assert(xml.includes('Isotropy="0"'), 'Isotropy="0" for anisotropic material');
+    assert(xml.includes('Epsilon="4.6,4.8,5"'), 'Array Epsilon comma-separated');
+    assert(xml.includes('Mue="1,1,1.2"'), 'Array Mue comma-separated');
+  }
+
+  // Mixed scalar and array
+  {
+    const CSX = new ContinuousStructure();
+    CSX.AddMaterial('mixed', { Epsilon: [4.6, 4.8, 5.0], Kappa: 0.001, Sigma: [0.1, 0.2, 0.3] });
+    const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+    FDTD.SetGaussExcite(1e9, 0.5e9);
+    FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    FDTD.SetCSX(CSX);
+    CSX.GetGrid().SetDeltaUnit(1e-3);
+    CSX.GetGrid().AddLine('x', [0, 1]);
+    CSX.GetGrid().AddLine('y', [0, 1]);
+    CSX.GetGrid().AddLine('z', [0, 1]);
+    const xml = FDTD.GenerateXML();
+    assert(xml.includes('Isotropy="0"'), 'Isotropy="0" for mixed scalar/array');
+    assert(xml.includes('Epsilon="4.6,4.8,5"'), 'Mixed: array Epsilon');
+    assert(xml.includes('Kappa="0.001,0.001,0.001"'), 'Mixed: scalar Kappa expanded to 3-element array');
+    assert(xml.includes('Sigma="0.1,0.2,0.3"'), 'Mixed: array Sigma');
+  }
+
+  // Sigma scalar support
+  {
+    const CSX = new ContinuousStructure();
+    CSX.AddMaterial('lossy', { Epsilon: 4.6, Sigma: 0.05 });
+    const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+    FDTD.SetGaussExcite(1e9, 0.5e9);
+    FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    FDTD.SetCSX(CSX);
+    CSX.GetGrid().SetDeltaUnit(1e-3);
+    CSX.GetGrid().AddLine('x', [0, 1]);
+    CSX.GetGrid().AddLine('y', [0, 1]);
+    CSX.GetGrid().AddLine('z', [0, 1]);
+    const xml = FDTD.GenerateXML();
+    assert(xml.includes('Sigma="0.05"'), 'Scalar Sigma in XML');
+    assert(!xml.includes('Isotropy'), 'No Isotropy for scalar-only with Sigma');
+  }
+}
+
+// -----------------------------------------------------------------------
+// Test: ems-api.mjs AddDump / DumpBox XML generation
+// -----------------------------------------------------------------------
+function testEmsApiDumpBoxXML() {
+  console.log('\n=== Test: DumpBox XML (ems-api) ===');
+
+  // E-field time-domain dump (default options)
+  {
+    const CSX = new ContinuousStructure();
+    CSX.AddDump('Et_dump', [-50, -50, 0], [50, 50, 0]);
+    const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+    FDTD.SetGaussExcite(1e9, 0.5e9);
+    FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    FDTD.SetCSX(CSX);
+    CSX.GetGrid().AddLine('x', [-50, 50]);
+    CSX.GetGrid().AddLine('y', [-50, 50]);
+    CSX.GetGrid().AddLine('z', [-10, 10]);
+    const xml = FDTD.GenerateXML();
+    assert(xml.includes('DumpBox Name="Et_dump"'), 'TD E-field dump has DumpBox element');
+    assert(xml.includes('DumpType="0"'), 'TD E-field dump has DumpType=0');
+    assert(xml.includes('DumpMode="0"'), 'TD E-field dump has DumpMode=0');
+    assert(xml.includes('FileType="1"'), 'TD E-field dump has FileType=1');
+    assert(xml.includes('<P1 X="-50" Y="-50" Z="0"/>'), 'TD E-field dump has start point');
+    assert(xml.includes('<P2 X="50" Y="50" Z="0"/>'), 'TD E-field dump has stop point');
+    assert(!xml.includes('FD_Samples'), 'TD dump has no FD_Samples');
+    assert(!xml.includes('SubSampling'), 'TD dump has no SubSampling');
+  }
+
+  // H-field frequency-domain dump with frequencies
+  {
+    const CSX = new ContinuousStructure();
+    CSX.AddDump('Hf_dump', [0, 0, 0], [10, 10, 10], {
+      dumpType: 11, frequencies: [1e9, 2e9, 3e9],
+    });
+    const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+    FDTD.SetGaussExcite(2e9, 1.5e9);
+    FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    FDTD.SetCSX(CSX);
+    CSX.GetGrid().AddLine('x', [0, 10]);
+    CSX.GetGrid().AddLine('y', [0, 10]);
+    CSX.GetGrid().AddLine('z', [0, 10]);
+    const xml = FDTD.GenerateXML();
+    assert(xml.includes('DumpType="11"'), 'FD H-field dump has DumpType=11');
+    assert(xml.includes('<FD_Samples>1e+9,2e+9,3e+9</FD_Samples>'), 'FD dump has FD_Samples with frequencies');
+  }
+
+  // SubSampling attribute
+  {
+    const CSX = new ContinuousStructure();
+    CSX.AddDump('Et_sub', [0, 0, 0], [10, 10, 10], {
+      dumpType: 0, subSampling: [2, 2, 4],
+    });
+    const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+    FDTD.SetGaussExcite(1e9, 0.5e9);
+    FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    FDTD.SetCSX(CSX);
+    CSX.GetGrid().AddLine('x', [0, 10]);
+    CSX.GetGrid().AddLine('y', [0, 10]);
+    CSX.GetGrid().AddLine('z', [0, 10]);
+    const xml = FDTD.GenerateXML();
+    assert(xml.includes('SubSampling="2,2,4"'), 'Dump has SubSampling attribute');
+  }
+
+  // DumpMode and FileType attributes
+  {
+    const CSX = new ContinuousStructure();
+    CSX.AddDump('Ef_cell', [0, 0, 0], [5, 5, 5], {
+      dumpType: 10, dumpMode: 1, fileType: 1,
+      frequencies: [2.4e9],
+    });
+    const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+    FDTD.SetGaussExcite(2.4e9, 1e9);
+    FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+    FDTD.SetCSX(CSX);
+    CSX.GetGrid().AddLine('x', [0, 5]);
+    CSX.GetGrid().AddLine('y', [0, 5]);
+    CSX.GetGrid().AddLine('z', [0, 5]);
+    const xml = FDTD.GenerateXML();
+    assert(xml.includes('DumpMode="1"'), 'Cell-interpolated dump has DumpMode=1');
+    assert(xml.includes('FileType="1"'), 'Dump has FileType=1 (HDF5)');
+    assert(xml.includes('DumpType="10"'), 'FD E-field has DumpType=10');
+  }
+}
+
+// -----------------------------------------------------------------------
+// Test: CylindricalShell primitive XML in ems-api.mjs
+// -----------------------------------------------------------------------
+function testEmsApiCylindricalShellXML() {
+  console.log('\n=== Test: CylindricalShell XML (ems-api) ===');
+
+  const CSX = new ContinuousStructure();
+  const metal = CSX.AddMetal('shield');
+  metal.AddCylindricalShell([0, 0, 0], [0, 0, 50], 2.5, 0.5, 5);
+
+  const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+  FDTD.SetGaussExcite(1e9, 0.5e9);
+  FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  FDTD.SetCSX(CSX);
+  CSX.GetGrid().AddLine('x', [-5, 5]);
+  CSX.GetGrid().AddLine('y', [-5, 5]);
+  CSX.GetGrid().AddLine('z', [0, 50]);
+  const xml = FDTD.GenerateXML();
+
+  assert(xml.includes('<CylindricalShell'), 'ems-api CylindricalShell tag present');
+  assert(xml.includes('Radius="2.5"'), 'ems-api CylindricalShell has Radius');
+  assert(xml.includes('ShellWidth="0.5"'), 'ems-api CylindricalShell has ShellWidth');
+  assert(xml.includes('Priority="5"'), 'ems-api CylindricalShell has priority');
+  assert(xml.includes('<P1 X="0" Y="0" Z="0"/>'), 'ems-api CylindricalShell has P1');
+  assert(xml.includes('<P2 X="0" Y="0" Z="50"/>'), 'ems-api CylindricalShell has P2');
+}
+
+// -----------------------------------------------------------------------
+// Test: Excitation weight functions in ems-api.mjs
+// -----------------------------------------------------------------------
+function testEmsApiExcitationWeightXML() {
+  console.log('\n=== Test: Excitation Weight Functions (ems-api) ===');
+
+  const CSX = new ContinuousStructure();
+  const exc = CSX.AddExcitation('weighted_exc', 0, [1, 1, 0], {
+    WeightX: 'x/(x*x+y*y)',
+    WeightY: 'y/(x*x+y*y)',
+    WeightZ: '0',
+  });
+  exc.AddBox([0, 0, 0], [1, 1, 0], 5);
+
+  const FDTD = new OpenEMS({ NrTS: 100, EndCriteria: 1e-4 });
+  FDTD.SetGaussExcite(1e9, 0.5e9);
+  FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'PEC', 'PEC']);
+  FDTD.SetCSX(CSX);
+  CSX.GetGrid().AddLine('x', [0, 1]);
+  CSX.GetGrid().AddLine('y', [0, 1]);
+  CSX.GetGrid().AddLine('z', [0, 1]);
+  const xml = FDTD.GenerateXML();
+
+  assert(xml.includes('<Weight'), 'XML has Weight element');
+  assert(xml.includes('X="x/(x*x+y*y)"'), 'Weight X function present');
+  assert(xml.includes('Y="y/(x*x+y*y)"'), 'Weight Y function present');
+  assert(xml.includes('Z="0"'), 'Weight Z function present');
+}
+
+// -----------------------------------------------------------------------
+// Test: CoaxialPort XML generation in ems-api.mjs
+// -----------------------------------------------------------------------
+function testEmsApiCoaxialPortXML() {
+  console.log('\n=== Test: CoaxialPort XML (ems-api) ===');
+
+  const CSX = new ContinuousStructure();
+  CSX.AddMetal('PEC');
+  const grid = CSX.GetGrid();
+  grid.SetDeltaUnit(1e-3);
+  // Create a mesh with enough lines for the coax port
+  for (let z = 0; z <= 50; z += 2) grid.AddLine('z', z);
+  for (let x = -5; x <= 5; x += 0.5) grid.AddLine('x', x);
+  for (let y = -5; y <= 5; y += 0.5) grid.AddLine('y', y);
+
+  const FDTD = new OpenEMS({ NrTS: 5000, EndCriteria: 1e-4 });
+  FDTD.SetGaussExcite(5e9, 4e9);
+  FDTD.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'MUR', 'MUR']);
+  FDTD.SetCSX(CSX);
+
+  const result = FDTD.AddCoaxialPort(1, 'PEC', [0, 0, 0], [0, 0, 50], 'z', 0.5, 1.15, 1.5, {
+    excite: 1,
+  });
+
+  assert(result.nr === 1, 'CoaxialPort returns port number');
+
+  const xml = FDTD.GenerateXML();
+
+  // Inner conductor
+  assert(xml.includes('Cylinder'), 'XML has inner conductor Cylinder');
+  assert(xml.includes('Radius="0.5"'), 'Inner conductor has correct radius');
+
+  // Outer shield
+  assert(xml.includes('CylindricalShell'), 'XML has outer shield CylindricalShell');
+
+  // Voltage probes (3)
+  assert(xml.includes('port_ut1A'), 'XML has voltage probe A');
+  assert(xml.includes('port_ut1B'), 'XML has voltage probe B');
+  assert(xml.includes('port_ut1C'), 'XML has voltage probe C');
+
+  // Current probes (2)
+  assert(xml.includes('port_it1A'), 'XML has current probe A');
+  assert(xml.includes('port_it1B'), 'XML has current probe B');
+
+  // Excitation with weight functions
+  assert(xml.includes('port_excite_1'), 'XML has excitation for port');
+  assert(xml.includes('<Weight'), 'XML has Weight element for TEM excitation');
+
+  // Verify port stored in _ports
+  assert(FDTD._ports.length === 1, 'Port stored in FDTD._ports');
+  assert(FDTD._ports[0].type === 'coaxial', 'Port type is coaxial');
+  assert(FDTD._ports[0].r_i === 0.5, 'Port stores r_i');
+  assert(FDTD._ports[0].r_o === 1.15, 'Port stores r_o');
+
+  // Verify property reuse: inner conductor and outer shield should be on the same Metal property as user's PEC
+  const metalProps = CSX._properties.filter(p => p.type === 'Metal' && p.name === 'PEC');
+  assert(metalProps.length === 1, 'Only one PEC Metal property exists (reused, not duplicated)');
+  assert(metalProps[0].primitives.length >= 2, 'PEC property has at least 2 primitives (inner + outer)');
+
+  // Verify dielectric fill property reuse
+  const CSX2 = new ContinuousStructure();
+  CSX2.AddMetal('PEC2');
+  CSX2.AddMaterial('FR4', { Epsilon: 3.38, Kappa: 0.001 });
+  const grid2 = CSX2.GetGrid();
+  grid2.SetDeltaUnit(1e-3);
+  for (let z = 0; z <= 50; z += 2) grid2.AddLine('z', z);
+  for (let x = -5; x <= 5; x += 0.5) grid2.AddLine('x', x);
+  for (let y = -5; y <= 5; y += 0.5) grid2.AddLine('y', y);
+  const FDTD2 = new OpenEMS({ NrTS: 5000 });
+  FDTD2.SetGaussExcite(5e9, 4e9);
+  FDTD2.SetBoundaryCond(['PEC', 'PEC', 'PEC', 'PEC', 'MUR', 'MUR']);
+  FDTD2.SetCSX(CSX2);
+  FDTD2.AddCoaxialPort(1, 'PEC2', [0, 0, 0], [0, 0, 50], 'z', 0.5, 1.15, 1.5, { excite: 1, matName: 'FR4' });
+  const xml2 = FDTD2.GenerateXML();
+  const matProps = CSX2._properties.filter(p => p.type === 'Material' && p.name === 'FR4');
+  assert(matProps.length === 1, 'Only one FR4 Material property (reused for dielectric fill)');
+  assert(xml2.includes('Epsilon="3.38"'), 'Dielectric fill uses correct Epsilon from existing material');
+  assert(matProps[0].primitives.length >= 1, 'FR4 property has dielectric fill CylindricalShell primitive');
+}
+
+// -----------------------------------------------------------------------
+// Test: CoaxialPort analytical impedance
+// -----------------------------------------------------------------------
+function testCoaxialPortImpedance() {
+  console.log('\n=== Test: CoaxialPort Analytical Impedance ===');
+
+  // Z0 = 60/sqrt(eps_r) * ln(r_o/r_i)
+  // For air-filled (eps_r=1): Z0 = 60 * ln(r_o/r_i)
+  const r_i = 0.5e-3;
+  const r_o = 1.15e-3;
+  const r_os = 1.5e-3;
+  const expectedZ = 60 * Math.log(r_o / r_i);
+
+  // Create a minimal port
+  const mockSim = { _grid: null };
+  const port = new CoaxialPort(mockSim, {
+    portNr: 1,
+    metalProp: 'PEC',
+    start: [0, 0, 0],
+    stop: [0, 0, 0.05],
+    propDir: 2,
+    r_i, r_o, r_os,
+    epsR: 1,
+  });
+
+  const zErr = Math.abs(port.Z_ref_analytical - expectedZ) / expectedZ;
+  assert(zErr < 1e-10, `Analytical Z0 = ${port.Z_ref_analytical.toFixed(2)} Ohm (expected ${expectedZ.toFixed(2)} Ohm)`);
+  assert(port.Z_ref === port.Z_ref_analytical, 'Z_ref defaults to analytical value');
+
+  // With dielectric fill (eps_r = 2.2)
+  const port2 = new CoaxialPort(mockSim, {
+    portNr: 2,
+    metalProp: 'PEC',
+    start: [0, 0, 0],
+    stop: [0, 0, 0.05],
+    propDir: 2,
+    r_i, r_o, r_os,
+    epsR: 2.2,
+  });
+  const expectedZ2 = 60 / Math.sqrt(2.2) * Math.log(r_o / r_i);
+  const zErr2 = Math.abs(port2.Z_ref_analytical - expectedZ2) / expectedZ2;
+  assert(zErr2 < 1e-10, `Dielectric-filled Z0 = ${port2.Z_ref_analytical.toFixed(2)} Ohm (expected ${expectedZ2.toFixed(2)} Ohm)`);
+
+  // Standard 50 Ohm coax: r_o/r_i = exp(50/60) ≈ 2.30
+  const ratio50 = Math.exp(50 / 60);
+  const r_i_50 = 1;
+  const r_o_50 = r_i_50 * ratio50;
+  const port50 = new CoaxialPort(mockSim, {
+    portNr: 3,
+    metalProp: 'PEC',
+    start: [0, 0, 0],
+    stop: [0, 0, 1],
+    propDir: 2,
+    r_i: r_i_50, r_o: r_o_50, r_os: r_o_50 + 0.5,
+  });
+  assert(Math.abs(port50.Z_ref_analytical - 50) < 0.01, `50 Ohm coax: Z0 = ${port50.Z_ref_analytical.toFixed(4)} Ohm`);
+}
+
+// -----------------------------------------------------------------------
+// Test: CoaxialPort probe layout
+// -----------------------------------------------------------------------
+function testCoaxialPortProbeLayout() {
+  console.log('\n=== Test: CoaxialPort Probe Layout ===');
+
+  const gridZ = [];
+  for (let z = 0; z <= 50; z += 2) gridZ.push(z);
+  const gridXY = [];
+  for (let v = -5; v <= 5; v += 0.5) gridXY.push(v);
+
+  const mockSim = {
+    _grid: {
+      x: gridXY,
+      y: gridXY,
+      z: gridZ,
+    },
+  };
+
+  const port = new CoaxialPort(mockSim, {
+    portNr: 1,
+    metalProp: 'PEC',
+    start: [0, 0, 0],
+    stop: [0, 0, 50],
+    propDir: 2,
+    r_i: 0.5,
+    r_o: 1.15,
+    r_os: 1.5,
+    excite: 1,
+  });
+
+  assert(port.U_filenames.length === 3, 'CoaxialPort has 3 voltage probe filenames');
+  assert(port.I_filenames.length === 2, 'CoaxialPort has 2 current probe filenames');
+  assert(port.U_filenames[0].endsWith('A'), 'First voltage probe ends with A');
+  assert(port.U_filenames[2].endsWith('C'), 'Third voltage probe ends with C');
+  assert(port._u_probes.length === 3, 'CoaxialPort has 3 voltage probe definitions');
+  assert(port._i_probes.length === 2, 'CoaxialPort has 2 current probe definitions');
+  assert(port.direction === 1, 'Direction is +1 for positive z propagation');
+  assert(port.U_delta.length === 2, 'U_delta has 2 elements');
+  assert(port.I_delta.length === 1, 'I_delta has 1 element');
+}
+
+// -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
 async function main() {
@@ -2373,6 +3028,27 @@ async function main() {
   testReadNF2FFSurfaceDataError();
 
   // readFromXML removed — XML round-trip via native CSXCAD csxToXML/csxFromXML
+
+  // ems-api.mjs polygon primitive tests
+  testEmsApiPolygonXML();
+  testEmsApiLinPolyXML();
+  testEmsApiRotPolyXML();
+
+  // ems-api.mjs CSTransform tests
+  testEmsApiTransformXML();
+
+  // ems-api.mjs anisotropic material tests
+  testAnisotropicMaterial();
+
+  // ems-api.mjs DumpBox tests
+  testEmsApiDumpBoxXML();
+
+  // ems-api.mjs CylindricalShell and CoaxialPort tests
+  testEmsApiCylindricalShellXML();
+  testEmsApiExcitationWeightXML();
+  testEmsApiCoaxialPortXML();
+  testCoaxialPortImpedance();
+  testCoaxialPortProbeLayout();
 
   // CSXCAD native bindings tests
   await testCSXCADBindings();

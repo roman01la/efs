@@ -234,6 +234,18 @@ class Mesh {
   }
 }
 
+function withTransforms(prim) {
+  prim._transforms = [];
+  prim.Translate = (x, y, z) => { prim._transforms.push({ type: 'Translate', args: [x, y, z] }); return prim; };
+  prim.Rotate_X = (angle) => { prim._transforms.push({ type: 'Rotate_X', args: [angle] }); return prim; };
+  prim.Rotate_Y = (angle) => { prim._transforms.push({ type: 'Rotate_Y', args: [angle] }); return prim; };
+  prim.Rotate_Z = (angle) => { prim._transforms.push({ type: 'Rotate_Z', args: [angle] }); return prim; };
+  prim.Rotate_Origin = (x, y, z, angle) => { prim._transforms.push({ type: 'Rotate_Origin', args: [x, y, z, angle] }); return prim; };
+  prim.Scale = (factor) => { prim._transforms.push({ type: 'Scale', args: [factor] }); return prim; };
+  prim.Scale3 = (fx, fy, fz) => { prim._transforms.push({ type: 'Scale3', args: [fx, fy, fz] }); return prim; };
+  return prim;
+}
+
 class Property {
   constructor(type, name, attrs = {}) {
     this.type = type;
@@ -243,28 +255,57 @@ class Property {
   }
 
   AddBox(start, stop, priority = 0) {
-    this.primitives.push({ kind: 'Box', priority, start, stop });
-    return this;
+    const prim = { kind: 'Box', priority, start, stop };
+    this.primitives.push(prim);
+    return withTransforms(prim);
   }
 
   AddCylinder(start, stop, radius, priority = 0) {
-    this.primitives.push({ kind: 'Cylinder', priority, start, stop, radius });
-    return this;
+    const prim = { kind: 'Cylinder', priority, start, stop, radius };
+    this.primitives.push(prim);
+    return withTransforms(prim);
   }
 
   AddSphere(center, radius, priority = 0) {
-    this.primitives.push({ kind: 'Sphere', priority, center, radius });
-    return this;
+    const prim = { kind: 'Sphere', priority, center, radius };
+    this.primitives.push(prim);
+    return withTransforms(prim);
   }
 
   AddCurve(points, priority = 0) {
-    this.primitives.push({ kind: 'Curve', priority, points });
-    return this;
+    const prim = { kind: 'Curve', priority, points };
+    this.primitives.push(prim);
+    return withTransforms(prim);
   }
 
   AddWire(points, radius, priority = 0) {
-    this.primitives.push({ kind: 'Wire', priority, points, radius });
-    return this;
+    const prim = { kind: 'Wire', priority, points, radius };
+    this.primitives.push(prim);
+    return withTransforms(prim);
+  }
+
+  AddPolygon(points, normDir, elevation, priority = 0) {
+    const prim = { kind: 'Polygon', priority, points, normDir, elevation };
+    this.primitives.push(prim);
+    return withTransforms(prim);
+  }
+
+  AddLinPoly(points, normDir, elevation, length, priority = 0) {
+    const prim = { kind: 'LinPoly', priority, points, normDir, elevation, length };
+    this.primitives.push(prim);
+    return withTransforms(prim);
+  }
+
+  AddRotPoly(points, normDir, rotAxisDir, startAngle, stopAngle, priority = 0) {
+    const prim = { kind: 'RotPoly', priority, points, normDir, rotAxisDir, startAngle, stopAngle };
+    this.primitives.push(prim);
+    return withTransforms(prim);
+  }
+
+  AddCylindricalShell(start, stop, radius, shellWidth, priority = 0) {
+    const prim = { kind: 'CylindricalShell', priority, start, stop, radius, shellWidth };
+    this.primitives.push(prim);
+    return withTransforms(prim);
   }
 
   _toXML(indent) {
@@ -280,7 +321,10 @@ class Property {
         break;
       case 'Material': {
         tag = 'Material';
+        const matKeys = ['Epsilon', 'Kappa', 'Mue', 'Sigma'];
+        const isAniso = matKeys.some((k) => Array.isArray(this.attrs[k]));
         attrStr = ` Name="${escapeXml(this.name)}"`;
+        if (isAniso) attrStr += ` Isotropy="0"`;
         break;
       }
       case 'ConductingSheet':
@@ -300,6 +344,7 @@ class Property {
         tag = 'Excitation';
         attrStr = ` Name="${escapeXml(this.name)}" Type="${this.attrs.Type ?? 0}"`;
         if (this.attrs.Excite != null) attrStr += ` Excite="${this.attrs.Excite}"`;
+        this._hasWeight = !!(this.attrs.WeightX || this.attrs.WeightY || this.attrs.WeightZ);
         break;
       case 'ProbeBox':
         tag = 'ProbeBox';
@@ -313,6 +358,7 @@ class Property {
         if (this.attrs.DumpType != null) attrStr += ` DumpType="${this.attrs.DumpType}"`;
         if (this.attrs.DumpMode != null) attrStr += ` DumpMode="${this.attrs.DumpMode}"`;
         if (this.attrs.FileType != null) attrStr += ` FileType="${this.attrs.FileType}"`;
+        if (this.attrs.SubSampling != null) attrStr += ` SubSampling="${this.attrs.SubSampling}"`;
         break;
       default:
         tag = this.type;
@@ -323,11 +369,26 @@ class Property {
     let xml = `${pad}<${tag}${attrStr}>\n`;
 
     if (this.type === 'Material') {
+      const matKeys = ['Epsilon', 'Kappa', 'Mue', 'Sigma'];
+      const isAniso = matKeys.some((k) => Array.isArray(this.attrs[k]));
+      const fmtProp = (v) => {
+        if (Array.isArray(v)) return v.map(fmtNum).join(',');
+        // When anisotropic, expand scalar to 3-element so all axes get the value
+        if (isAniso) return [v, v, v].map(fmtNum).join(',');
+        return fmtNum(v);
+      };
       const props = [];
-      if (this.attrs.Epsilon != null) props.push(`Epsilon="${this.attrs.Epsilon}"`);
-      if (this.attrs.Kappa != null) props.push(`Kappa="${this.attrs.Kappa}"`);
-      if (this.attrs.Mue != null) props.push(`Mue="${this.attrs.Mue}"`);
+      for (const k of matKeys) {
+        if (this.attrs[k] != null) props.push(`${k}="${fmtProp(this.attrs[k])}"`);
+      }
       if (props.length > 0) xml += `${pad2}<Property ${props.join(' ')}/>\n`;
+    }
+
+    if (this._hasWeight) {
+      const wx = this.attrs.WeightX || '1';
+      const wy = this.attrs.WeightY || '1';
+      const wz = this.attrs.WeightZ || '1';
+      xml += `${pad2}<Weight X="${escapeXml(String(wx))}" Y="${escapeXml(String(wy))}" Z="${escapeXml(String(wz))}"/>\n`;
     }
 
     if (this.attrs.FD_Samples != null) {
@@ -343,6 +404,16 @@ class Property {
     }
 
     xml += `${pad}</${tag}>\n`;
+    return xml;
+  }
+
+  _transformToXML(p, pad) {
+    if (!p._transforms || p._transforms.length === 0) return '';
+    let xml = `${pad}<Transformation>\n`;
+    for (const t of p._transforms) {
+      xml += `${pad}  <${t.type} Argument="${t.args.map(fmtNum).join(',')}"/>\n`;
+    }
+    xml += `${pad}</Transformation>\n`;
     return xml;
   }
 
@@ -362,18 +433,24 @@ class Property {
       }
       return points;
     };
+    const txf = this._transformToXML(p, pad + '  ');
+    const hasTxf = txf.length > 0;
 
     switch (p.kind) {
       case 'Box':
+        if (hasTxf) return `${pad}<Box Priority="${p.priority}">\n${pad}  ${point('P1', p.start)}${point('P2', p.stop)}\n${txf}${pad}</Box>\n`;
         return `${pad}<Box Priority="${p.priority}">${point('P1', p.start)}${point('P2', p.stop)}</Box>\n`;
       case 'Cylinder':
+        if (hasTxf) return `${pad}<Cylinder Priority="${p.priority}" Radius="${fv(p.radius)}">\n${pad}  ${point('P1', p.start)}${point('P2', p.stop)}\n${txf}${pad}</Cylinder>\n`;
         return `${pad}<Cylinder Priority="${p.priority}" Radius="${fv(p.radius)}">${point('P1', p.start)}${point('P2', p.stop)}</Cylinder>\n`;
       case 'Sphere':
+        if (hasTxf) return `${pad}<Sphere Priority="${p.priority}" Radius="${fv(p.radius)}">\n${pad}  ${point('P1', p.center)}${point('P2', p.center)}\n${txf}${pad}</Sphere>\n`;
         return `${pad}<Sphere Priority="${p.priority}" Radius="${fv(p.radius)}">${point('P1', p.center)}${point('P2', p.center)}</Sphere>\n`;
       case 'Curve': {
         const pts = normalizePoints(p.points);
         let xml = `${pad}<Curve Priority="${p.priority}">`;
         for (const pt of pts) xml += `<Vertex X="${fv(pt[0])}" Y="${fv(pt[1])}" Z="${fv(pt[2])}"/>`;
+        if (hasTxf) { xml += `\n${txf}${pad}`; }
         xml += `</Curve>\n`;
         return xml;
       }
@@ -381,9 +458,35 @@ class Property {
         const pts = normalizePoints(p.points);
         let xml = `${pad}<Wire Priority="${p.priority}" WireRadius="${fv(p.radius)}">`;
         for (const pt of pts) xml += `<Vertex X="${fv(pt[0])}" Y="${fv(pt[1])}" Z="${fv(pt[2])}"/>`;
+        if (hasTxf) { xml += `\n${txf}${pad}`; }
         xml += `</Wire>\n`;
         return xml;
       }
+      case 'Polygon': {
+        let xml = `${pad}<Polygon NormDir="${p.normDir}" Elevation="${fv(p.elevation)}" Priority="${p.priority}">\n`;
+        for (const pt of p.points) xml += `${pad}  <Vertex X1="${fv(pt[0])}" X2="${fv(pt[1])}"/>\n`;
+        xml += txf;
+        xml += `${pad}</Polygon>\n`;
+        return xml;
+      }
+      case 'LinPoly': {
+        let xml = `${pad}<LinPoly NormDir="${p.normDir}" Elevation="${fv(p.elevation)}" Length="${fv(p.length)}" Priority="${p.priority}">\n`;
+        for (const pt of p.points) xml += `${pad}  <Vertex X1="${fv(pt[0])}" X2="${fv(pt[1])}"/>\n`;
+        xml += txf;
+        xml += `${pad}</LinPoly>\n`;
+        return xml;
+      }
+      case 'RotPoly': {
+        let xml = `${pad}<RotPoly NormDir="${p.normDir}" RotAxisDir="${p.rotAxisDir}" Elevation="0" Priority="${p.priority}">\n`;
+        xml += `${pad}  <Angles Start="${fv(p.startAngle)}" Stop="${fv(p.stopAngle)}"/>\n`;
+        for (const pt of p.points) xml += `${pad}  <Vertex X1="${fv(pt[0])}" X2="${fv(pt[1])}"/>\n`;
+        xml += txf;
+        xml += `${pad}</RotPoly>\n`;
+        return xml;
+      }
+      case 'CylindricalShell':
+        if (hasTxf) return `${pad}<CylindricalShell Priority="${p.priority}" Radius="${fv(p.radius)}" ShellWidth="${fv(p.shellWidth)}">\n${pad}  ${point('P1', p.start)}${point('P2', p.stop)}\n${txf}${pad}</CylindricalShell>\n`;
+        return `${pad}<CylindricalShell Priority="${p.priority}" Radius="${fv(p.radius)}" ShellWidth="${fv(p.shellWidth)}">${point('P1', p.start)}${point('P2', p.stop)}</CylindricalShell>\n`;
       default:
         return '';
     }
@@ -400,14 +503,18 @@ class ContinuousStructure {
     return this._grid;
   }
 
+  GetProperty(name) {
+    return this._properties.find(p => p.name === name) || null;
+  }
+
   AddMetal(name) {
     const p = new Property('Metal', name);
     this._properties.push(p);
     return p;
   }
 
-  AddMaterial(name, { Epsilon, Kappa, Mue } = {}) {
-    const p = new Property('Material', name, { Epsilon, Kappa, Mue });
+  AddMaterial(name, { Epsilon, Kappa, Mue, Sigma } = {}) {
+    const p = new Property('Material', name, { Epsilon, Kappa, Mue, Sigma });
     this._properties.push(p);
     return p;
   }
@@ -418,10 +525,14 @@ class ContinuousStructure {
     return p;
   }
 
-  AddExcitation(name, type, exciteVec) {
-    const p = new Property('Excitation', name, {
+  AddExcitation(name, type, exciteVec, { WeightX, WeightY, WeightZ } = {}) {
+    const attrs = {
       Type: type, Excite: Array.isArray(exciteVec) ? exciteVec.join(',') : exciteVec,
-    });
+    };
+    if (WeightX != null) attrs.WeightX = WeightX;
+    if (WeightY != null) attrs.WeightY = WeightY;
+    if (WeightZ != null) attrs.WeightZ = WeightZ;
+    const p = new Property('Excitation', name, attrs);
     this._properties.push(p);
     return p;
   }
@@ -431,6 +542,21 @@ class ContinuousStructure {
     if (weight != null) attrs.Weight = weight;
     if (normDir != null) attrs.NormDir = normDir;
     const p = new Property('ProbeBox', name, attrs);
+    this._properties.push(p);
+    return p;
+  }
+
+  AddDump(name, start, stop, opts = {}) {
+    const dumpType = opts.dumpType ?? 0;
+    const dumpMode = opts.dumpMode ?? 0;
+    const fileType = opts.fileType ?? 1;
+    const attrs = { DumpType: dumpType, DumpMode: dumpMode, FileType: fileType };
+    if (opts.subSampling) attrs.SubSampling = opts.subSampling.join(',');
+    if (opts.frequencies && opts.frequencies.length > 0) {
+      attrs.FD_Samples = opts.frequencies.map(fmtNum).join(',');
+    }
+    const p = new Property('DumpBox', name, attrs);
+    p.AddBox(start, stop, 0);
     this._properties.push(p);
     return p;
   }
@@ -537,6 +663,181 @@ class OpenEMS {
 
     this._ports.push({ nr, R, start, stop, dir, excite });
     return { nr, lumped, vProbe, iProbe };
+  }
+
+  /**
+   * Add a coaxial transmission line port.
+   *
+   * @param {number} nr - port number
+   * @param {string} metalName - name of the PEC metal property (must already exist via AddMetal)
+   * @param {number[]} start - [x,y,z] start of coax axis
+   * @param {number[]} stop  - [x,y,z] end of coax axis
+   * @param {string|number} dir - propagation direction: 'x'|'y'|'z' or 0|1|2
+   * @param {number} r_i  - inner conductor radius
+   * @param {number} r_o  - outer conductor inner radius (dielectric outer boundary)
+   * @param {number} r_os - outer shield outer radius
+   * @param {object} [opts]
+   * @param {number} [opts.excite=0]       - excitation amplitude (0 = passive)
+   * @param {string} [opts.matName]        - dielectric fill material name (must already exist via AddMaterial)
+   * @param {number} [opts.feedShift=0]    - shift excitation from start [drawing units]
+   * @param {number} [opts.measPlaneShift] - shift measurement plane from start (default: midpoint)
+   * @param {number} [opts.feedR=Infinity] - lumped feed resistance
+   * @param {number} [opts.priority=5]
+   */
+  AddCoaxialPort(nr, metalName, start, stop, dir, r_i, r_o, r_os, { excite = 0, matName, feedShift = 0, measPlaneShift, feedR = Infinity, priority = 5 } = {}) {
+    const dirIdx = typeof dir === 'string' ? DIR_MAP[dir] : dir;
+    const nP = (dirIdx + 1) % 3;
+    const nPP = (dirIdx + 2) % 3;
+
+    const direction = stop[dirIdx] - start[dirIdx] > 0 ? 1 : -1;
+
+    // --- Geometry ---
+    // Reuse existing metal property for inner conductor and outer shield
+    let metalProp = this._csx.GetProperty(metalName);
+    if (!metalProp) {
+      metalProp = this._csx.AddMetal(metalName);
+    }
+
+    // Inner conductor: Cylinder
+    metalProp.AddCylinder(start, stop, r_i, priority);
+
+    // Outer shield: CylindricalShell
+    metalProp.AddCylindricalShell(start, stop, 0.5 * (r_o + r_os), r_os - r_o, priority);
+
+    // Dielectric fill (optional) — reuse existing material property
+    if (matName) {
+      let matProp = this._csx.GetProperty(matName);
+      if (!matProp) {
+        matProp = this._csx.AddMaterial(matName);
+      }
+      matProp.AddCylindricalShell(start, stop, 0.5 * (r_i + r_o), r_o - r_i, priority - 1);
+    }
+
+    // --- Measurement plane ---
+    const mesh = this._csx._grid;
+    const gridLines = mesh.GetLines(['x', 'y', 'z'][dirIdx]);
+
+    let measPos;
+    if (measPlaneShift != null) {
+      measPos = start[dirIdx] + direction * measPlaneShift;
+    } else {
+      measPos = (start[dirIdx] + stop[dirIdx]) / 2;
+    }
+
+    // Snap to nearest grid line
+    let measIdx = 0;
+    let minDist = Infinity;
+    for (let i = 0; i < gridLines.length; i++) {
+      const d = Math.abs(gridLines[i] - measPos);
+      if (d < minDist) { minDist = d; measIdx = i; }
+    }
+    if (measIdx < 1) measIdx = 1;
+    if (measIdx >= gridLines.length - 1) measIdx = gridLines.length - 2;
+
+    let probeIdx = [measIdx - 1, measIdx, measIdx + 1];
+    if (direction < 0) probeIdx = probeIdx.reverse();
+    const meshlines = probeIdx.map(i => gridLines[i]);
+
+    // --- Voltage probes (3) ---
+    const suffixes = ['A', 'B', 'C'];
+    for (let n = 0; n < 3; n++) {
+      const vStart = [0, 0, 0];
+      const vStop = [0, 0, 0];
+      vStart[dirIdx] = meshlines[n];
+      vStop[dirIdx] = meshlines[n];
+      vStart[nP] = start[nP] + r_i;
+      vStop[nP] = start[nP] + r_o;
+      vStart[nPP] = start[nPP];
+      vStop[nPP] = start[nPP];
+
+      const vName = `port_ut${nr}${suffixes[n]}`;
+      const vProbe = this._csx._addProperty('ProbeBox', vName, {
+        Type: 0, Weight: 1,
+      });
+      vProbe.AddBox(vStart, vStop, priority);
+    }
+
+    // --- Current probes (2) ---
+    for (let n = 0; n < 2; n++) {
+      const iStart = [0, 0, 0];
+      const iStop = [0, 0, 0];
+      iStart[dirIdx] = 0.5 * (meshlines[n] + meshlines[n + 1]);
+      iStop[dirIdx] = iStart[dirIdx];
+      iStart[nP] = start[nP] - r_i - 0.1 * (r_o - r_i);
+      iStop[nP] = start[nP] + r_i + 0.1 * (r_o - r_i);
+      iStart[nPP] = start[nPP] - r_i - 0.1 * (r_o - r_i);
+      iStop[nPP] = start[nPP] + r_i + 0.1 * (r_o - r_i);
+
+      const iName = `port_it${nr}${suffixes[n]}`;
+      const iProbe = this._csx._addProperty('ProbeBox', iName, {
+        Type: 1, Weight: direction, NormDir: dirIdx,
+      });
+      iProbe.AddBox(iStart, iStop, priority);
+    }
+
+    // --- Excitation with radial TEM weight functions ---
+    if (excite !== 0) {
+      const feedPos = start[dirIdx] + feedShift * direction;
+      let feedIdx = 0;
+      let fMinDist = Infinity;
+      for (let i = 0; i < gridLines.length; i++) {
+        const d = Math.abs(gridLines[i] - feedPos);
+        if (d < fMinDist) { fMinDist = d; feedIdx = i; }
+      }
+
+      const minCell = gridLines.length > 1
+        ? Math.min(...Array.from({ length: gridLines.length - 1 }, (_, i) => gridLines[i + 1] - gridLines[i]).filter(v => v > 0))
+        : 1;
+
+      const exStart = [...start];
+      const exStop = [...start];
+      exStart[dirIdx] = gridLines[feedIdx] - 0.01 * minCell;
+      exStop[dirIdx] = gridLines[feedIdx] + 0.01 * minCell;
+
+      const dirNames = ['x', 'y', 'z'];
+      const nameX = `(${dirNames[nP]}-${fmtNum(start[nP])})`;
+      const nameY = `(${dirNames[nPP]}-${fmtNum(start[nPP])})`;
+      const rExpr = `sqrt(${nameX}*${nameX}+${nameY}*${nameY})`;
+      const r2Expr = `(${nameX}*${nameX}+${nameY}*${nameY})`;
+      const mask = `(${rExpr}>${fmtNum(r_i)})*(${rExpr}<${fmtNum(r_o)})`;
+
+      const funcE = [0, 0, 0];
+      funcE[nP] = `${nameX}/${r2Expr}*${mask}`;
+      funcE[nPP] = `${nameY}/${r2Expr}*${mask}`;
+
+      const evec = [0, 0, 0];
+      evec[nP] = 1;
+      evec[nPP] = 1;
+
+      const weights = {};
+      if (funcE[0] && funcE[0] !== 0) weights.WeightX = funcE[0];
+      if (funcE[1] && funcE[1] !== 0) weights.WeightY = funcE[1];
+      if (funcE[2] && funcE[2] !== 0) weights.WeightZ = funcE[2];
+
+      const exc = this._csx.AddExcitation(`port_excite_${nr}`, 0, evec, weights);
+      exc.AddCylindricalShell(exStart, exStop, 0.5 * (r_i + r_o), r_o - r_i, 0);
+    }
+
+    // --- Feed resistance ---
+    if (feedR === 0) {
+      // Metal short at feed — reuse same metal property
+      const rStart = [...start];
+      const rStop = [...stop];
+      rStop[dirIdx] = rStart[dirIdx];
+      metalProp.AddCylindricalShell(rStart, rStop, 0.5 * (r_i + r_o), r_o - r_i, priority);
+    } else if (isFinite(feedR) && feedR > 0) {
+      throw new Error('Coaxial port with finite feed_R not yet implemented');
+    }
+
+    // Store port metadata
+    this._ports.push({
+      nr, type: 'coaxial', start, stop, dir: dirIdx, r_i, r_o, r_os,
+      excite, direction, meshlines, matName,
+      U_filenames: suffixes.map(s => `port_ut${nr}${s}`),
+      I_filenames: suffixes.slice(0, 2).map(s => `port_it${nr}${s}`),
+    });
+
+    return { nr };
   }
 
   CreateNF2FFBox({ frequency, opt_resolution } = {}) {

@@ -785,6 +785,382 @@ export class MSLPort extends Port {
 }
 
 /**
+ * Coaxial transmission line port: 3 voltage + 2 current probes with
+ * propagation-constant extraction, mirroring the Matlab AddCoaxialPort.
+ * Uses analytical TEM impedance as reference: Z0 = 60/sqrt(eps_r) * ln(r_o/r_i).
+ */
+export class CoaxialPort extends Port {
+  /**
+   * @param {object} sim - Simulation instance (for grid access)
+   * @param {object} params
+   * @param {number} params.portNr
+   * @param {string} params.metalProp - metal property name
+   * @param {number[]} params.start
+   * @param {number[]} params.stop
+   * @param {number} params.propDir - propagation direction: 0=x, 1=y, 2=z
+   * @param {number} params.r_i  - inner conductor radius
+   * @param {number} params.r_o  - outer conductor inner radius
+   * @param {number} params.r_os - outer shield outer radius
+   * @param {number} [params.excite=0]
+   * @param {number} [params.priority=0]
+   * @param {string} [params.prefix='']
+   * @param {number} [params.feedShift=0]
+   * @param {number} [params.measPlaneShift]
+   * @param {number} [params.feedR=Infinity]
+   * @param {number} [params.epsR=1] - dielectric relative permittivity
+   */
+  constructor(sim, { portNr, metalProp, start, stop, propDir, r_i, r_o, r_os, excite = 0, priority = 0, prefix = '', feedShift = 0, measPlaneShift, feedR = Infinity, epsR = 1 }) {
+    super({ portNr, start, stop, excite, priority, prefix });
+    this.propDir = propDir;
+    this.metalProp = metalProp;
+    this.r_i = r_i;
+    this.r_o = r_o;
+    this.r_os = r_os;
+    this.feedShift = feedShift;
+    this.feedR = feedR;
+    this.epsR = epsR;
+
+    const nP = (propDir + 1) % 3;
+    const nPP = (propDir + 2) % 3;
+    this.nP = nP;
+    this.nPP = nPP;
+
+    this.direction = Math.sign(stop[propDir] - start[propDir]);
+
+    // Analytical TEM impedance: Z0 = (Z0_free / 2pi) * (1/sqrt(eps_r)) * ln(r_o/r_i)
+    // = 60 / sqrt(eps_r) * ln(r_o / r_i)
+    this.Z_ref_analytical = (60 / Math.sqrt(epsR)) * Math.log(r_o / r_i);
+    this.Z_ref = this.Z_ref_analytical;
+
+    // Default measPlaneShift = half port length
+    if (measPlaneShift !== undefined) {
+      this.measPlaneShift = measPlaneShift;
+    } else {
+      this.measPlaneShift = 0.5 * Math.abs(start[propDir] - stop[propDir]);
+    }
+    this.measPlanePos = start[propDir] + this.measPlaneShift * this.direction;
+
+    // Get grid lines
+    const gridLines = this._getGridLines(sim, propDir);
+
+    if (gridLines && gridLines.length > 5) {
+      // Snap to nearest grid line
+      let measIdx = 0;
+      let minDist = Infinity;
+      for (let i = 0; i < gridLines.length; i++) {
+        const d = Math.abs(gridLines[i] - this.measPlanePos);
+        if (d < minDist) { minDist = d; measIdx = i; }
+      }
+      if (measIdx < 1) measIdx = 1;
+      if (measIdx >= gridLines.length - 1) measIdx = gridLines.length - 2;
+
+      this.measPlaneShift = Math.abs(start[propDir] - gridLines[measIdx]);
+
+      let probeIdx = [measIdx - 1, measIdx, measIdx + 1];
+      if (this.direction < 0) probeIdx = probeIdx.reverse();
+
+      const meshlines = probeIdx.map(i => gridLines[i]);
+      this.U_delta = [meshlines[1] - meshlines[0], meshlines[2] - meshlines[1]];
+
+      // 3 voltage probes (A, B, C)
+      this.U_filenames = [];
+      this._u_probes = [];
+      const suffixes = ['A', 'B', 'C'];
+      for (let n = 0; n < 3; n++) {
+        const uStart = [0, 0, 0];
+        const uStop = [0, 0, 0];
+        uStart[propDir] = meshlines[n];
+        uStop[propDir] = meshlines[n];
+        uStart[nP] = start[nP] + r_i;
+        uStop[nP] = start[nP] + r_o;
+        uStart[nPP] = start[nPP];
+        uStop[nPP] = start[nPP];
+
+        const uName = this._label('ut') + suffixes[n];
+        this.U_filenames.push(uName);
+        this._u_probes.push({ name: uName, start: uStart, stop: uStop });
+      }
+
+      // 2 current probes (A, B)
+      const iProbePos = [
+        meshlines[0] + (meshlines[1] - meshlines[0]) / 2,
+        meshlines[1] + (meshlines[2] - meshlines[1]) / 2,
+      ];
+      this.I_delta = [iProbePos[1] - iProbePos[0]];
+
+      this.I_filenames = [];
+      this._i_probes = [];
+      for (let n = 0; n < 2; n++) {
+        const iStart = [0, 0, 0];
+        const iStop = [0, 0, 0];
+        iStart[propDir] = iProbePos[n];
+        iStop[propDir] = iProbePos[n];
+        iStart[nP] = start[nP] - r_i - 0.1 * (r_o - r_i);
+        iStop[nP] = start[nP] + r_i + 0.1 * (r_o - r_i);
+        iStart[nPP] = start[nPP] - r_i - 0.1 * (r_o - r_i);
+        iStop[nPP] = start[nPP] + r_i + 0.1 * (r_o - r_i);
+
+        const iName = this._label('it') + suffixes[n];
+        this.I_filenames.push(iName);
+        this._i_probes.push({ name: iName, start: iStart, stop: iStop });
+      }
+
+      this._meshlines = meshlines;
+    } else {
+      // Fallback
+      this.U_delta = [1, 1];
+      this.I_delta = [1];
+      this.U_filenames = [this._label('ut') + 'A', this._label('ut') + 'B', this._label('ut') + 'C'];
+      this.I_filenames = [this._label('it') + 'A', this._label('it') + 'B'];
+      this._u_probes = [];
+      this._i_probes = [];
+      this._meshlines = null;
+    }
+
+    // Feed position
+    if (gridLines && gridLines.length > 0) {
+      const feedPos = start[propDir] + this.feedShift * this.direction;
+      let feedIdx = 0;
+      let minDist = Infinity;
+      for (let i = 0; i < gridLines.length; i++) {
+        const d = Math.abs(gridLines[i] - feedPos);
+        if (d < minDist) { minDist = d; feedIdx = i; }
+      }
+      this._feedPos = gridLines[feedIdx];
+    } else {
+      this._feedPos = start[propDir];
+    }
+
+    this.beta = null;
+    this.ZL = null;
+  }
+
+  /**
+   * Get sorted grid lines for a direction from the simulation.
+   */
+  _getGridLines(sim, dir) {
+    if (!sim || !sim._grid) return null;
+    const g = sim._grid;
+    if (dir === 0) return g.x && g.x.length > 0 ? [...g.x].sort((a, b) => a - b) : null;
+    if (dir === 1) return g.y && g.y.length > 0 ? [...g.y].sort((a, b) => a - b) : null;
+    if (dir === 2) return g.z && g.z.length > 0 ? [...g.z].sort((a, b) => a - b) : null;
+    return null;
+  }
+
+  /**
+   * Add coaxial port geometry to native ContinuousStructure.
+   */
+  addToCSX(csx, Module) {
+    const ps = csx.GetParameterSet();
+    const p = this.priority;
+    const grid = csx.GetGrid();
+    const propDir = this.propDir;
+    const nP = this.nP;
+    const nPP = this.nPP;
+    const dir = this.direction;
+
+    // Add port bounds as grid lines
+    for (let d = 0; d < 3; d++) {
+      grid.AddDiscLine(d, this.start[d]);
+      grid.AddDiscLine(d, this.stop[d]);
+    }
+
+    // Inner conductor (Cylinder)
+    const innerMetal = Module.CSPropMetal.create(ps);
+    innerMetal.SetName(`${this.metalProp}_coax_inner_${this.number}`);
+    csx.AddProperty(innerMetal);
+    const innerCyl = Module.CSPrimCylinder.create(ps, innerMetal);
+    innerCyl.SetStartStop(this.start[0], this.start[1], this.start[2],
+                          this.stop[0], this.stop[1], this.stop[2]);
+    innerCyl.SetRadius(this.r_i);
+    innerCyl.SetPriority(p);
+
+    // Outer shield (CylindricalShell)
+    const outerMetal = Module.CSPropMetal.create(ps);
+    outerMetal.SetName(`${this.metalProp}_coax_outer_${this.number}`);
+    csx.AddProperty(outerMetal);
+    const outerShell = Module.CSPrimCylindricalShell.create(ps, outerMetal);
+    outerShell.SetStartStop(this.start[0], this.start[1], this.start[2],
+                            this.stop[0], this.stop[1], this.stop[2]);
+    outerShell.SetRadius(0.5 * (this.r_o + this.r_os));
+    outerShell.SetShellWidth(this.r_os - this.r_o);
+    outerShell.SetPriority(p);
+
+    // Excitation with radial TEM weight functions
+    if (this.excite !== 0) {
+      const eStart = [...this.start];
+      const eStop = [...this.start];
+
+      // Find minimum cell size for nonzero excitation thickness
+      const numPropLines = grid.GetQtyLines(propDir);
+      let minCell = 1;
+      if (numPropLines > 1) {
+        minCell = Infinity;
+        for (let i = 0; i < numPropLines - 1; i++) {
+          const d = Math.abs(grid.GetLine(propDir, i + 1) - grid.GetLine(propDir, i));
+          if (d > 0 && d < minCell) minCell = d;
+        }
+      }
+
+      eStart[propDir] = this._feedPos - 0.01 * minCell;
+      eStop[propDir] = this._feedPos + 0.01 * minCell;
+
+      const dirNames = ['x', 'y', 'z'];
+      const nameX = `(${dirNames[nP]}-${this.start[nP]})`;
+      const nameY = `(${dirNames[nPP]}-${this.start[nPP]})`;
+      const rExpr = `sqrt(${nameX}*${nameX}+${nameY}*${nameY})`;
+      const r2Expr = `(${nameX}*${nameX}+${nameY}*${nameY})`;
+      const mask = `(${rExpr}>${this.r_i})*(${rExpr}<${this.r_o})`;
+
+      const funcE = [0, 0, 0];
+      funcE[nP] = `${nameX}/${r2Expr}*${mask}`;
+      funcE[nPP] = `${nameY}/${r2Expr}*${mask}`;
+
+      const eVec = [0, 0, 0];
+      eVec[nP] = 1;
+      eVec[nPP] = 1;
+
+      const exc = Module.CSPropExcitation.create(ps, 0);
+      exc.SetName(this._label('excite'));
+      exc.SetExcitType(0);
+      for (let c = 0; c < 3; c++) exc.SetExcitation(eVec[c], c);
+      for (let c = 0; c < 3; c++) {
+        if (funcE[c] && funcE[c] !== 0 && funcE[c] !== '0') {
+          try { exc.SetWeightFunction(String(funcE[c]), c); } catch (e) { /* ignore */ }
+        }
+      }
+      csx.AddProperty(exc);
+      const excShell = Module.CSPrimCylindricalShell.create(ps, exc);
+      excShell.SetStartStop(eStart[0], eStart[1], eStart[2], eStop[0], eStop[1], eStop[2]);
+      excShell.SetRadius(0.5 * (this.r_i + this.r_o));
+      excShell.SetShellWidth(this.r_o - this.r_i);
+      excShell.SetPriority(0);
+    }
+
+    // Feed resistance
+    if (this.feedR === 0) {
+      const rMetal = Module.CSPropMetal.create(ps);
+      rMetal.SetName(this._label('resist'));
+      csx.AddProperty(rMetal);
+      const rStart = [...this.start];
+      const rStop = [...this.stop];
+      rStop[propDir] = rStart[propDir];
+      const rShell = Module.CSPrimCylindricalShell.create(ps, rMetal);
+      rShell.SetStartStop(rStart[0], rStart[1], rStart[2], rStop[0], rStop[1], rStop[2]);
+      rShell.SetRadius(0.5 * (this.r_i + this.r_o));
+      rShell.SetShellWidth(this.r_o - this.r_i);
+      rShell.SetPriority(p);
+    }
+
+    // Voltage probes (3)
+    for (const probe of this._u_probes) {
+      const vp = Module.CSPropProbeBox.create(ps);
+      vp.SetName(probe.name);
+      vp.SetProbeType(0);
+      vp.SetWeighting(1);
+      csx.AddProperty(vp);
+      const vBox = Module.CSPrimBox.create(ps, vp);
+      vBox.SetStartStop(probe.start[0], probe.start[1], probe.start[2],
+                        probe.stop[0], probe.stop[1], probe.stop[2]);
+    }
+
+    // Current probes (2)
+    for (const probe of this._i_probes) {
+      const ip = Module.CSPropProbeBox.create(ps);
+      ip.SetName(probe.name);
+      ip.SetProbeType(1);
+      ip.SetWeighting(dir);
+      ip.SetNormalDir(propDir);
+      csx.AddProperty(ip);
+      const iBox = Module.CSPrimBox.create(ps, ip);
+      iBox.SetStartStop(probe.start[0], probe.start[1], probe.start[2],
+                        probe.stop[0], probe.stop[1], probe.stop[2]);
+    }
+  }
+
+  /**
+   * Read UI data and compute beta and ZL (same approach as MSLPort).
+   */
+  readUIData(wasmEms, simPath, freq) {
+    // Read all voltage probes
+    this._uf_vals = [];
+    for (const fn of this.U_filenames) {
+      const text = this._readProbeFile(wasmEms, simPath, fn);
+      const probe = parseProbe(text);
+      const ft = dftTime2Freq(probe.time, probe.values, freq);
+      this._uf_vals.push(ft);
+    }
+
+    // Read all current probes
+    this._if_vals = [];
+    for (const fn of this.I_filenames) {
+      const text = this._readProbeFile(wasmEms, simPath, fn);
+      const probe = parseProbe(text);
+      const ft = dftTime2Freq(probe.time, probe.values, freq);
+      this._if_vals.push(ft);
+    }
+
+    const nf = freq.length;
+
+    // uf_tot = voltage at measurement plane (probe B = index 1)
+    this.uf_tot_re = new Float64Array(this._uf_vals[1].re);
+    this.uf_tot_im = new Float64Array(this._uf_vals[1].im);
+
+    // if_tot = average of two current probes
+    this.if_tot_re = new Float64Array(nf);
+    this.if_tot_im = new Float64Array(nf);
+    for (let i = 0; i < nf; i++) {
+      this.if_tot_re[i] = 0.5 * (this._if_vals[0].re[i] + this._if_vals[1].re[i]);
+      this.if_tot_im[i] = 0.5 * (this._if_vals[0].im[i] + this._if_vals[1].im[i]);
+    }
+
+    // Compute beta and ZL from 3 voltage + 2 current probes
+    const totalUDelta = (Math.abs(this.U_delta[0]) + Math.abs(this.U_delta[1]));
+    const iDelta = Math.abs(this.I_delta[0]);
+
+    this.beta_re = new Float64Array(nf);
+    this.beta_im = new Float64Array(nf);
+    this.ZL_re = new Float64Array(nf);
+    this.ZL_im = new Float64Array(nf);
+
+    for (let i = 0; i < nf; i++) {
+      const etRe = this._uf_vals[1].re[i];
+      const etIm = this._uf_vals[1].im[i];
+      const dEtRe = (this._uf_vals[2].re[i] - this._uf_vals[0].re[i]) / totalUDelta;
+      const dEtIm = (this._uf_vals[2].im[i] - this._uf_vals[0].im[i]) / totalUDelta;
+      const htRe = this.if_tot_re[i];
+      const htIm = this.if_tot_im[i];
+      const dHtRe = (this._if_vals[1].re[i] - this._if_vals[0].re[i]) / iDelta;
+      const dHtIm = (this._if_vals[1].im[i] - this._if_vals[0].im[i]) / iDelta;
+
+      const dEtMag = Math.sqrt(dEtRe * dEtRe + dEtIm * dEtIm);
+      const dHtMag = Math.sqrt(dHtRe * dHtRe + dHtIm * dHtIm);
+      const htMag = Math.sqrt(htRe * htRe + htIm * htIm);
+      const etMag = Math.sqrt(etRe * etRe + etIm * etIm);
+
+      if (htMag > 0 && etMag > 0) {
+        this.beta_re[i] = Math.sqrt(dEtMag * dHtMag / (htMag * etMag));
+        this.ZL_re[i] = Math.sqrt(etMag * dEtMag / (htMag * dHtMag));
+      }
+    }
+
+    this.beta = this.beta_re;
+    // Use analytical impedance as reference (more stable than extracted)
+    this.Z_ref = this.Z_ref_analytical;
+  }
+
+  /**
+   * @override
+   */
+  calcPort(wasmEms, simPath, freq, refImpedance) {
+    if (refImpedance === undefined || refImpedance === null) {
+      this.Z_ref = this.Z_ref_analytical;
+    }
+    super.calcPort(wasmEms, simPath, freq, refImpedance);
+  }
+}
+
+/**
  * Waveguide port: mode-matched voltage/current probes with weight functions.
  * Mirrors Python WaveguidePort.
  */

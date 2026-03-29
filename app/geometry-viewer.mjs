@@ -117,31 +117,121 @@ function buildWire(el, scale, material) {
   return new THREE.Mesh(geo, material);
 }
 
-function buildLinPoly(el, scale, material) {
-  const points = [...el.querySelectorAll('Point')].map(p => parsePoint(p).multiplyScalar(scale));
-  if (points.length < 3) return null;
-  const normDir = parseInt(el.getAttribute('NormDir') || '2');
-  const elevation = parseFloat(el.getAttribute('Elevation') || '0') * scale;
-  const length = parseFloat(el.getAttribute('Length') || '0') * scale;
+/**
+ * Parse polygon vertices from <Vertex X1="..." X2="..."/> elements.
+ * Returns array of [x1, x2] pairs (2D coordinates in the polygon plane).
+ */
+function getPolyVertices(el) {
+  const verts = el.querySelectorAll('Vertex');
+  return [...verts].map(v => [
+    parseFloat(v.getAttribute('X1') || '0'),
+    parseFloat(v.getAttribute('X2') || '0'),
+  ]);
+}
 
-  const axes = [[1, 2, 0], [0, 2, 1], [0, 1, 2]][normDir] || [0, 1, 2];
+/**
+ * Build a THREE.Shape from 2D polygon vertices and create a mesh at
+ * the given elevation along the normal axis.
+ * @param {number[][]} verts2D - array of [u, v] pairs
+ * @param {number} normDir - 0=X, 1=Y, 2=Z normal axis
+ * @param {number} elevation - position along normal axis (already scaled)
+ * @param {number} scale - drawing unit scale factor
+ * @param {THREE.Material} material
+ * @param {number} [thickness=0] - extrusion depth (0 = thin sheet)
+ */
+function buildPolyShape(verts2D, normDir, elevation, scale, material, thickness = 0) {
+  if (verts2D.length < 3) return null;
   const shape = new THREE.Shape();
-  const comps = ['x', 'y', 'z'];
-  const u = comps[axes[0]], v = comps[axes[1]];
-
-  points.forEach((p, i) => {
-    if (i === 0) shape.moveTo(p[u], p[v]);
-    else shape.lineTo(p[u], p[v]);
+  verts2D.forEach(([u, v], i) => {
+    const su = u * scale, sv = v * scale;
+    if (i === 0) shape.moveTo(su, sv);
+    else shape.lineTo(su, sv);
   });
   shape.closePath();
 
-  const extrudeLen = Math.abs(length) || 0.2 * scale;
-  const geo = new THREE.ExtrudeGeometry(shape, { depth: extrudeLen, bevelEnabled: false });
+  const depth = thickness > 0 ? thickness : 0.1 * scale; // thin sheet for zero-thickness polygons
+  const geo = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false });
   const mesh = new THREE.Mesh(geo, material);
-  const n = comps[axes[2]];
-  if (n === 'x') mesh.rotation.set(0, Math.PI / 2, 0);
-  else if (n === 'y') mesh.rotation.set(-Math.PI / 2, 0, 0);
+
+  // Position along normal axis. ExtrudeGeometry extrudes along local Z,
+  // so rotate to align with the desired normal direction.
+  const comps = ['x', 'y', 'z'];
+  const n = comps[normDir];
+  if (normDir === 0) mesh.rotation.set(0, Math.PI / 2, 0);
+  else if (normDir === 1) mesh.rotation.set(-Math.PI / 2, 0, 0);
   mesh.position[n] = elevation;
+  return mesh;
+}
+
+function buildPolygon(el, scale, material) {
+  const verts2D = getPolyVertices(el);
+  const normDir = parseInt(el.getAttribute('NormDir') || '2');
+  const elevation = parseFloat(el.getAttribute('Elevation') || '0') * scale;
+  return buildPolyShape(verts2D, normDir, elevation, scale, material, 0);
+}
+
+function buildLinPoly(el, scale, material) {
+  // Try new X1/X2 vertex format first, fall back to Point elements
+  let verts2D = getPolyVertices(el);
+  if (verts2D.length === 0) {
+    // Legacy Point-based vertices
+    const points = [...el.querySelectorAll('Point')].map(p => parsePoint(p).multiplyScalar(scale));
+    if (points.length < 3) return null;
+    const normDir = parseInt(el.getAttribute('NormDir') || '2');
+    const elevation = parseFloat(el.getAttribute('Elevation') || '0') * scale;
+    const length = parseFloat(el.getAttribute('Length') || '0') * scale;
+    const axes = [[1, 2, 0], [0, 2, 1], [0, 1, 2]][normDir] || [0, 1, 2];
+    const shape = new THREE.Shape();
+    const comps = ['x', 'y', 'z'];
+    const u = comps[axes[0]], v = comps[axes[1]];
+    points.forEach((p, i) => {
+      if (i === 0) shape.moveTo(p[u], p[v]);
+      else shape.lineTo(p[u], p[v]);
+    });
+    shape.closePath();
+    const extrudeLen = Math.abs(length) || 0.2 * scale;
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: extrudeLen, bevelEnabled: false });
+    const mesh = new THREE.Mesh(geo, material);
+    const n = comps[axes[2]];
+    if (n === 'x') mesh.rotation.set(0, Math.PI / 2, 0);
+    else if (n === 'y') mesh.rotation.set(-Math.PI / 2, 0, 0);
+    mesh.position[n] = elevation;
+    return mesh;
+  }
+  const normDir = parseInt(el.getAttribute('NormDir') || '2');
+  const elevation = parseFloat(el.getAttribute('Elevation') || '0') * scale;
+  const length = parseFloat(el.getAttribute('Length') || '0') * scale;
+  return buildPolyShape(verts2D, normDir, elevation, scale, material, Math.abs(length) * scale);
+}
+
+function buildRotPoly(el, scale, material) {
+  const verts2D = getPolyVertices(el);
+  if (verts2D.length < 3) return null;
+  const normDir = parseInt(el.getAttribute('NormDir') || '2');
+  const rotAxisDir = parseInt(el.getAttribute('RotAxisDir') || '2');
+  const anglesEl = el.querySelector('Angles');
+  const startAngle = parseFloat(anglesEl?.getAttribute('Start') || '0');
+  const stopAngle = parseFloat(anglesEl?.getAttribute('Stop') || String(2 * Math.PI));
+
+  // Build 2D profile shape from vertices
+  const shape = new THREE.Shape();
+  verts2D.forEach(([u, v], i) => {
+    const su = u * scale, sv = v * scale;
+    if (i === 0) shape.moveTo(su, sv);
+    else shape.lineTo(su, sv);
+  });
+  shape.closePath();
+
+  const arc = stopAngle - startAngle;
+  const steps = Math.max(12, Math.round(Math.abs(arc) / (Math.PI / 12)));
+  const geo = new THREE.LatheGeometry(
+    shape.getPoints().map(p => new THREE.Vector2(Math.abs(p.x), p.y)),
+    steps, startAngle, arc
+  );
+  const mesh = new THREE.Mesh(geo, material);
+  // Lathe rotates around Y; reorient for rotAxisDir
+  if (rotAxisDir === 0) mesh.rotation.set(0, 0, Math.PI / 2);
+  else if (rotAxisDir === 2) mesh.rotation.set(Math.PI / 2, 0, 0);
   return mesh;
 }
 
@@ -151,7 +241,9 @@ const PRIMITIVE_BUILDERS = {
   Sphere: buildSphere,
   Curve: buildCurve,
   Wire: buildWire,
+  Polygon: buildPolygon,
   LinPoly: buildLinPoly,
+  RotPoly: buildRotPoly,
 };
 
 function parseGrid(csEl, scale) {
@@ -276,11 +368,12 @@ export function createViewer(container) {
   };
   animate();
 
-  const ro = new ResizeObserver(() => {
-    const w = container.clientWidth;
-    const h = container.clientHeight;
+  const ro = new ResizeObserver((entries) => {
+    const { width: w, height: h } = entries[0].contentRect;
     if (w === 0 || h === 0) return;
-    renderer.setSize(w, h);
+    renderer.setSize(w, h, false);
+    renderer.domElement.style.width = w + 'px';
+    renderer.domElement.style.height = h + 'px';
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   });

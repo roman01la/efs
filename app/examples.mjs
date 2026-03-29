@@ -380,6 +380,184 @@ return FDTD.GenerateXML();
  * Element spacing ~0.6λ at 2.4 GHz (75 mm). Lumped port feed, 50 Ohm.
  * Gaussian excitation 1-3.8 GHz, 30000 timesteps, end criteria 1e-4.
  */
+/**
+ * UWB Comb Dipole Antenna example.
+ *
+ * Planar asymmetric dipole on FR4 substrate (14 x 48 x 1.15 mm).
+ * Top arm: narrow feedline with side stubs and connecting tabs.
+ * Bottom arm: wider ground structure with slots.
+ * Coax-fed across a central gap. 50 Ohm lumped port. MUR boundaries.
+ * Target frequency 5.8 GHz, wideband excitation ~1.8–9.8 GHz.
+ */
+export const UWB_COMB_DIPOLE = {
+  name: 'UWB Comb Dipole',
+  script: `
+// UWB Comb Dipole Antenna — asymmetric planar design
+// Copper geometry from PCB layout SVG, scaled to 14 x 48 mm FR4
+// Origin at center of feed gap, y+ = top arm, y- = bottom arm
+const unit = 1e-3; // all lengths in mm
+const C0 = 299792458;
+
+// Excitation — wideband around 5.8 GHz
+const f0 = 5.8e9;
+const fc = 4.0e9; // covers ~1.8–9.8 GHz
+
+// Substrate (FR4)
+const epsR = 4.4;
+const subW = 14;    // x-direction (mm)
+const subL = 48;    // y-direction (mm)
+const subH = 1.15;  // thickness (mm)
+const hw = subW / 2; // 7.0
+
+// Simulation box
+const SimBox = [60, 100, 60];
+
+// Mesh resolution: lambda/20 at highest frequency
+const mesh_res = C0 / (f0 + fc) / unit / 20;
+
+// ---- Top arm copper (y > 0) ----
+// Central strip: x = +/-1.2, y = 1.5 to 23.8
+const tsCx = 1.2;    // central strip half-width
+const tsYbot = 1.5;  // bottom edge (top of feed gap)
+const tsYtop = 23.8; // top edge
+
+// Side stubs: y = 1.5 to 10.6
+const ssInner = 4.3;  // inner x-edge
+const ssYtop = 10.6;
+
+// Connecting tabs: y = 1.9 to 2.6 (bridge central strip to side stubs)
+const tabYbot = 1.9;
+const tabYtop = 2.6;
+
+// ---- Bottom arm copper (y < 0) ----
+// Full-width bar: y = -1.5 to -2.6
+const barYtop = -1.5; // top edge (bottom of feed gap)
+const barYbot = -2.6;
+
+// Side strips: x = +/-4.7 to +/-7.0, y = -2.6 to -11.7
+const bsInner = 4.7;
+const bsYbot = -11.7;
+
+// Central section: x = +/-3.9, y = -2.6 to -16.2
+const bcHW = 3.9;
+const bcYbot = -16.2;
+
+// Bottom full-width: y = -16.2 to -24.0
+const bfYbot = -subL / 2;
+
+// Feed points (green circles in SVG)
+const feedY1 = 2.3;   // top feed point y
+const feedY2 = -2.3;  // bottom feed point y
+
+// Setup FDTD
+const FDTD = new OpenEMS({ NrTS: 50000, EndCriteria: 1e-4 });
+FDTD.SetGaussExcite(f0, fc);
+FDTD.SetBoundaryCond(['PML_8','PML_8','PML_8','PML_8','PML_8','PML_8']);
+
+const CSX = new ContinuousStructure();
+FDTD.SetCSX(CSX);
+const mesh = CSX.GetGrid();
+mesh.SetDeltaUnit(unit);
+
+// Simulation box extents
+mesh.AddLine('x', [-SimBox[0] / 2, SimBox[0] / 2]);
+mesh.AddLine('y', [-SimBox[1] / 2, SimBox[1] / 2]);
+mesh.AddLine('z', [-SimBox[2] / 3, SimBox[2] * 2 / 3]);
+
+// Substrate edges
+mesh.AddLine('x', [-hw, hw]);
+mesh.AddLine('y', [-subL / 2, subL / 2]);
+
+// Substrate z-lines
+for (let i = 0; i <= 3; i++) mesh.AddLine('z', subH * i / 3);
+
+// Top arm edges
+mesh.AddLine('x', [-tsCx, tsCx, -ssInner, ssInner]);
+mesh.AddLine('y', [tsYbot, tsYtop, ssYtop, tabYbot, tabYtop]);
+
+// Bottom arm edges
+mesh.AddLine('x', [-bsInner, bsInner, -bcHW, bcHW]);
+mesh.AddLine('y', [barYtop, barYbot, bsYbot, bcYbot, bfYbot]);
+
+// Feed point lines
+mesh.AddLine('y', [feedY1, feedY2]);
+
+// Feed center lines (added before smoothing so they are preserved and deduplicated)
+mesh.AddLine('x', 0);
+mesh.AddLine('y', 0);
+
+// Smooth mesh
+mesh.SmoothMeshLines('x', mesh_res, 1.4);
+mesh.SmoothMeshLines('y', mesh_res, 1.4);
+mesh.SmoothMeshLines('z', mesh_res, 1.4);
+
+// Substrate
+const substrate = CSX.AddMaterial('substrate', { Epsilon: epsR });
+substrate.AddBox([-hw, -subL / 2, 0], [hw, subL / 2, subH], 1);
+
+// ---- Copper traces as polygon outlines (single-sided, z = subH) ----
+// Using polygon primitives for exact edge fidelity instead of overlapping boxes.
+// normDir=2 (Z-normal), elevation=subH, vertices are (x, y) pairs.
+const metal = CSX.AddMetal('antenna');
+
+// == Top arm polygon ==
+// Outline traced clockwise: left stub → bottom notches → right stub → up right
+// side → across top → down left side, with two slots between stubs and central strip.
+metal.AddPolygon([
+  [-hw,      tsYbot],   // left stub bottom-left
+  [-ssInner, tsYbot],   // left stub bottom-right (gap starts)
+  [-ssInner, tabYbot],  // up to left tab bottom
+  [-tsCx,    tabYbot],  // across to central strip at tab bottom
+  [-tsCx,    tsYbot],   // down to central strip bottom-left
+  [tsCx,     tsYbot],   // across central strip bottom
+  [tsCx,     tabYbot],  // up to right tab bottom
+  [ssInner,  tabYbot],  // across to right stub at tab bottom
+  [ssInner,  tsYbot],   // down to right stub bottom
+  [hw,       tsYbot],   // right stub bottom-right
+  [hw,       ssYtop],   // up right stub outer edge
+  [ssInner,  ssYtop],   // right stub top inner edge
+  [ssInner,  tabYtop],  // down inner edge to right tab top
+  [tsCx,     tabYtop],  // across tab to central strip right edge
+  [tsCx,     tsYtop],   // up central strip to top
+  [-tsCx,    tsYtop],   // across top of central strip
+  [-tsCx,    tabYtop],  // down to left tab top
+  [-ssInner, tabYtop],  // across tab to left stub inner edge
+  [-ssInner, ssYtop],   // up inner edge to left stub top
+  [-hw,      ssYtop],   // left stub top-left
+], 2, subH, 10);
+
+// == Bottom arm polygon ==
+// Outline traced clockwise: full-width bar at top, two side strips with slots,
+// central section narrowing, then full-width bottom.
+metal.AddPolygon([
+  [-hw,      barYtop],  // bar top-left
+  [hw,       barYtop],  // bar top-right
+  [hw,       bsYbot],   // down right side strip outer edge
+  [bsInner,  bsYbot],   // right side strip bottom inner edge
+  [bsInner,  barYbot],  // up inner edge to bar bottom (right slot)
+  [bcHW,     barYbot],  // across to central section right edge
+  [bcHW,     bcYbot],   // down central section right edge
+  [hw,       bcYbot],   // right to full-width bottom section
+  [hw,       bfYbot],   // down to bottom-right corner
+  [-hw,      bfYbot],   // across bottom
+  [-hw,      bcYbot],   // up to bottom section top-left
+  [-bcHW,    bcYbot],   // right to central section left edge
+  [-bcHW,    barYbot],  // up central section left edge
+  [-bsInner, barYbot],  // across to left slot inner edge
+  [-bsInner, bsYbot],   // down inner edge to left side strip bottom
+  [-hw,      bsYbot],   // left side strip bottom-left
+], 2, subH, 10);
+
+// Lumped port between feed points
+FDTD.AddLumpedPort(1, 50, [0, feedY2, subH], [0, feedY1, subH], 'y', 1.0);
+
+// NF2FF box at 5.8 GHz
+FDTD.CreateNF2FFBox({ frequency: f0 });
+
+return FDTD.GenerateXML();
+`
+};
+
 export const PATCH_ANTENNA_ARRAY = {
   name: 'Patch Antenna Infinite Array (PBC)',
   script: `

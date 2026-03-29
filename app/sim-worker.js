@@ -810,10 +810,12 @@ async function runSimulation(xml) {
 
   // Parse XML for dump boxes and FDTD params
   // DOMParser not available in workers — use regex
+  // Check for non-NF2FF dump boxes that need C++ processing
+  const hasGeneralDumpBoxes = /<DumpBox\b[^>]*Name="(?!nf2ff)[^"]*"/i.test(xml);
   const hasDumpBoxes = /<DumpBox\b/i.test(xml);
   let cppProcessInterval = 0;
-  // Skip C++ dump box processing when GPU NF2FF handles the only dump boxes
-  if (hasDumpBoxes && !gpuNF2FFConfig) {
+  // Enable C++ processing for general (non-NF2FF) dump boxes, or all dump boxes when no GPU NF2FF
+  if (hasGeneralDumpBoxes || (hasDumpBoxes && !gpuNF2FFConfig)) {
     const step0 = ems.initRun();
     if (step0 > 0) cppProcessInterval = step0;
     log(`  Dump boxes detected: C++ processing every ${cppProcessInterval} steps`);
@@ -1065,6 +1067,7 @@ async function runSimulation(xml) {
 
   // Read probe files
   const probeData = {};
+  let fieldDumps = [];
   try {
     const files = Module.FS.readdir(simPath);
     for (const f of files) {
@@ -1072,11 +1075,61 @@ async function runSimulation(xml) {
         probeData[f] = new TextDecoder().decode(Module.FS.readFile(`${simPath}/${f}`));
       }
     }
+
+    // Read general field dump HDF5 files (skip NF2FF dumps)
+    const h5Files = files.filter(f => f.endsWith('.h5') && !f.includes('nf2ff'));
+    for (const h5 of h5Files) {
+      const filePath = `${simPath}/${h5}`;
+      const dumpName = h5.replace(/\.h5$/, '');
+      try {
+        // Read mesh
+        const meshX = _embindVecToF32(ems.readHDF5Mesh(filePath, 0));
+        const meshY = _embindVecToF32(ems.readHDF5Mesh(filePath, 1));
+        const meshZ = _embindVecToF32(ems.readHDF5Mesh(filePath, 2));
+
+        // Detect TD vs FD by trying to read frequencies
+        const freqVec = ems.readHDF5Frequencies(filePath);
+        const numFreqs = freqVec.size();
+        const frequencies = [];
+        for (let i = 0; i < numFreqs; i++) frequencies.push(freqVec.get(i));
+        freqVec.delete();
+
+        if (numFreqs > 0) {
+          // Frequency-domain dump
+          for (let fi = 0; fi < numFreqs; fi++) {
+            const fieldVec = ems.readHDF5FDField(filePath, fi);
+            const fields = _embindVecToF32(fieldVec);
+            fieldDumps.push({
+              name: dumpName, domain: 'FD',
+              mesh: { x: meshX, y: meshY, z: meshZ },
+              fields, frequency: frequencies[fi], freqIndex: fi,
+            });
+          }
+        } else {
+          // Time-domain dump — read the last timestep
+          const numTS = ems.getHDF5NumTimeSteps(filePath);
+          if (numTS > 0) {
+            const lastIdx = numTS - 1;
+            const fieldVec = ems.readHDF5TDField(filePath, lastIdx);
+            const fields = _embindVecToF32(fieldVec);
+            const time = ems.readHDF5TDTime(filePath, lastIdx);
+            fieldDumps.push({
+              name: dumpName, domain: 'TD',
+              mesh: { x: meshX, y: meshY, z: meshZ },
+              fields, timestep: lastIdx, time,
+            });
+          }
+        }
+      } catch (e) {
+        log(`  Field dump read error (${h5}): ${e.message}`);
+      }
+    }
+    if (fieldDumps.length > 0) log(`  Read ${fieldDumps.length} field dump(s)`);
   } catch (e) {}
 
   ems.delete();
 
-  return { nrTS: totalSteps, elapsed, probeData, nf2ffData, fMax };
+  return { nrTS: totalSteps, elapsed, probeData, nf2ffData, fMax, fieldDumps };
 }
 
 // ---- Message handler ----
