@@ -1031,23 +1031,16 @@ function tryPlotRadiation() {
   const { thetaDeg: theta, xzPattern, yzPattern } = window._lastNF2FFData;
   const container = document.getElementById('plot-radiation');
 
-  // Find peak for normalization reference
-  let peak = -Infinity;
-  for (const v of xzPattern) if (isFinite(v) && v > peak) peak = v;
-  for (const v of yzPattern) if (isFinite(v) && v > peak) peak = v;
-
-  // Skip plot if far-field data is degenerate (e.g. PBC boundaries overlap NF2FF box)
-  if (!isFinite(peak) || peak < -100) {
-    container.innerHTML = '<p style="color:#55556a;text-align:center;padding:2em">Radiation pattern not available (far-field data is degenerate — NF2FF may overlap periodic boundaries)</p>';
-    logConsole('Radiation pattern skipped (degenerate far-field data).');
-    return;
-  }
-
   const W = 520, H = 320;
   const cx1 = W * 0.25 + 10, cx2 = W * 0.75 - 10, cy = H / 2 + 10;
   const R = Math.min(W / 4 - 20, H / 2 - 30);
   const dbMin = -30, dbMax = 0;
   const dbRange = dbMax - dbMin;
+
+  // Find peak for normalization reference
+  let peak = -Infinity;
+  for (const v of xzPattern) if (isFinite(v) && v > peak) peak = v;
+  for (const v of yzPattern) if (isFinite(v) && v > peak) peak = v;
 
   function polarPath(thetaDeg, patternDBi, cx_) {
     let path = '';
@@ -1116,7 +1109,6 @@ function tryPlotRadiation3D() {
   if (!window._lastNF2FFData) return;
   const d = window._lastNF2FFData;
   if (!d.thetaRad || !d.phiRad || !d.directivity_dBi) return;
-  if (!isFinite(d.DmaxdBi) || d.DmaxdBi < -100) return;
   if (!radiationViewer) {
     radiationViewer = createRadiationViewer(document.getElementById('plot-radiation-3d'));
   }
