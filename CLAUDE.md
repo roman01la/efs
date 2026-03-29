@@ -26,7 +26,7 @@ python3 -m http.server 8080    # serve from project root
 ## Tests
 
 ```bash
-npm test              # 787 tests (Node.js)
+npm test              # 547 tests (Node.js)
 npm run test:browser  # 52 headless Chrome WebGPU tests
 npm run test:all      # everything
 ```
@@ -117,21 +117,72 @@ To add a new example:
 - `src/nf2ff.mjs` — NF2FF near-to-far-field transform (CPU fallback)
 - `app/sim-worker.js` — Web Worker orchestrating GPU/WASM hybrid simulation
 - `app/ems-api.mjs` — Script API (OpenEMS/CSX wrappers for parametric examples)
-- `app/examples.mjs` — Parametric example scripts (Patch Antenna, MSL Notch Filter, Helical, Rect WG, PBC Array)
+- `app/examples.mjs` — Parametric example scripts (Patch Antenna, MSL Notch Filter, Helical, Rect WG, UWB Comb Dipole, Cloverleaf 5.8GHz, PBC Array)
+- `app/geometry-viewer.mjs` — 3D geometry viewer (Three.js, supports Box/Cylinder/Sphere/Curve/Wire/Polygon/LinPoly/RotPoly)
+- `src/ports.mjs` — Port classes (Lumped, MSL, Coaxial, Waveguide, RectWG)
 - `src/embind_api.cpp` — WASM C++ bindings (operator setup, coefficient extraction)
 - `vendor/openEMS/` — Upstream openEMS C++ source (submodule)
 - `vendor/CSXCAD/` — Upstream CSXCAD geometry library (submodule)
+
+## Script API Reference (ems-api.mjs)
+
+### Geometry Primitives (on Property objects)
+```javascript
+prop.AddBox(start, stop, priority)
+prop.AddCylinder(start, stop, radius, priority)
+prop.AddCylindricalShell(start, stop, radius, shellWidth, priority)
+prop.AddSphere(center, radius, priority)
+prop.AddCurve(points, priority)           // zero-thickness PEC wire
+prop.AddWire(points, radius, priority)    // volumetric wire
+prop.AddPolygon(points, normDir, elevation, priority)
+prop.AddLinPoly(points, normDir, elevation, length, priority)
+prop.AddRotPoly(points, normDir, rotAxisDir, startAngle, stopAngle, priority)
+```
+
+### Transforms (chainable on primitives)
+```javascript
+prim.Translate(x, y, z).Rotate_Z(angle).Scale(factor)
+// Also: Rotate_X, Rotate_Y, Rotate_Origin(x,y,z,angle), Scale3(fx,fy,fz)
+```
+
+### Materials
+```javascript
+CSX.AddMetal(name)
+CSX.AddMaterial(name, { Epsilon, Kappa, Mue, Sigma })  // scalars or [x,y,z] arrays
+CSX.AddConductingSheet(name, { conductivity, thickness })
+CSX.AddExcitation(name, type, exciteVec, { WeightX, WeightY, WeightZ })
+CSX.AddDump(name, start, stop, { dumpType, dumpMode, frequencies, subSampling })
+```
+
+### Ports
+```javascript
+FDTD.AddLumpedPort(nr, R, start, stop, dir, excite)
+FDTD.AddCoaxialPort(nr, metalName, start, stop, dir, r_i, r_o, r_os, opts)
+```
+
+### Mesh Tips
+- Add all mesh lines BEFORE calling `SmoothMeshLines()` — lines added after
+  create duplicates that cause NaN in NF2FF GPU accumulation.
+- For wire antennas, use `AddCurve()` (not `AddWire`) — it voxelizes reliably on the FDTD grid.
+- The lumped port must physically overlap with metal geometry (offset from axis for wire antennas).
 
 ## Performance Reference (Patch Antenna, 86x87x71 grid)
 
 ```
 Setup:     ~1.0s  (C++ operator: 932ms, GPU init: 15ms)
-FDTD loop: ~6.2s  (WebGPU, ~2500 MCells/s)
+FDTD loop: ~6.2s  (WebGPU, ~3000 MCells/s)
 NF2FF:     ~30ms  (GPU accumulation + far-field)
 
 Native comparison:
   basic:          119s  (134 MCells/s)
   sse:            110s  (145 MCells/s)
   multithreaded:   36s  (444 MCells/s)
-  WebGPU:         6.2s  (2508 MCells/s, 5.5x faster than native MT)
+  WebGPU:         6.2s  (3000 MCells/s, 6.7x faster than native MT)
 ```
+
+## Convergence
+
+GPU energy convergence uses interior-cell-only reduction (matching native
+openEMS `CalcFastEnergy` bounds, excluding boundary/PML cells). Energy is
+checked every 100 steps with double-buffered GPU readback (no pipeline stalls).
+The -40 dB end criteria threshold matches native.
