@@ -1,0 +1,124 @@
+diff --git a/Common/processintegral.cpp b/Common/processintegral.cpp
+index c9ccf6b..b64b479 100644
+--- a/Common/processintegral.cpp
++++ b/Common/processintegral.cpp
+@@ -136,13 +136,7 @@ int ProcessIntegral::Process()
+ 	if (Enabled==false) return -1;
+ 	if (CheckTimestep()==false) return GetNextInterval();
+ 
+-	if (m_UseExternalResult) {
+-		// Use GPU-computed result instead of reading from engine
+-		m_Results[0] = m_ExternalResult;
+-		m_UseExternalResult = false;
+-	} else {
+-		CalcMultipleIntegrals();
+-	}
++	CalcMultipleIntegrals();
+ 	int NrInt = GetNumberOfIntegrals();
+ 	double time = m_Eng_Interface->GetTime(m_dualTime);
+ 
+diff --git a/Common/processintegral.h b/Common/processintegral.h
+index 8dda85d..1bddfd6 100644
+--- a/Common/processintegral.h
++++ b/Common/processintegral.h
+@@ -57,10 +57,6 @@ public:
+ 	//! This method will write the TD and FD dump files using CalcIntegral() to calculate the integral parameter
+ 	virtual int Process();
+ 
+-	//! Set an externally computed integral result (e.g. from GPU probe shader).
+-	//! When set, the next Process() call will use this value instead of calling CalcMultipleIntegrals().
+-	void SetExternalResult(double val) { m_ExternalResult = val; m_UseExternalResult = true; }
+-
+ protected:
+ 	ProcessIntegral(Engine_Interface_Base* eng_if);
+ 
+@@ -70,9 +66,6 @@ protected:
+ 	double *m_Results;
+ 
+ 	int m_normDir; // normal direction as required by some integral processings
+-
+-	bool m_UseExternalResult = false;
+-	double m_ExternalResult = 0;
+ };
+ 
+ #endif // PROCESSINTEGRAL_H
+diff --git a/FDTD/operator.cpp b/FDTD/operator.cpp
+index 18e0704..e52bf27 100644
+--- a/FDTD/operator.cpp
++++ b/FDTD/operator.cpp
+@@ -990,8 +990,6 @@ void Operator::Calc_ECOperatorPos(int n, unsigned int* pos)
+ 
+ int Operator::CalcECOperator( DebugFlags debugFlags )
+ {
+-	auto t_total_start = std::chrono::high_resolution_clock::now();
+-
+ 	Init_EC();
+ 	InitDataStorage();
+ 
+@@ -1003,7 +1001,6 @@ int Operator::CalcECOperator( DebugFlags debugFlags )
+ 
+ 	m_InvaildTimestep = false;
+ 	opt_dT = 0;
+-	t0 = std::chrono::high_resolution_clock::now();
+ 	if (dT>0)
+ 	{
+ 		double save_dT = dT;
+@@ -1019,8 +1016,6 @@ int Operator::CalcECOperator( DebugFlags debugFlags )
+ 	}
+ 	else
+ 		CalcTimestep();
+-	t1 = std::chrono::high_resolution_clock::now();
+-	cerr << "[timing] CalcTimestep: " << std::chrono::duration<double,std::milli>(t1-t0).count() << " ms" << endl;
+ 
+ 	dT*=m_TimeStepFactor;
+ 
+@@ -1038,7 +1033,6 @@ int Operator::CalcECOperator( DebugFlags debugFlags )
+ 
+ 	unsigned int pos[3];
+ 
+-	t0 = std::chrono::high_resolution_clock::now();
+ 	for (int n=0; n<3; ++n)
+ 	{
+ 		for (pos[0]=0; pos[0]<numLines[0]; ++pos[0])
+@@ -1052,8 +1046,6 @@ int Operator::CalcECOperator( DebugFlags debugFlags )
+ 			}
+ 		}
+ 	}
+-	t1 = std::chrono::high_resolution_clock::now();
+-	cerr << "[timing] vv/vi/ii/iv coefficient loop: " << std::chrono::duration<double,std::milli>(t1-t0).count() << " ms" << endl;
+ 
+ 	//Apply PEC to all boundary's
+ 	bool PEC[6]={1,1,1,1,1,1};
+@@ -1063,10 +1055,7 @@ int Operator::CalcECOperator( DebugFlags debugFlags )
+ 			PEC[n] = false;
+ 	ApplyElectricBC(PEC);
+ 
+-	t0 = std::chrono::high_resolution_clock::now();
+ 	CalcPEC();
+-	t1 = std::chrono::high_resolution_clock::now();
+-	cerr << "[timing] CalcPEC: " << std::chrono::duration<double,std::milli>(t1-t0).count() << " ms" << endl;
+ 
+ 	Calc_LumpedElements();
+ 
+@@ -1076,11 +1065,8 @@ int Operator::CalcECOperator( DebugFlags debugFlags )
+ 	ApplyMagneticBC(PMC);
+ 
+ 	//all information available for extension... create now...
+-	t0 = std::chrono::high_resolution_clock::now();
+ 	for (size_t n=0; n<m_Op_exts.size(); ++n)
+ 		m_Op_exts.at(n)->BuildExtension();
+-	t1 = std::chrono::high_resolution_clock::now();
+-	cerr << "[timing] BuildExtension loop: " << std::chrono::duration<double,std::milli>(t1-t0).count() << " ms" << endl;
+ 
+ 	//remove inactive extensions
+ 	std::vector<Operator_Extension*>::iterator it = m_Op_exts.begin();
+@@ -1117,9 +1103,6 @@ int Operator::CalcECOperator( DebugFlags debugFlags )
+ 		EC_R[n]=NULL;
+ 	}
+ 
+-	auto t_total_end = std::chrono::high_resolution_clock::now();
+-	cerr << "[timing] Total CalcECOperator: " << std::chrono::duration<double,std::milli>(t_total_end-t_total_start).count() << " ms" << endl;
+-
+ 	return 0;
+ }
+ 

@@ -21,9 +21,16 @@
     "build:wasm64": "bash scripts/build-wasm64.sh",
     "fixtures": "python3 tests/generate_fixtures.py"
   },
-  "keywords": ["fdtd", "electromagnetic", "openems", "wasm", "webgpu"],
+  "keywords": [
+    "fdtd",
+    "electromagnetic",
+    "openems",
+    "wasm",
+    "webgpu"
+  ],
   "license": "GPL-3.0",
   "dependencies": {
-    "playwright": "^1.58.2"
+    "playwright": "^1.58.2",
+    "webgpu": "^0.4.0"
   }
 }
