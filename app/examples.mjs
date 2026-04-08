@@ -21,19 +21,21 @@ export const PATCH_ANTENNA = {
 const unit = 1e-3; // all lengths in mm
 const C0 = 299792458;
 const EPS0 = 8.854187817e-12;
-const f0 = 3e9;    // center frequency
+const f0 = param(3e9, 'Center Frequency', { min: 1e9, max: 10e9, step: 0.1e9, unit: 'Hz' });
 const fc = 3e9;    // 20dB corner frequency
 
 // substrate
-const epsR = 3.38;
+const epsR = param(3.38, 'Substrate εr', { min: 1, max: 12, step: 0.01 });
 const kappa = 1e-3 * 2 * Math.PI * 2.45e9 * EPS0 * epsR;
-const subW = 60, subL = 60, subH = 1.524;
+const subW = 60, subL = 60;
+const subH = param(1.524, 'Substrate Height', { min: 0.5, max: 5, step: 0.1, unit: 'mm' });
 
 // patch dimensions
-const patchW = 32, patchL = 40;
+const patchW = param(32, 'Patch Width', { min: 10, max: 80, step: 0.5, unit: 'mm' });
+const patchL = param(40, 'Patch Length', { min: 10, max: 80, step: 0.5, unit: 'mm' });
 
 // feed position
-const feedX = -6;
+const feedX = param(-6, 'Feed Offset X', { min: -20, max: 0, step: 0.5, unit: 'mm' });
 const feedR = 50; // ohm
 
 // simulation box (200 x 200 x 150 mm)
@@ -116,20 +118,20 @@ export const MSL_NOTCH_FILTER = {
   script: `
 // MSL Notch Filter — parametric design
 const unit = 1e-3;
-const f0 = 5e9;
+const f0 = param(5e9, 'Center Frequency', { min: 1e9, max: 20e9, step: 0.1e9, unit: 'Hz' });
 const fc = 5e9;
 
 // substrate
-const epsR = 3.38;
+const epsR = param(3.38, 'Substrate εr', { min: 1, max: 12, step: 0.01 });
 const subW = 40, subL = 30, subH = 1.524;
 
 // MSL trace
-const traceW = 3.0; // width of microstrip line
+const traceW = param(3.0, 'Trace Width', { min: 0.5, max: 10, step: 0.1, unit: 'mm' });
 const halfTraceW = traceW / 2;
 
 // notch stub
-const stubW = 3.0;
-const stubL = 8.5; // quarter-wave stub length
+const stubW = param(3.0, 'Stub Width', { min: 0.5, max: 10, step: 0.1, unit: 'mm' });
+const stubL = param(8.5, 'Stub Length', { min: 2, max: 20, step: 0.1, unit: 'mm' });
 const halfStubW = stubW / 2;
 
 // port positions
@@ -200,46 +202,60 @@ return FDTD.GenerateXML();
 /**
  * Helical Antenna example.
  *
- * Based on https://docs.openems.de/python/openEMS/Tutorials/Helical_Antenna.html
- * 9-turn axial-mode helix at 2.4 GHz. Radius 20 mm, pitch 30 mm.
- * Circular ground plane (r = 62.5 mm). Feed impedance 120 Ohm.
- * Gaussian excitation 1.9-2.9 GHz, PML boundaries.
+ * 10-turn axial-mode helix at 5.45 GHz with strip-taper feed.
+ * Helix geometry scaled for fDesign=6.15 GHz to compensate for the
+ * strip taper's frequency downshift. The first turn uses axis-aligned
+ * box segments with tapered width to create a broadband impedance
+ * transition from ~50 ohm to the helix's natural ~140 ohm.
+ * 50 mm diameter circular ground plane. PML_8 boundaries.
  */
 export const HELICAL_ANTENNA = {
   name: 'Helical Antenna',
   script: `
-// Helical Antenna — parametric design
+// Helical Antenna — 10-turn axial-mode, 4.9-6.0 GHz band
+// Strip-taper first turn for broadband 50 ohm impedance match
 const unit = 1e-3;
-const f0 = 2.4e9;
-const fc = 0.5e9;
+const f0 = param(5.45e9, 'Center Frequency', { min: 1e9, max: 15e9, step: 0.05e9, unit: 'Hz' });
+const fc = 1.5e9;
+const C0 = 299792458;
 
-// helix parameters
-const turns = 9;
-const radius = 20;   // mm
-const pitch = 30;     // mm per turn
-const feedH = 3;      // feed pin height (mm)
-const feedR = 120;    // feed impedance (ohm)
+// Design frequency — scaled above f0 to compensate for strip feed shift
+const fDesign = 6.15e9;
+const lambda = C0 / fDesign * 1e3; // ~48.7 mm
+
+// helix parameters (C = lambda at fDesign, pitch at 44 deg)
+const turns = param(10, 'Turns', { min: 3, max: 20, step: 1 });
+const radius = lambda / (2 * Math.PI); // ~7.76 mm
+const pitch = 2 * Math.PI * radius * Math.tan(44 * Math.PI / 180); // ~47.1 mm
+const feedH = param(2, 'Feed Height', { min: 0.5, max: 10, step: 0.5, unit: 'mm' });
+const feedR = param(50, 'Feed Impedance', { min: 10, max: 200, step: 5, unit: 'Ω' });
+const ptsPerTurn = 20;  // points per turn for smooth helix
 
 // ground plane
-const gndRadius = 62.5; // mm
+const gndRadius = param(25, 'Ground Radius', { min: 10, max: 60, step: 1, unit: 'mm' });
 
-// simulation box
-const simXY = 130;
-const simZmin = -130;
-const simZmax = 400;
-
-// NF2FF box
-const nfXY = 90;
-const nfZmin = -40;
-const nfZmax = 320;
+// strip taper — first turn uses box segments with decreasing width
+// Wide strip at feed has lower impedance, transitioning to wire
+const taperSegs = 16;   // box segments for first turn
+const taperTurns = 1.0; // taper spans 1 full turn
+const stripWMax = 4;    // mm — strip width at feed
+const stripWMin = 1;    // mm — strip width at taper end
 
 // helix top
 const helixTop = feedH + turns * pitch;
 
+// simulation box
+const simXY = 80;
+const simZmin = -80;
+const simZmax = 600;
+
+// mesh resolution
+const res = lambda / 20; // lambda/20 at design frequency (~2.44 mm)
+
 // setup FDTD
-const FDTD = new OpenEMS({ NrTS: 30000, EndCriteria: 1e-4 });
+const FDTD = new OpenEMS({ NrTS: 50000, EndCriteria: 1e-5 });
 FDTD.SetGaussExcite(f0, fc);
-FDTD.SetBoundaryCond(['MUR','MUR','MUR','MUR','MUR','MUR']);
+FDTD.SetBoundaryCond(['PML_8','PML_8','PML_8','PML_8','PML_8','PML_8']);
 
 const CSX = new ContinuousStructure();
 FDTD.SetCSX(CSX);
@@ -247,39 +263,64 @@ FDTD.SetCSX(CSX);
 const mesh = CSX.GetGrid();
 mesh.SetDeltaUnit(unit);
 
-// mesh — x, y (symmetric)
-mesh.AddLine('x', [-simXY, -nfXY, -gndRadius, -radius, 0, radius, gndRadius, nfXY, simXY]);
-mesh.SmoothMeshLines('x', 15, 1.4);
+// mesh — x, y
+mesh.AddLine('x', [-simXY, -gndRadius, -radius, 0, radius, gndRadius, simXY]);
+mesh.SmoothMeshLines('x', res, 1.4);
 
-mesh.AddLine('y', [-simXY, -nfXY, -gndRadius, -radius, 0, radius, gndRadius, nfXY, simXY]);
-mesh.SmoothMeshLines('y', 15, 1.4);
+mesh.AddLine('y', [-simXY, -gndRadius, -radius, 0, radius, gndRadius, simXY]);
+mesh.SmoothMeshLines('y', res, 1.4);
 
 // mesh — z
-const zLines = [simZmin, nfZmin, -10, 0, feedH];
+const zLines = [simZmin, -10, 0, feedH];
 for (let i = 0; i <= turns; i++) {
   zLines.push(feedH + i * pitch);
 }
-zLines.push(helixTop + 20, nfZmax, simZmax);
+zLines.push(helixTop + 20, simZmax);
 mesh.AddLine('z', zLines);
-mesh.SmoothMeshLines('z', 15, 1.4);
+mesh.SmoothMeshLines('z', res, 1.4);
 
-// helix curve — generate programmatically
+const helix = CSX.AddMetal('helix');
+
+// Tapered strip section — box segments along the first turn
+// Each segment is an axis-aligned box enclosing the strip path
+for (let i = 0; i < taperSegs; i++) {
+  const t0 = (i / taperSegs) * taperTurns;
+  const t1 = ((i + 1) / taperSegs) * taperTurns;
+  const frac = (i + 0.5) / taperSegs;
+  const w = stripWMax + (stripWMin - stripWMax) * frac;
+  const hw = w / 2;
+  const a0 = t0 * 2 * Math.PI;
+  const a1 = t1 * 2 * Math.PI;
+  const x0 = radius * Math.cos(a0), y0 = radius * Math.sin(a0);
+  const x1 = radius * Math.cos(a1), y1 = radius * Math.sin(a1);
+  const z0 = feedH + t0 * pitch;
+  const z1 = feedH + t1 * pitch;
+  const dx = x1 - x0, dy = y1 - y0;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  const nx = -dy / len * hw, ny = dx / len * hw;
+  const xs = [x0 + nx, x0 - nx, x1 + nx, x1 - nx];
+  const ys = [y0 + ny, y0 - ny, y1 + ny, y1 - ny];
+  helix.AddBox(
+    [Math.min(...xs), Math.min(...ys), z0],
+    [Math.max(...xs), Math.max(...ys), z1], 5);
+}
+
+// Main helix wire — from taper end to turn 10
 const helixX = [], helixY = [], helixZ = [];
-const ptsPerTurn = 10;
-for (let i = 0; i <= turns * ptsPerTurn; i++) {
+const startIdx = Math.round((taperTurns - 0.1) * ptsPerTurn);
+for (let i = startIdx; i <= turns * ptsPerTurn; i++) {
   const t = i / ptsPerTurn;
   helixX.push(radius * Math.cos(t * 2 * Math.PI));
   helixY.push(radius * Math.sin(t * 2 * Math.PI));
   helixZ.push(feedH + t * pitch);
 }
-const helix = CSX.AddMetal('helix');
 helix.AddCurve([helixX, helixY, helixZ], 5);
 
-// circular ground plane
+// Circular ground plane
 const gnd = CSX.AddMetal('gnd');
 gnd.AddCylinder([0, 0, -0.1], [0, 0, 0.1], gndRadius, 10);
 
-// lumped port feed (from ground to helix start)
+// Lumped port feed — from ground plane to helix start
 FDTD.AddLumpedPort(1, feedR, [radius, 0, 0], [radius, 0, feedH], 'z', 1.0);
 
 // NF2FF box
@@ -301,13 +342,13 @@ export const RECT_WAVEGUIDE = {
   script: `
 // Rectangular Waveguide — parametric design
 const unit = 1e-3;
-const f0 = 10e9;
+const f0 = param(10e9, 'Center Frequency', { min: 5e9, max: 20e9, step: 0.1e9, unit: 'Hz' });
 const fc = 2e9;
 
 // WR-90 waveguide dimensions
-const wgW = 22.86; // broad wall (y)
-const wgH = 10.16; // narrow wall (z)
-const wgL = 60;    // total length (x), centered at 0
+const wgW = param(22.86, 'Waveguide Width', { min: 5, max: 50, step: 0.1, unit: 'mm' });
+const wgH = param(10.16, 'Waveguide Height', { min: 2, max: 25, step: 0.1, unit: 'mm' });
+const wgL = param(60, 'Waveguide Length', { min: 20, max: 150, step: 1, unit: 'mm' });
 
 // port positions
 const port1X = -20;
@@ -399,14 +440,14 @@ const unit = 1e-3; // all lengths in mm
 const C0 = 299792458;
 
 // Excitation — wideband around 5.8 GHz
-const f0 = 5.8e9;
+const f0 = param(5.8e9, 'Center Frequency', { min: 2e9, max: 12e9, step: 0.1e9, unit: 'Hz' });
 const fc = 4.0e9; // covers ~1.8–9.8 GHz
 
 // Substrate (FR4)
-const epsR = 4.4;
-const subW = 14;    // x-direction (mm)
-const subL = 48;    // y-direction (mm)
-const subH = 1.15;  // thickness (mm)
+const epsR = param(4.4, 'Substrate εr', { min: 1, max: 12, step: 0.1 });
+const subW = param(14, 'Substrate Width', { min: 8, max: 30, step: 0.5, unit: 'mm' });
+const subL = param(48, 'Substrate Length', { min: 20, max: 80, step: 1, unit: 'mm' });
+const subH = param(1.15, 'Substrate Height', { min: 0.4, max: 3, step: 0.05, unit: 'mm' });
 const hw = subW / 2; // 7.0
 
 // Simulation box
@@ -578,19 +619,19 @@ export const CLOVERLEAF_ANTENNA = {
 const unit = 1e-3; // mm
 const C0 = 299792458;
 
-const f0 = 5.8e9;
+const f0 = param(5.8e9, 'Center Frequency', { min: 2e9, max: 12e9, step: 0.1e9, unit: 'Hz' });
 const fc = 2.0e9;
 
 const lambda = C0 / f0 / unit; // ~51.7 mm
 const mesh_res = lambda / 20;
 
 // Lobe geometry — teardrop loop in radial-vertical plane
-const lobeR = 9.0;    // mm radial extent
-const lobeH = 9.0;    // mm vertical extent (45 deg effective tilt)
+const lobeR = param(9.0, 'Lobe Radius', { min: 3, max: 20, step: 0.5, unit: 'mm' });
+const lobeH = param(9.0, 'Lobe Height', { min: 3, max: 20, step: 0.5, unit: 'mm' });
 
 // Hub and feed
-const hubR = 2.0;     // hub cylinder radius
-const feedH = 2.0;    // vertical distance between hubs
+const hubR = param(2.0, 'Hub Radius', { min: 0.5, max: 5, step: 0.1, unit: 'mm' });
+const feedH = param(2.0, 'Feed Height', { min: 0.5, max: 8, step: 0.5, unit: 'mm' });
 const hubSpread = 1.5; // perpendicular offset at hub to avoid self-shorting
 const portR = 1.5;    // port offset from center
 
@@ -803,25 +844,25 @@ export const PATCH_ANTENNA_ARRAY = {
 const unit = 1e-3; // all lengths in mm
 const C0 = 299792458;
 const EPS0 = 8.854187817e-12;
-const f0 = 2.4e9;  // center frequency
+const f0 = param(2.4e9, 'Center Frequency', { min: 1e9, max: 6e9, step: 0.1e9, unit: 'Hz' });
 const fc = 1.4e9;  // 20dB corner frequency (covers 1-3.8 GHz)
 
 // substrate
-const epsR = 3.38;
+const epsR = param(3.38, 'Substrate εr', { min: 1, max: 12, step: 0.01 });
 const kappa = 1e-3 * 2 * Math.PI * 2.45e9 * EPS0 * epsR;
 const subH = 1.524;
 
 // patch dimensions (tuned for ~2.4 GHz on this substrate)
-const patchW = 32;  // mm (radiating edge, along x)
-const patchL = 26;  // mm (resonant length, along y)
+const patchW = param(32, 'Patch Width', { min: 10, max: 60, step: 0.5, unit: 'mm' });
+const patchL = param(26, 'Patch Length', { min: 10, max: 60, step: 0.5, unit: 'mm' });
 
 // unit cell / element spacing (~0.6λ at 2.4 GHz = 75 mm)
 const lambda0 = C0 / f0 / unit; // free-space wavelength in mm
-const cellX = 75;  // element spacing in x
-const cellY = 75;  // element spacing in y
+const cellX = param(75, 'Cell Spacing X', { min: 30, max: 150, step: 1, unit: 'mm' });
+const cellY = param(75, 'Cell Spacing Y', { min: 30, max: 150, step: 1, unit: 'mm' });
 
 // feed position (offset from center in y)
-const feedY = -4;
+const feedY = param(-4, 'Feed Offset Y', { min: -15, max: 0, step: 0.5, unit: 'mm' });
 const feedR = 50; // ohm
 
 // simulation box height (PML in ±Z)

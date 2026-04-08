@@ -107,7 +107,15 @@ console.log('\n=== Test: Compression round-trip ===');
     assert(fragment.startsWith('config='), 'encodeConfig returns config= prefix');
 
     const decoded = await decodeConfig(fragment);
-    assertEq(decoded, xml, 'Round-trip through compress/decompress preserves XML');
+    assertEq(decoded.script, xml, 'Round-trip through compress/decompress preserves XML');
+    assertEq(decoded.paramOverrides, null, 'No param overrides for plain script encoding');
+
+    // Test with param overrides
+    const overrides = { 'Frequency': 2.4e9, 'Width': 30 };
+    const fragment2 = await encodeConfig(xml, overrides);
+    const decoded2 = await decodeConfig(fragment2);
+    assertEq(decoded2.script, xml, 'Round-trip with overrides preserves script');
+    assertEq(JSON.stringify(decoded2.paramOverrides), JSON.stringify(overrides), 'Round-trip preserves param overrides');
   } else {
     console.log('  SKIP: CompressionStream not available in this Node.js version');
   }

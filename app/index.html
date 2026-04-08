@@ -299,6 +299,308 @@ button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-hover); }
 
+/* ---- Parameters Panel ---- */
+#param-controls {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+  max-height: 280px;
+  overflow-y: auto;
+}
+#param-controls.visible { display: flex; }
+#param-controls .param-label-row {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+#param-controls .param-section-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.param-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.param-row label {
+  font-size: 10px;
+  color: var(--text-dim);
+  min-width: 90px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.param-row input[type="range"] {
+  flex: 1;
+  min-width: 50px;
+  accent-color: var(--accent);
+  height: 14px;
+}
+.param-row .param-value {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text);
+  min-width: 50px;
+  text-align: right;
+}
+.param-row .param-unit {
+  font-size: 9px;
+  color: var(--text-muted);
+  min-width: 20px;
+}
+.param-row select {
+  flex: 1;
+  font-size: 10px;
+  padding: 2px 6px;
+}
+.param-row .param-toggle {
+  width: 28px;
+  height: 14px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: pointer;
+  position: relative;
+  transition: background 0.15s;
+}
+.param-row .param-toggle.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.param-row .param-toggle::after {
+  content: '';
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text);
+  top: 1px;
+  left: 1px;
+  transition: transform 0.15s;
+}
+.param-row .param-toggle.on::after {
+  transform: translateX(14px);
+}
+.param-static {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* ---- Sweep UI ---- */
+#sweep-config {
+  display: none;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  gap: 6px;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+#sweep-config.visible { display: flex; }
+#sweep-config .sweep-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+#sweep-config .sweep-row label { min-width: 50px; }
+#sweep-config .sweep-row input, #sweep-config .sweep-row select {
+  flex: 1;
+  font-size: 10px;
+  padding: 2px 6px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+#sweep-progress {
+  display: none;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+#sweep-progress.visible { display: block; }
+#sweep-progress .sweep-bar {
+  height: 3px;
+  background: var(--surface-2);
+  border-radius: 2px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+#sweep-progress .sweep-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s;
+}
+
+/* ---- Trace Legend ---- */
+.trace-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 4px 0;
+  font-size: 9px;
+}
+.trace-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-dim);
+}
+.trace-legend-swatch {
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+  flex-shrink: 0;
+}
+
+/* ---- Walkthrough ---- */
+#wt-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  pointer-events: none;
+  transition: opacity 0.25s;
+}
+#wt-overlay.hidden { display: none; }
+#wt-backdrop {
+  position: fixed;
+  inset: 0;
+  pointer-events: auto;
+}
+#wt-card {
+  position: fixed;
+  z-index: 2002;
+  width: min(340px, 88vw);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.55), 0 0 0 1px rgba(99,102,241,0.12);
+  pointer-events: auto;
+  transition: top 0.3s ease, left 0.3s ease;
+}
+#wt-card .wt-body {
+  padding: 18px 20px 12px;
+}
+#wt-card .wt-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#wt-card .wt-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+#wt-card .wt-text {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.65;
+}
+#wt-card .wt-text p { margin-bottom: 8px; }
+#wt-card .wt-text p:last-child { margin-bottom: 0; }
+#wt-card .wt-text code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent-hover);
+  background: var(--surface-2);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+#wt-card .wt-text .wt-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 6px 0;
+}
+#wt-card .wt-text .wt-key {
+  padding: 3px 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+#wt-card .wt-text .wt-key strong { color: var(--text); font-weight: 500; }
+#wt-card .wt-footer {
+  padding: 10px 20px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#wt-card .wt-dots {
+  display: flex;
+  gap: 5px;
+  flex: 1;
+  justify-content: center;
+}
+#wt-card .wt-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border);
+  transition: background 0.2s;
+}
+#wt-card .wt-dot.active { background: var(--accent); }
+#wt-card .wt-footer button { min-width: 60px; font-size: 11px; }
+.wt-spotlight {
+  position: relative;
+  z-index: 2001 !important;
+  box-shadow: 0 0 0 4px rgba(99,102,241,0.35), 0 0 24px rgba(99,102,241,0.15) !important;
+  border-radius: var(--radius) !important;
+}
+/* Centered card for intro step */
+#wt-card.wt-centered {
+  top: 50% !important;
+  left: 50% !important;
+  transform: translate(-50%, -50%);
+  width: min(440px, 90vw);
+}
+#wt-card:not(.wt-centered) { transform: none; }
+#wt-card .wt-hero {
+  text-align: center;
+  padding-bottom: 4px;
+}
+#wt-card .wt-hero h2 {
+  font-size: 20px;
+  font-weight: 600;
+  background: linear-gradient(135deg, #c7d2fe, #6366f1);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  margin-bottom: 4px;
+}
+#wt-card .wt-hero .wt-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
 /* ---- Responsive ---- */
 @media (max-width: 1024px) {
   #app { grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr 1fr; }
@@ -350,8 +652,23 @@ button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
       <div style="flex:1"></div>
       <button id="btn-run" class="primary">Run</button>
       <button id="btn-stop" class="danger" disabled>Stop</button>
+      <button id="btn-sweep">Sweep</button>
+      <button id="btn-clear">Clear All</button>
     </div>
     <div class="panel-body" style="display:flex;flex-direction:column;">
+      <div id="param-controls"></div>
+      <div id="sweep-config">
+        <div class="sweep-row"><label>Parameter</label><select id="sweep-param"></select></div>
+        <div class="sweep-row"><label>From</label><input id="sweep-from" type="number" step="any"></div>
+        <div class="sweep-row"><label>To</label><input id="sweep-to" type="number" step="any"></div>
+        <div class="sweep-row"><label>Steps</label><input id="sweep-steps" type="number" min="2" max="50" value="5"></div>
+        <div class="sweep-row"><label>Scale</label><select id="sweep-scale"><option value="linear">Linear</option><option value="log">Log</option></select></div>
+        <div style="display:flex;gap:6px;">
+          <button id="btn-sweep-run" class="primary" style="flex:1">Run Sweep</button>
+          <button id="btn-sweep-cancel">Cancel</button>
+        </div>
+      </div>
+      <div id="sweep-progress"><span id="sweep-progress-text"></span><div class="sweep-bar"><div class="sweep-bar-fill" id="sweep-bar-fill"></div></div></div>
       <div id="sim-status">
         <span><span class="label">Status</span> <span class="value" id="status-text">Idle</span></span>
         <span><span class="label">Step</span> <span class="value" id="status-ts">0</span></span>
@@ -402,6 +719,21 @@ button.danger:disabled { opacity: 0.3; cursor: not-allowed; }
         <h3>Raw Data</h3>
         <pre id="raw-data" style="font-family:var(--mono);font-size:11px;overflow:auto;max-height:200px;color:var(--text-dim);">No data yet.</pre>
       </div>
+    </div>
+  </div>
+</div>
+
+<div id="wt-overlay">
+  <div id="wt-backdrop"></div>
+  <div id="wt-card">
+    <div class="wt-body">
+      <div class="wt-title"><span class="wt-num"></span><span class="wt-title-text"></span></div>
+      <div class="wt-text"></div>
+    </div>
+    <div class="wt-footer">
+      <button id="wt-prev">Back</button>
+      <div class="wt-dots"></div>
+      <button id="wt-next" class="primary">Next</button>
     </div>
   </div>
 </div>
@@ -470,6 +802,7 @@ const PROPERTY_METHODS = new Set(API_COMPLETIONS.ContinuousStructure
 const GLOBALS = [
   { label: 'OpenEMS', detail: '({NrTS, EndCriteria})', type: 'class' },
   { label: 'ContinuousStructure', detail: '()', type: 'class' },
+  { label: 'param', detail: '(defaultValue, label, {min, max, step, unit, options})', type: 'function' },
   { label: 'Math', type: 'variable' },
   { label: 'console', type: 'variable' },
 ];
@@ -518,6 +851,155 @@ let viewerDirty = true;
 let generatedXml = '';
 let scriptExecTimer = null;
 
+// ---- Parametric System ----
+const TRACE_COLORS = ['#818cf8', '#f87171', '#34d399', '#fb923c', '#a78bfa', '#22d3ee', '#f472b6', '#facc15', '#4ade80', '#60a5fa'];
+let paramDescriptors = [];     // Array of { label, type, default, min, max, step, unit, options }
+let paramOverrides = {};       // { label: currentValue }
+let overlayRuns = [];          // Array of { label, sparamData, impedanceData, radiationData, nf2ffData }
+let sweepRunning = false;
+let sweepAbort = false;
+let paramPreviewTimer = null;
+
+function createParamFunction(overrides) {
+  const descriptors = [];
+  function paramFn(defaultValue, label, opts) {
+    const desc = { label, default: defaultValue, type: typeof defaultValue };
+    if (opts) {
+      if (opts.min !== undefined) desc.min = opts.min;
+      if (opts.max !== undefined) desc.max = opts.max;
+      if (opts.step !== undefined) desc.step = opts.step;
+      if (opts.unit !== undefined) desc.unit = opts.unit;
+      if (opts.options !== undefined) desc.options = opts.options;
+    }
+    descriptors.push(desc);
+    if (overrides && label in overrides) return overrides[label];
+    return defaultValue;
+  }
+  paramFn._descriptors = descriptors;
+  return paramFn;
+}
+
+function buildParamUI() {
+  const container = document.getElementById('param-controls');
+  if (paramDescriptors.length === 0) {
+    container.classList.remove('visible');
+    container.innerHTML = '';
+    return;
+  }
+  container.classList.add('visible');
+  container.innerHTML = '<div class="param-section-title">Parameters</div>';
+  for (const desc of paramDescriptors) {
+    const row = document.createElement('div');
+    row.className = 'param-row';
+    const lbl = document.createElement('label');
+    lbl.textContent = desc.label;
+    lbl.title = desc.label;
+    row.appendChild(lbl);
+    const currentVal = desc.label in paramOverrides ? paramOverrides[desc.label] : desc.default;
+    if (desc.type === 'boolean') {
+      const toggle = document.createElement('div');
+      toggle.className = 'param-toggle' + (currentVal ? ' on' : '');
+      toggle.addEventListener('click', () => {
+        const newVal = !((desc.label in paramOverrides) ? paramOverrides[desc.label] : desc.default);
+        paramOverrides[desc.label] = newVal;
+        toggle.classList.toggle('on', newVal);
+        scheduleParamPreview();
+      });
+      row.appendChild(toggle);
+    } else if (desc.type === 'string' && desc.options) {
+      const sel = document.createElement('select');
+      for (const opt of desc.options) {
+        const o = document.createElement('option');
+        o.value = opt; o.textContent = opt;
+        if (opt === currentVal) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener('change', () => { paramOverrides[desc.label] = sel.value; scheduleParamPreview(); });
+      row.appendChild(sel);
+    } else if (desc.type === 'number' && desc.min !== undefined && desc.max !== undefined) {
+      const step = desc.step || ((desc.max - desc.min) / 100);
+      const range = document.createElement('input');
+      range.type = 'range'; range.min = desc.min; range.max = desc.max; range.step = step; range.value = currentVal;
+      const valSpan = document.createElement('span');
+      valSpan.className = 'param-value';
+      valSpan.textContent = fmtParamVal(currentVal, desc);
+      range.addEventListener('input', () => {
+        const v = parseFloat(range.value);
+        paramOverrides[desc.label] = v;
+        valSpan.textContent = fmtParamVal(v, desc);
+        scheduleParamPreview();
+      });
+      row.appendChild(range); row.appendChild(valSpan);
+      if (desc.unit) {
+        const u = document.createElement('span'); u.className = 'param-unit'; u.textContent = desc.unit;
+        row.appendChild(u);
+      }
+    } else {
+      const stat = document.createElement('span');
+      stat.className = 'param-static';
+      stat.textContent = fmtParamVal(currentVal, desc) + (desc.unit ? ' ' + desc.unit : '');
+      row.appendChild(stat);
+    }
+    container.appendChild(row);
+  }
+}
+
+function fmtParamVal(v, desc) {
+  if (typeof v === 'number') {
+    if (desc && desc.unit === 'Hz') return (v / 1e9).toFixed(2);
+    if (desc && desc.unit === 'GHz') return v.toFixed(2);
+    if (Math.abs(v) >= 1e6) return v.toExponential(2);
+    if (Number.isInteger(v)) return String(v);
+    const s = v.toPrecision(4);
+    return parseFloat(s).toString();
+  }
+  return String(v);
+}
+
+function scheduleParamPreview() {
+  clearTimeout(paramPreviewTimer);
+  paramPreviewTimer = setTimeout(() => executeScript(), 500);
+}
+
+function getRunLabel(overridesSnapshot) {
+  const ov = overridesSnapshot || paramOverrides;
+  const changed = [];
+  for (const desc of paramDescriptors) {
+    if (desc.label in ov && ov[desc.label] !== desc.default) {
+      changed.push(`${desc.label}=${fmtParamVal(ov[desc.label], desc)}`);
+    }
+  }
+  return changed.length > 0 ? changed.join(', ') : `Run #${overlayRuns.length + 1}`;
+}
+
+function clearOverlayRuns() {
+  overlayRuns = [];
+  document.getElementById('plot-sparam').innerHTML = '<p>Run a simulation to see results.</p>';
+  document.getElementById('plot-impedance').innerHTML = '<p>Run a simulation to see results.</p>';
+  document.getElementById('plot-radiation').innerHTML = '<p>NF2FF data required.</p>';
+}
+
+function updateSweepParamDropdown() {
+  const sel = document.getElementById('sweep-param');
+  sel.innerHTML = '';
+  for (const desc of paramDescriptors) {
+    if (desc.type === 'number' && desc.min !== undefined && desc.max !== undefined) {
+      const o = document.createElement('option'); o.value = desc.label; o.textContent = desc.label;
+      sel.appendChild(o);
+    }
+  }
+  updateSweepFromTo();
+}
+
+function updateSweepFromTo() {
+  const label = document.getElementById('sweep-param').value;
+  const desc = paramDescriptors.find(d => d.label === label);
+  if (desc) {
+    document.getElementById('sweep-from').value = desc.min;
+    document.getElementById('sweep-to').value = desc.max;
+  }
+}
+
 const themeOverrides = EditorView.theme({
   '&': { fontSize: '12px', backgroundColor: 'var(--surface)' },
   '.cm-content': { fontFamily: "var(--mono)" },
@@ -552,18 +1034,39 @@ const cmXml = new EditorView({
   parent: document.getElementById('xml-container'),
 });
 
-function executeScript() {
+function executeScriptWithOverrides(overrides) {
   const scriptCode = cmScript.state.doc.toString();
+  const pFn = createParamFunction(overrides);
+  const result = new Function('OpenEMS', 'ContinuousStructure', 'param', scriptCode)(OpenEMS, ContinuousStructure, pFn);
+  let xml = '';
+  if (typeof result === 'string') xml = result;
+  else if (result && typeof result.toXml === 'function') xml = result.toXml();
+  return { xml, descriptors: pFn._descriptors };
+}
+
+function executeScript() {
   const editorError = document.getElementById('editor-error');
   try {
-    const result = new Function('OpenEMS', 'ContinuousStructure', scriptCode)(OpenEMS, ContinuousStructure);
-    if (typeof result === 'string') {
-      generatedXml = result;
-    } else if (result && typeof result.toXml === 'function') {
-      generatedXml = result.toXml();
+    // Discovery phase: run with current overrides, collect param descriptors
+    const { xml, descriptors } = executeScriptWithOverrides(paramOverrides);
+    generatedXml = xml;
+
+    // Update param descriptors and UI if they changed
+    const descChanged = JSON.stringify(descriptors.map(d => d.label)) !== JSON.stringify(paramDescriptors.map(d => d.label));
+    paramDescriptors = descriptors;
+    if (descChanged) {
+      // Reset overrides for params that no longer exist
+      const validLabels = new Set(descriptors.map(d => d.label));
+      for (const k of Object.keys(paramOverrides)) {
+        if (!validLabels.has(k)) delete paramOverrides[k];
+      }
+      buildParamUI();
+      updateSweepParamDropdown();
     } else {
-      generatedXml = '';
+      // Just rebuild UI to reflect current values
+      buildParamUI();
     }
+
     cmXml.setState(EditorState.create({ doc: generatedXml, extensions: xmlExtensions }));
     editorError.textContent = '';
     editorError.classList.remove('visible');
@@ -578,22 +1081,14 @@ function executeScript() {
     console.error('Script execution error:', e);
     editorError.textContent = e.message;
     editorError.classList.add('visible');
-
-    // Extract line number from error and show inline diagnostic
     const diagnostics = [];
     const lineMatch = e.stack?.match(/<anonymous>:(\d+):(\d+)/);
     if (lineMatch) {
-      // new Function adds 2 wrapper lines, subtract to get script line
       const line = Math.max(1, parseInt(lineMatch[1]) - 2);
       const doc = cmScript.state.doc;
       if (line <= doc.lines) {
         const lineObj = doc.line(line);
-        diagnostics.push({
-          from: lineObj.from,
-          to: lineObj.to,
-          severity: 'error',
-          message: e.message,
-        });
+        diagnostics.push({ from: lineObj.from, to: lineObj.to, severity: 'error', message: e.message });
       }
     }
     if (diagnostics.length === 0) {
@@ -677,6 +1172,7 @@ exampleSelect.addEventListener('change', () => {
   const key = exampleSelect.value;
   if (key && EXAMPLES[key]) {
     const script = EXAMPLES[key].script;
+    paramOverrides = {};  // Reset param overrides when switching examples
     cmScript.dispatch({
       changes: { from: 0, to: cmScript.state.doc.length, insert: script },
     });
@@ -689,7 +1185,8 @@ btnShare.addEventListener('click', async () => {
   const script = cmScript.state.doc.toString().trim();
   if (!script) { logConsole('Nothing to share - editor is empty.'); return; }
   try {
-    const fragment = await shareConfig(script);
+    const overrides = Object.keys(paramOverrides).length > 0 ? paramOverrides : null;
+    const fragment = await shareConfig(script, overrides);
     const url = `${location.origin}${location.pathname}#${fragment}`;
     await navigator.clipboard.writeText(url);
     logConsole(`Shareable URL copied to clipboard (${url.length} chars).`);
@@ -700,11 +1197,14 @@ btnShare.addEventListener('click', async () => {
 
 async function loadFromURL() {
   try {
-    const script = await loadSharedConfig();
-    if (script) {
+    const shared = await loadSharedConfig();
+    if (shared) {
       cmScript.dispatch({
-        changes: { from: 0, to: cmScript.state.doc.length, insert: script },
+        changes: { from: 0, to: cmScript.state.doc.length, insert: shared.script },
       });
+      if (shared.paramOverrides) {
+        Object.assign(paramOverrides, shared.paramOverrides);
+      }
       executeScript();
       logConsole('Script loaded from URL.');
     }
@@ -828,7 +1328,8 @@ function plotSVG(container, { title, xLabel, yLabel, lines, refLines, markers, a
       path += first ? `M${px.toFixed(1)},${py.toFixed(1)}` : `L${px.toFixed(1)},${py.toFixed(1)}`;
       first = false;
     }
-    svg += `<path d="${path}" fill="none" stroke="${color}" stroke-width="1.5"/>`;
+    const dashAttr = line.dash ? ' stroke-dasharray="4,3"' : '';
+    svg += `<path d="${path}" fill="none" stroke="${color}" stroke-width="1.5"${dashAttr}/>`;
   }
 
   if (lines.length > 1) {
@@ -836,7 +1337,8 @@ function plotSVG(container, { title, xLabel, yLabel, lines, refLines, markers, a
     let ly = margin.top + 14;
     for (let li = 0; li < lines.length; li++) {
       const color = lines[li].color || colors[li % colors.length];
-      svg += `<line x1="${lx}" y1="${ly}" x2="${lx + 16}" y2="${ly}" stroke="${color}" stroke-width="2"/>`;
+      const legendDash = lines[li].dash ? ' stroke-dasharray="4,3"' : '';
+      svg += `<line x1="${lx}" y1="${ly}" x2="${lx + 16}" y2="${ly}" stroke="${color}" stroke-width="2"${legendDash}/>`;
       svg += `<text x="${lx + 20}" y="${ly + 3}" font-size="10" fill="#8888a0">${esc(lines[li].label || `trace ${li + 1}`)}</text>`;
       ly += 14;
     }
@@ -874,7 +1376,72 @@ function esc(s) {
 let running = false;
 let simStartTime = 0;
 let elapsedTimer = null;
+let pendingRunLabel = '';
+let simDoneResolve = null;
 const simWorker = new Worker('/app/sim-worker.js');
+
+function processSimResult(d) {
+  const { nrTS, elapsed, probeData, nf2ffData, fMax, fieldDumps } = d;
+  statusElapsed.textContent = elapsed + 's';
+  statusTs.textContent = String(nrTS);
+  statusText.textContent = 'Done';
+  logConsole(`Simulation complete. ${nrTS} timesteps in ${elapsed}s.`);
+
+  if (Object.keys(probeData).length > 0) {
+    let rawText = '';
+    for (const [name, text] of Object.entries(probeData)) {
+      rawText += `=== ${name} ===\n`;
+      const lines = text.split('\n');
+      rawText += lines.slice(0, 20).join('\n');
+      if (lines.length > 20) rawText += `\n... (${lines.length} lines total)`;
+      rawText += '\n\n';
+    }
+    rawDataPre.textContent = rawText;
+  }
+
+  const parsedProbes = {};
+  for (const [name, text] of Object.entries(probeData)) {
+    const lines = text.split('\n').filter(l => !l.startsWith('%') && l.trim());
+    const time = new Float64Array(lines.length);
+    const values = new Float64Array(lines.length);
+    for (let i = 0; i < lines.length; i++) {
+      const parts = lines[i].trim().split(/\s+/);
+      time[i] = parseFloat(parts[0]);
+      values[i] = parseFloat(parts[1]);
+    }
+    parsedProbes[name] = { time, values };
+  }
+
+  // Compute S-params and impedance for this run
+  const sparamData = computeSParams(parsedProbes, fMax);
+  const impedanceData = sparamData ? { freqGHz: sparamData.freqGHz, z_re: sparamData.z_re, z_im: sparamData.z_im, Z0: sparamData.Z0 } : null;
+
+  // Store as overlay run
+  const run = {
+    label: pendingRunLabel,
+    color: TRACE_COLORS[overlayRuns.length % TRACE_COLORS.length],
+    sparamData,
+    impedanceData,
+    radiationData: nf2ffData ? { thetaDeg: nf2ffData.thetaDeg, xzPattern: nf2ffData.xzPattern, yzPattern: nf2ffData.yzPattern, DmaxdBi: nf2ffData.DmaxdBi } : null,
+    nf2ffData,
+  };
+  overlayRuns.push(run);
+
+  // Render all overlay plots
+  renderOverlaySParams();
+  renderOverlayImpedance();
+  renderOverlayRadiation();
+
+  if (nf2ffData) {
+    window._lastNF2FFData = nf2ffData;
+    tryPlotRadiation3D();
+  }
+
+  if (fieldDumps && fieldDumps.length > 0) {
+    window._fieldDumps = fieldDumps;
+    showFieldDumps(fieldDumps);
+  }
+}
 
 simWorker.onmessage = (e) => {
   const d = e.data;
@@ -885,58 +1452,14 @@ simWorker.onmessage = (e) => {
     case 'status':
       statusTs.textContent = String(d.step);
       break;
-    case 'done': {
-      const { nrTS, elapsed, probeData, nf2ffData, fMax, fieldDumps } = d;
-      statusElapsed.textContent = elapsed + 's';
-      statusTs.textContent = String(nrTS);
-      statusText.textContent = 'Done';
-      logConsole(`Simulation complete. ${nrTS} timesteps in ${elapsed}s.`);
-      logConsole('Reading probe data...');
-
-      if (Object.keys(probeData).length > 0) {
-        let rawText = '';
-        for (const [name, text] of Object.entries(probeData)) {
-          rawText += `=== ${name} ===\n`;
-          const lines = text.split('\n');
-          rawText += lines.slice(0, 20).join('\n');
-          if (lines.length > 20) rawText += `\n... (${lines.length} lines total)`;
-          rawText += '\n\n';
-        }
-        rawDataPre.textContent = rawText;
-      }
-
-      const parsedProbes = {};
-      for (const [name, text] of Object.entries(probeData)) {
-        const lines = text.split('\n').filter(l => !l.startsWith('%') && l.trim());
-        const time = new Float64Array(lines.length);
-        const values = new Float64Array(lines.length);
-        for (let i = 0; i < lines.length; i++) {
-          const parts = lines[i].trim().split(/\s+/);
-          time[i] = parseFloat(parts[0]);
-          values[i] = parseFloat(parts[1]);
-        }
-        parsedProbes[name] = { time, values };
-      }
-      tryPlotSParams(parsedProbes, fMax);
-      tryPlotImpedance(parsedProbes);
-
-      if (nf2ffData) {
-        window._lastNF2FFData = nf2ffData;
-        tryPlotRadiation();
-        tryPlotRadiation3D();
-      }
-
-      if (fieldDumps && fieldDumps.length > 0) {
-        window._fieldDumps = fieldDumps;
-        showFieldDumps(fieldDumps);
-      }
-
+    case 'done':
+      processSimResult(d);
       clearInterval(elapsedTimer);
       running = false;
       btnRun.disabled = false;
       btnStop.disabled = true;
+      if (simDoneResolve) { simDoneResolve('done'); simDoneResolve = null; }
       break;
-    }
     case 'error':
       statusText.textContent = 'Error';
       logConsole(`Error: ${d.msg}`);
@@ -944,53 +1467,132 @@ simWorker.onmessage = (e) => {
       running = false;
       btnRun.disabled = false;
       btnStop.disabled = true;
+      if (simDoneResolve) { simDoneResolve('error'); simDoneResolve = null; }
       break;
   }
 };
 
-btnRun.addEventListener('click', () => {
-  if (running) return;
-  const xml = generatedXml.trim();
-  if (!xml) { logConsole('Error: No generated XML. Check your script.'); return; }
-
+function startSim(xml, label) {
   running = true;
   btnRun.disabled = true;
   btnStop.disabled = false;
+  pendingRunLabel = label;
   statusText.textContent = 'Running';
   statusTs.textContent = '0';
   statusElapsed.textContent = '0.0s';
   simConsole.textContent = '';
   rawDataPre.textContent = 'No data yet.';
-  document.getElementById('plot-sparam').innerHTML = '<p>Running...</p>';
-  document.getElementById('plot-impedance').innerHTML = '<p>Running...</p>';
-  document.getElementById('plot-radiation').innerHTML = '<p>Running...</p>';
-  window._lastZdata = null;
-  window._lastNF2FFData = null;
-  logConsole('Starting simulation...');
+  logConsole(`Starting simulation: ${label}`);
   simStartTime = performance.now();
   elapsedTimer = setInterval(() => {
     statusElapsed.textContent = ((performance.now() - simStartTime) / 1000).toFixed(1) + 's';
   }, 100);
   simWorker.postMessage({ type: 'run', xml });
+}
+
+function runSimAsync(xml, label) {
+  return new Promise(resolve => {
+    simDoneResolve = resolve;
+    startSim(xml, label);
+  });
+}
+
+btnRun.addEventListener('click', () => {
+  if (running || sweepRunning) return;
+  const xml = generatedXml.trim();
+  if (!xml) { logConsole('Error: No generated XML. Check your script.'); return; }
+  startSim(xml, getRunLabel());
 });
 
 btnStop.addEventListener('click', () => {
+  if (sweepRunning) { sweepAbort = true; }
   simWorker.postMessage({ type: 'stop' });
   logConsole('Stop requested.');
 });
 
-function tryPlotSParams(probes, simFMax) {
+const btnSweep = document.getElementById('btn-sweep');
+const btnClear = document.getElementById('btn-clear');
+const btnSweepRun = document.getElementById('btn-sweep-run');
+const btnSweepCancel = document.getElementById('btn-sweep-cancel');
+const sweepConfig = document.getElementById('sweep-config');
+const sweepProgress = document.getElementById('sweep-progress');
+
+btnClear.addEventListener('click', () => { clearOverlayRuns(); logConsole('All traces cleared.'); });
+
+btnSweep.addEventListener('click', () => {
+  updateSweepParamDropdown();
+  sweepConfig.classList.toggle('visible');
+});
+
+document.getElementById('sweep-param').addEventListener('change', updateSweepFromTo);
+
+btnSweepCancel.addEventListener('click', () => { sweepConfig.classList.remove('visible'); });
+
+btnSweepRun.addEventListener('click', async () => {
+  if (running || sweepRunning) return;
+  const paramLabel = document.getElementById('sweep-param').value;
+  if (!paramLabel) return;
+  const from = parseFloat(document.getElementById('sweep-from').value);
+  const to = parseFloat(document.getElementById('sweep-to').value);
+  const steps = parseInt(document.getElementById('sweep-steps').value) || 5;
+  const scale = document.getElementById('sweep-scale').value;
+
+  sweepConfig.classList.remove('visible');
+  sweepRunning = true;
+  sweepAbort = false;
+  sweepProgress.classList.add('visible');
+  btnSweep.disabled = true;
+  btnRun.disabled = true;
+
+  const values = [];
+  if (scale === 'log' && from > 0 && to > 0) {
+    const logFrom = Math.log10(from), logTo = Math.log10(to);
+    for (let i = 0; i < steps; i++) values.push(Math.pow(10, logFrom + (logTo - logFrom) * i / (steps - 1)));
+  } else {
+    for (let i = 0; i < steps; i++) values.push(from + (to - from) * i / (steps - 1));
+  }
+
+  const savedOverrides = { ...paramOverrides };
+  for (let i = 0; i < values.length; i++) {
+    if (sweepAbort) {
+      document.getElementById('sweep-progress-text').textContent = `Sweep: ${i}/${values.length} runs (stopped)`;
+      break;
+    }
+    document.getElementById('sweep-progress-text').textContent = `Sweep: ${i}/${values.length} runs`;
+    document.getElementById('sweep-bar-fill').style.width = `${(i / values.length) * 100}%`;
+
+    const ov = { ...savedOverrides, [paramLabel]: values[i] };
+    try {
+      const { xml } = executeScriptWithOverrides(ov);
+      if (!xml) continue;
+      const desc = paramDescriptors.find(d => d.label === paramLabel);
+      const label = `${paramLabel}=${fmtParamVal(values[i], desc)}`;
+      const result = await runSimAsync(xml, label);
+      if (result === 'error') logConsole(`Sweep run ${i + 1} failed, continuing...`);
+    } catch (e) {
+      logConsole(`Sweep run ${i + 1} script error: ${e.message}`);
+    }
+  }
+
+  document.getElementById('sweep-progress-text').textContent = sweepAbort
+    ? `Sweep: stopped` : `Sweep: ${values.length}/${values.length} runs complete`;
+  document.getElementById('sweep-bar-fill').style.width = '100%';
+  paramOverrides = savedOverrides;
+  executeScript();  // Restore original param state
+  sweepRunning = false;
+  btnSweep.disabled = false;
+  btnRun.disabled = false;
+  setTimeout(() => sweepProgress.classList.remove('visible'), 3000);
+});
+
+function computeSParams(probes, simFMax) {
   const utKeys = Object.keys(probes).filter(k => k.includes('_ut'));
   const itKeys = Object.keys(probes).filter(k => k.includes('_it'));
-
-  if (utKeys.length === 0 || itKeys.length === 0) {
-    logConsole('No port probe data found for S-parameter plot.');
-    return;
-  }
+  if (utKeys.length === 0 || itKeys.length === 0) return null;
 
   const ut = probes[utKeys[0]];
   const it = probes[itKeys[0]];
-  if (!ut || !it || ut.time.length < 10) return;
+  if (!ut || !it || ut.time.length < 10) return null;
 
   const N = Math.min(ut.time.length, it.time.length);
   const dt = ut.time[1] - ut.time[0];
@@ -1048,64 +1650,76 @@ function tryPlotSParams(probes, simFMax) {
   const freqGHz = Array.from(freq).map(f => f / 1e9);
   const s11Arr = Array.from(s11_dB);
 
-  // Find best S11 match (deepest dip, skip DC)
+  return { freqGHz, s11Arr, z_re: Array.from(z_re), z_im: Array.from(z_im), Z0 };
+}
+
+function renderOverlaySParams() {
+  const container = document.getElementById('plot-sparam');
+  const runs = overlayRuns.filter(r => r.sparamData);
+  if (runs.length === 0) { container.innerHTML = '<p>Run a simulation to see results.</p>'; return; }
+
+  const lines = runs.map(r => ({
+    x: r.sparamData.freqGHz, y: r.sparamData.s11Arr, label: r.label, color: r.color,
+  }));
+
+  // Markers only on most recent trace
+  const last = runs[runs.length - 1].sparamData;
   let bestIdx = 1, bestS11 = 0;
-  for (let i = 1; i < nf; i++) {
-    if (s11Arr[i] < bestS11) { bestS11 = s11Arr[i]; bestIdx = i; }
+  for (let i = 1; i < last.s11Arr.length; i++) {
+    if (last.s11Arr[i] < bestS11) { bestS11 = last.s11Arr[i]; bestIdx = i; }
   }
 
-  plotSVG(document.getElementById('plot-sparam'), {
-    title: Z0 !== 50 ? `S11 (Return Loss, Z\u2080=${Z0}\u2126)` : 'S11 (Return Loss)',
+  plotSVG(container, {
+    title: 'S11 (Return Loss)',
     xLabel: 'Frequency (GHz)',
     yLabel: 'S11 (dB)',
-    lines: [{ x: freqGHz, y: s11Arr, label: 'S11', color: '#818cf8' }],
-    markers: bestS11 < -3 ? [{ x: freqGHz[bestIdx], y: bestS11, label: `${freqGHz[bestIdx].toFixed(2)} GHz, ${bestS11.toFixed(1)} dB`, color: '#34d399' }] : [],
+    lines,
+    markers: bestS11 < -3 ? [{ x: last.freqGHz[bestIdx], y: bestS11, label: `${last.freqGHz[bestIdx].toFixed(2)} GHz, ${bestS11.toFixed(1)} dB`, color: '#34d399' }] : [],
     refLines: [{ value: -10, label: '-10 dB', color: '#f87171' }],
   });
-
-  logConsole('S-parameter plot updated.');
-  window._lastZdata = { freqGHz, z_re, z_im, Z0 };
 }
 
-function tryPlotImpedance(probes) {
-  setTimeout(() => {
-    if (!window._lastZdata) return;
-    const { freqGHz, z_re, z_im, Z0 = 50 } = window._lastZdata;
-    const zReArr = Array.from(z_re), zImArr = Array.from(z_im);
+function renderOverlayImpedance() {
+  const container = document.getElementById('plot-impedance');
+  const runs = overlayRuns.filter(r => r.impedanceData);
+  if (runs.length === 0) { container.innerHTML = '<p>Run a simulation to see results.</p>'; return; }
 
-    // Find frequency where Z is closest to Z0+j0 (minimize |Z - Z0|)
-    // Only consider points where Re(Z) > 5 ohm (antenna is radiating)
-    let bestZIdx = -1, bestZDist = Infinity;
-    for (let i = 1; i < freqGHz.length; i++) {
-      if (zReArr[i] < 5) continue;
-      const d = Math.sqrt((zReArr[i] - Z0) ** 2 + zImArr[i] ** 2);
-      if (d < bestZDist && isFinite(d)) { bestZDist = d; bestZIdx = i; }
-    }
-    const zMarkers = bestZIdx > 0 && bestZDist < Z0 * 4 ? [{
-      x: freqGHz[bestZIdx], y: zReArr[bestZIdx],
-      label: `${freqGHz[bestZIdx].toFixed(2)} GHz, ${zReArr[bestZIdx].toFixed(0)}+j${zImArr[bestZIdx].toFixed(0)}\u2126`,
-      color: '#34d399',
-    }] : [];
+  const lines = [];
+  for (const r of runs) {
+    const d = r.impedanceData;
+    lines.push({ x: d.freqGHz, y: d.z_re, label: `Re(Z) ${r.label}`, color: r.color });
+    // Use same color but dashed for Im(Z) — we'll use a slightly desaturated version
+    lines.push({ x: d.freqGHz, y: d.z_im, label: `Im(Z) ${r.label}`, color: r.color, dash: true });
+  }
 
-    plotSVG(document.getElementById('plot-impedance'), {
-      title: 'Input Impedance',
-      xLabel: 'Frequency (GHz)',
-      yLabel: 'Z (Ohm)',
-      lines: [
-        { x: freqGHz, y: zReArr, label: 'Re(Z)', color: '#818cf8' },
-        { x: freqGHz, y: zImArr, label: 'Im(Z)', color: '#f87171' },
-      ],
-      refLines: [{ value: Z0, label: `${Z0}\u2126`, color: '#55556a' }],
-      markers: zMarkers,
-    });
-    logConsole('Impedance plot updated.');
-  }, 0);
+  const last = runs[runs.length - 1].impedanceData;
+  const Z0 = last.Z0 || 50;
+  let bestZIdx = -1, bestZDist = Infinity;
+  for (let i = 1; i < last.freqGHz.length; i++) {
+    if (last.z_re[i] < 5) continue;
+    const d = Math.sqrt((last.z_re[i] - Z0) ** 2 + last.z_im[i] ** 2);
+    if (d < bestZDist && isFinite(d)) { bestZDist = d; bestZIdx = i; }
+  }
+  const markers = bestZIdx > 0 && bestZDist < Z0 * 4 ? [{
+    x: last.freqGHz[bestZIdx], y: last.z_re[bestZIdx],
+    label: `${last.freqGHz[bestZIdx].toFixed(2)} GHz, ${last.z_re[bestZIdx].toFixed(0)}+j${last.z_im[bestZIdx].toFixed(0)}\u2126`,
+    color: '#34d399',
+  }] : [];
+
+  plotSVG(container, {
+    title: 'Input Impedance',
+    xLabel: 'Frequency (GHz)',
+    yLabel: 'Z (Ohm)',
+    lines,
+    refLines: [{ value: Z0, label: `${Z0}\u2126`, color: '#55556a' }],
+    markers,
+  });
 }
 
-function tryPlotRadiation() {
-  if (!window._lastNF2FFData) return;
-  const { thetaDeg: theta, xzPattern, yzPattern } = window._lastNF2FFData;
+function renderOverlayRadiation() {
   const container = document.getElementById('plot-radiation');
+  const runs = overlayRuns.filter(r => r.radiationData);
+  if (runs.length === 0) { container.innerHTML = '<p>NF2FF data required.</p>'; return; }
 
   const W = 520, H = 320;
   const cx1 = W * 0.25 + 10, cx2 = W * 0.75 - 10, cy = H / 2 + 10;
@@ -1113,19 +1727,21 @@ function tryPlotRadiation() {
   const dbMin = -30, dbMax = 0;
   const dbRange = dbMax - dbMin;
 
-  // Find peak for normalization reference
+  // Find global peak across all runs for normalization
   let peak = -Infinity;
-  for (const v of xzPattern) if (isFinite(v) && v > peak) peak = v;
-  for (const v of yzPattern) if (isFinite(v) && v > peak) peak = v;
+  for (const r of runs) {
+    for (const v of r.radiationData.xzPattern) if (isFinite(v) && v > peak) peak = v;
+    for (const v of r.radiationData.yzPattern) if (isFinite(v) && v > peak) peak = v;
+  }
 
   function polarPath(thetaDeg, patternDBi, cx_) {
     let path = '';
     for (let i = 0; i < thetaDeg.length; i++) {
-      const dB = patternDBi[i] - peak; // normalize to peak
+      const dB = patternDBi[i] - peak;
       if (!isFinite(dB)) continue;
       const clamped = Math.max(dbMin, Math.min(dbMax, dB));
       const r = ((clamped - dbMin) / dbRange) * R;
-      const angle = (thetaDeg[i] - 90) * Math.PI / 180; // 0° at top
+      const angle = (thetaDeg[i] - 90) * Math.PI / 180;
       const x = cx_ + r * Math.cos(angle);
       const y = cy + r * Math.sin(angle);
       path += path ? `L${x.toFixed(1)},${y.toFixed(1)}` : `M${x.toFixed(1)},${y.toFixed(1)}`;
@@ -1135,23 +1751,15 @@ function tryPlotRadiation() {
 
   function polarGrid(cx_) {
     let g = '';
-    const rings = [0, -10, -20, -30];
-    for (const db of rings) {
+    for (const db of [0, -10, -20, -30]) {
       const r = ((db - dbMin) / dbRange) * R;
       g += `<circle cx="${cx_}" cy="${cy}" r="${r}" fill="none" stroke="#2a2a35" stroke-width="0.5"/>`;
-      if (db > dbMin) {
-        g += `<text x="${cx_ + 3}" y="${cy - r + 10}" font-size="8" fill="#55556a">${db}</text>`;
-      }
+      if (db > dbMin) g += `<text x="${cx_ + 3}" y="${cy - r + 10}" font-size="8" fill="#55556a">${db}</text>`;
     }
-    // Angle lines every 45°
     for (let a = 0; a < 360; a += 45) {
       const rad = (a - 90) * Math.PI / 180;
-      const x2 = cx_ + R * Math.cos(rad);
-      const y2 = cy + R * Math.sin(rad);
-      g += `<line x1="${cx_}" y1="${cy}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="#2a2a35" stroke-width="0.5"/>`;
-      // Angle labels
-      const lx = cx_ + (R + 10) * Math.cos(rad);
-      const ly = cy + (R + 10) * Math.sin(rad);
+      g += `<line x1="${cx_}" y1="${cy}" x2="${(cx_ + R * Math.cos(rad)).toFixed(1)}" y2="${(cy + R * Math.sin(rad)).toFixed(1)}" stroke="#2a2a35" stroke-width="0.5"/>`;
+      const lx = cx_ + (R + 10) * Math.cos(rad), ly = cy + (R + 10) * Math.sin(rad);
       g += `<text x="${lx.toFixed(1)}" y="${(ly + 3).toFixed(1)}" text-anchor="middle" font-size="8" fill="#55556a">${a}°</text>`;
     }
     return g;
@@ -1161,22 +1769,34 @@ function tryPlotRadiation() {
   svg += `<rect width="${W}" height="${H}" fill="#16161c" rx="6"/>`;
   svg += `<text x="${W / 2}" y="16" text-anchor="middle" font-size="12" font-weight="600" fill="#e2e2e8">Radiation Pattern</text>`;
 
-  // E-plane (xz, phi=0)
+  // E-plane
   svg += polarGrid(cx1);
-  svg += `<path d="${polarPath(theta, xzPattern, cx1)}" fill="rgba(129,140,248,0.1)" stroke="#818cf8" stroke-width="1.5"/>`;
-  svg += `<text x="${cx1}" y="${H - 4}" text-anchor="middle" font-size="10" fill="#818cf8">E-plane (φ=0°)</text>`;
+  for (const r of runs) {
+    svg += `<path d="${polarPath(r.radiationData.thetaDeg, r.radiationData.xzPattern, cx1)}" fill="none" stroke="${r.color}" stroke-width="1.5" opacity="0.8"/>`;
+  }
+  svg += `<text x="${cx1}" y="${H - 4}" text-anchor="middle" font-size="10" fill="#8888a0">E-plane (φ=0°)</text>`;
 
-  // H-plane (yz, phi=90)
+  // H-plane
   svg += polarGrid(cx2);
-  svg += `<path d="${polarPath(theta, yzPattern, cx2)}" fill="rgba(248,113,113,0.1)" stroke="#f87171" stroke-width="1.5"/>`;
-  svg += `<text x="${cx2}" y="${H - 4}" text-anchor="middle" font-size="10" fill="#f87171">H-plane (φ=90°)</text>`;
+  for (const r of runs) {
+    svg += `<path d="${polarPath(r.radiationData.thetaDeg, r.radiationData.yzPattern, cx2)}" fill="none" stroke="${r.color}" stroke-width="1.5" opacity="0.8"/>`;
+  }
+  svg += `<text x="${cx2}" y="${H - 4}" text-anchor="middle" font-size="10" fill="#8888a0">H-plane (φ=90°)</text>`;
 
-  // Peak directivity label
-  svg += `<text x="${W - 8}" y="16" text-anchor="end" font-size="9" fill="#55556a">Peak: ${peak.toFixed(1)} dBi</text>`;
+  // Legend
+  if (runs.length > 1) {
+    let ly = 28;
+    for (const r of runs) {
+      svg += `<line x1="8" y1="${ly}" x2="20" y2="${ly}" stroke="${r.color}" stroke-width="2"/>`;
+      svg += `<text x="24" y="${ly + 3}" font-size="8" fill="#8888a0">${esc(r.label)}</text>`;
+      ly += 11;
+    }
+  }
 
+  const lastPeak = runs[runs.length - 1].radiationData.DmaxdBi;
+  svg += `<text x="${W - 8}" y="16" text-anchor="end" font-size="9" fill="#55556a">Peak: ${lastPeak?.toFixed(1) ?? peak.toFixed(1)} dBi</text>`;
   svg += '</svg>';
   container.innerHTML = svg;
-  logConsole('Radiation pattern updated.');
 }
 
 // ---- 3D Radiation Pattern ----
@@ -1352,6 +1972,182 @@ function renderFieldDump() {
     }
   }
   ctx.putImageData(imgData, 0, 0);
+}
+
+// ---- Walkthrough ----
+{
+  const STEPS = [
+    {
+      target: null, // centered intro
+      title: 'Welcome',
+      html: `<div class="wt-hero"><h2>Electromagnetic Field Solver</h2><div class="wt-sub">Browser-based FDTD simulation powered by WebAssembly + WebGPU</div></div>
+        <p>This quick tour shows you around the interface. Takes about 30 seconds.</p>`,
+    },
+    {
+      target: '#panel-editor',
+      title: 'Script Editor',
+      pos: 'right',
+      html: `<p>Write JavaScript to define antenna geometry, materials, mesh, and simulation setup using the openEMS API.</p>
+        <div class="wt-keys">
+          <span class="wt-key"><strong>Script</strong> edit code</span>
+          <span class="wt-key"><strong>XML</strong> generated config</span>
+          <span class="wt-key"><strong>3D</strong> geometry preview</span>
+        </div>
+        <p>Pick a pre-built example from the dropdown or write your own. Auto-compiles as you type.</p>`,
+    },
+    {
+      target: '#panel-sim',
+      title: 'Parameters & Simulation',
+      pos: 'left',
+      html: `<p>Tunable parameters declared with <code>param()</code> appear here as sliders. Adjust values and the 3D preview updates live.</p>
+        <div class="wt-keys">
+          <span class="wt-key"><strong>Run</strong> simulate</span>
+          <span class="wt-key"><strong>Sweep</strong> vary a parameter</span>
+          <span class="wt-key"><strong>Clear All</strong> reset traces</span>
+        </div>
+        <p>Every run overlays its results on the plots for easy comparison.</p>`,
+    },
+    {
+      target: '#panel-results',
+      title: 'Results',
+      pos: 'left',
+      html: `<p>Simulation outputs update here after each run:</p>
+        <div class="wt-keys">
+          <span class="wt-key"><strong>S11</strong> return loss</span>
+          <span class="wt-key"><strong>Z</strong> impedance</span>
+          <span class="wt-key"><strong>Radiation</strong> 2D + 3D</span>
+          <span class="wt-key"><strong>Fields</strong> E/H dumps</span>
+        </div>
+        <p>Multiple runs are color-coded. Use <strong>Sweep</strong> to batch-compare parameter variations.</p>`,
+    },
+    {
+      target: 'header',
+      title: 'Share Your Work',
+      pos: 'below',
+      html: `<p>Click <strong>Share</strong> to copy a URL encoding your script and parameter settings. Anyone with the link sees your exact setup.</p>
+        <p>Everything runs locally in your browser — no server, no account needed.</p>
+        <p style="color:var(--green);text-align:center;margin-top:6px;">You're ready to go. Pick an example and hit Run!</p>`,
+    },
+  ];
+
+  const overlay = document.getElementById('wt-overlay');
+  const backdrop = document.getElementById('wt-backdrop');
+  const card = document.getElementById('wt-card');
+  const titleNum = card.querySelector('.wt-num');
+  const titleText = card.querySelector('.wt-title-text');
+  const textEl = card.querySelector('.wt-text');
+  const dotsEl = card.querySelector('.wt-dots');
+  const prevBtn = document.getElementById('wt-prev');
+  const nextBtn = document.getElementById('wt-next');
+  let cur = 0;
+  let prevTarget = null;
+
+  // Build dots
+  dotsEl.innerHTML = STEPS.map(() => '<div class="wt-dot"></div>').join('');
+  const dots = dotsEl.querySelectorAll('.wt-dot');
+
+  function positionCard(step) {
+    card.classList.remove('wt-centered');
+    if (!step.target) {
+      card.classList.add('wt-centered');
+      return;
+    }
+    const el = document.querySelector(step.target);
+    if (!el) { card.classList.add('wt-centered'); return; }
+    const r = el.getBoundingClientRect();
+    const cw = card.offsetWidth, ch = card.offsetHeight;
+    const gap = 12;
+    let top, left;
+
+    if (step.pos === 'right') {
+      left = r.right + gap;
+      top = r.top + (r.height - ch) / 2;
+    } else if (step.pos === 'left') {
+      left = r.left - cw - gap;
+      top = r.top + (r.height - ch) / 2;
+    } else if (step.pos === 'below') {
+      left = r.left + (r.width - cw) / 2;
+      top = r.bottom + gap;
+    } else {
+      left = r.right + gap;
+      top = r.top;
+    }
+
+    // Clamp to viewport
+    top = Math.max(8, Math.min(window.innerHeight - ch - 8, top));
+    left = Math.max(8, Math.min(window.innerWidth - cw - 8, left));
+    card.style.top = top + 'px';
+    card.style.left = left + 'px';
+  }
+
+  function updateBackdrop(step) {
+    if (!step.target) {
+      backdrop.style.background = 'rgba(12,12,16,0.85)';
+      backdrop.style.clipPath = '';
+      return;
+    }
+    const el = document.querySelector(step.target);
+    if (!el) { backdrop.style.background = 'rgba(12,12,16,0.85)'; backdrop.style.clipPath = ''; return; }
+    const r = el.getBoundingClientRect();
+    const pad = 4;
+    // Inset rectangle cutout via polygon
+    const x1 = r.left - pad, y1 = r.top - pad;
+    const x2 = r.right + pad, y2 = r.bottom + pad;
+    const W = window.innerWidth, H = window.innerHeight;
+    backdrop.style.background = 'rgba(12,12,16,0.72)';
+    backdrop.style.clipPath = `polygon(
+      0% 0%, 0% 100%, ${x1}px 100%, ${x1}px ${y1}px,
+      ${x2}px ${y1}px, ${x2}px ${y2}px, ${x1}px ${y2}px,
+      ${x1}px 100%, 100% 100%, 100% 0%)`;
+  }
+
+  function showStep(n) {
+    // Remove spotlight from previous target
+    if (prevTarget) { prevTarget.classList.remove('wt-spotlight'); prevTarget = null; }
+
+    cur = n;
+    const step = STEPS[n];
+    titleNum.textContent = n + 1;
+    titleText.textContent = step.title;
+    textEl.innerHTML = step.html;
+    dots.forEach((d, i) => d.classList.toggle('active', i === n));
+    prevBtn.style.visibility = n === 0 ? 'hidden' : 'visible';
+    nextBtn.textContent = n === STEPS.length - 1 ? 'Get Started' : 'Next';
+
+    // Add spotlight to target
+    if (step.target) {
+      const el = document.querySelector(step.target);
+      if (el) { el.classList.add('wt-spotlight'); prevTarget = el; }
+    }
+
+    updateBackdrop(step);
+    positionCard(step);
+  }
+
+  function close() {
+    if (prevTarget) { prevTarget.classList.remove('wt-spotlight'); prevTarget = null; }
+    overlay.classList.add('hidden');
+  }
+
+  nextBtn.addEventListener('click', () => {
+    if (cur < STEPS.length - 1) showStep(cur + 1);
+    else close();
+  });
+  prevBtn.addEventListener('click', () => { if (cur > 0) showStep(cur - 1); });
+  backdrop.addEventListener('click', close);
+  document.addEventListener('keydown', (e) => {
+    if (overlay.classList.contains('hidden')) return;
+    if (e.key === 'Escape') close();
+    if (e.key === 'ArrowRight' || e.key === 'Enter') nextBtn.click();
+    if (e.key === 'ArrowLeft') prevBtn.click();
+  });
+  window.addEventListener('resize', () => {
+    if (overlay.classList.contains('hidden')) return;
+    updateBackdrop(STEPS[cur]);
+    positionCard(STEPS[cur]);
+  });
+
+  showStep(0);
 }
 
 // ---- Init ----

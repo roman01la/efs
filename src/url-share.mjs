@@ -106,29 +106,49 @@ export async function deflateDecompress(compressed) {
 // ---- Public API ----
 
 /**
- * Encode an XML config string into a URL fragment value.
- * Returns the fragment string: `config=<base64url(deflate(xml))>`
+ * Encode a config (script + optional param overrides) into a URL fragment value.
+ * Returns the fragment string: `config=<base64url(deflate(payload))>`
+ * If paramOverrides is a non-empty object, payload is JSON `{ s, p }`;
+ * otherwise payload is the raw script string (backward compatible).
  * @param {string} xmlString
+ * @param {Object|null} [paramOverrides]
  * @returns {Promise<string>}
  */
-export async function encodeConfig(xmlString) {
-  const compressed = await deflateCompress(xmlString);
+export async function encodeConfig(xmlString, paramOverrides) {
+  let payload;
+  if (paramOverrides && typeof paramOverrides === 'object' && Object.keys(paramOverrides).length > 0) {
+    payload = JSON.stringify({ s: xmlString, p: paramOverrides });
+  } else {
+    payload = xmlString;
+  }
+  const compressed = await deflateCompress(payload);
   const encoded = bytesToBase64url(compressed);
   return `config=${encoded}`;
 }
 
 /**
- * Decode an XML config from a URL fragment string.
- * Expects `config=<base64url(deflate(xml))>` format.
+ * Decode a config from a URL fragment string.
+ * Expects `config=<base64url(deflate(payload))>` format.
+ * Returns `{ script, paramOverrides }` where paramOverrides is an object or null.
+ * Backward compatible: if payload is not JSON with `.s`, treats it as raw script.
  * @param {string} fragment - the hash fragment (without leading #)
- * @returns {Promise<string>} XML string
+ * @returns {Promise<{script: string, paramOverrides: Object|null}>}
  */
 export async function decodeConfig(fragment) {
   const params = new URLSearchParams(fragment);
   const encoded = params.get('config');
   if (!encoded) throw new Error('No config= found in fragment');
   const compressed = base64urlToBytes(encoded);
-  return deflateDecompress(compressed);
+  const text = await deflateDecompress(compressed);
+  try {
+    const obj = JSON.parse(text);
+    if (obj && typeof obj.s === 'string') {
+      return { script: obj.s, paramOverrides: obj.p || null };
+    }
+  } catch (_) {
+    // Not JSON — old format (raw script text)
+  }
+  return { script: text, paramOverrides: null };
 }
 
 // ---- IndexedDB helpers ----
@@ -207,10 +227,11 @@ function generateUUID() {
  * Auto-select sharing method: URL fragment for small configs, IndexedDB for large.
  * Returns the URL hash string to use (without leading #).
  * @param {string} xmlString
+ * @param {Object|null} [paramOverrides] - optional param overrides to encode
  * @returns {Promise<string>} fragment string (e.g. "config=..." or "id=...")
  */
-export async function shareConfig(xmlString) {
-  const fragment = await encodeConfig(xmlString);
+export async function shareConfig(xmlString, paramOverrides) {
+  const fragment = await encodeConfig(xmlString, paramOverrides);
   if (fragment.length < URL_FRAGMENT_LIMIT) {
     return fragment;
   }
@@ -223,7 +244,7 @@ export async function shareConfig(xmlString) {
 /**
  * Load a shared config from the current URL hash.
  * Handles both `#config=...` and `#id=...` formats.
- * @returns {Promise<string|null>} XML string or null if no config in URL
+ * @returns {Promise<{script: string, paramOverrides: Object|null}|null>}
  */
 export async function loadSharedConfig() {
   const hash = typeof location !== 'undefined' ? location.hash : '';
@@ -238,7 +259,8 @@ export async function loadSharedConfig() {
 
   if (params.has('id')) {
     const id = params.get('id');
-    return loadFromIndexedDB(id);
+    const xml = await loadFromIndexedDB(id);
+    return xml ? { script: xml, paramOverrides: null } : null;
   }
 
   return null;
